@@ -123,41 +123,53 @@ A daemon-first multi-agent development system where:
 
 ```
 Linear (source of truth)
-  Issues: Todo -> In Progress -> Done / Blocked / Triage
+  Issues: Todo -> In Progress -> In Review -> Done / Blocked / Triage
   Blocking relationships encode dependency graph
   Repository field routes issues to correct worktree
 
 dispatchd (always-running daemon)
-  Polls Linear every 5s for ready issues
-  Manages worker lifecycle: spawn, monitor, triage
+  Polls Linear adaptively (5s eager / 30s idle / immediate on notify)
+  Manages worker lifecycle: spawn, monitor, review, triage
+  Runs post-worker review pipeline (test gate + AI review)
+  Merges completed issue branches into chunk integration branches
+  Auto-creates draft PRs on chunk completion
   Serves state over Unix socket (~/.dispatch/dispatch.sock)
   Writes activity log (~/.dispatch/activity.log)
 
 Architect (on-demand, for multi-chunk work)
   Claude Code session launched by Mayor
-  Uses Agent Teams: one Planner teammate per chunk
-  Planners communicate peer-to-peer on shared interfaces
-  Commits issues to Linear chunk-by-chunk for crash resilience
+  Decomposes PRD into chunks, spawns Planners (sequential or Agent Teams)
+  Collects oppositional design review feedback across chunks
+  Presents consolidated review to user for approval
+  Commits issues to Linear chunk-by-chunk after approval
   Exits when all chunks have issues in Linear
 
 Planner (Agent Team teammate, or standalone for single-chunk)
-  Reads repo code, writes Linear issues with blocking relationships
-  In team context: coordinates directly with sibling Planners
+  Reads repo code, writes plan doc (.dispatch/plans/<chunk>.md)
+  Spawns oppositional design review (simplicity + completeness)
+  Writes Linear issues only after user approves plan
   Exits after writing issues
 
-Workers (ephemeral Claude Code sessions)
+Workers (ephemeral Claude Code sessions, Sonnet default)
   One per Linear issue, in a git worktree
   Hosted in a managed tmux session (invisible to user)
+  Uses superpowers plugin (TDD, verification, systematic debugging)
   Exit on completion or explicit block
+
+Review pipeline (per worker completion)
+  Test gate: repo test suite must pass
+  AI review agent (Sonnet): spec compliance, scope, defects
+  Critical issues reject closure; non-critical noted on issue
 
 Mayor (on-demand conversational interface)
   Routes to Architect (multi-chunk) or Planner (single-chunk)
   Handles blocked issues, re-planning, judgment calls
   Stateless between invocations
 
-Triage agent (spawned by daemon on unclean exit)
+Triage agent (spawned by daemon on unclean exit, Sonnet)
   Assesses worktree state, attempts minimal recovery
   Flags in Linear if non-recoverable
+  Circuit breaker: 3 triage cycles → Blocked unconditionally
 
 dispatch CLI  -- connects to daemon socket
 dispatch tui  -- connects to daemon socket, freely openable/closable
@@ -165,14 +177,16 @@ dispatch tui  -- connects to daemon socket, freely openable/closable
 
 ### 3.2 Agents
 
-| Agent | Runs on | Lifecycle | Spawned by | Primary tools |
-|-------|---------|-----------|------------|---------------|
-| Mayor | Host (any terminal) | On-demand, stateless | User (`disp mayor`) | Linear MCP, dispatch CLI |
-| Architect | Host (tmux session) | Per planning session | Mayor or `dispatch plan --prd` | Agent Teams, Linear MCP, file read |
-| Planner (teammate) | Host (Agent Team) | Per chunk, within Architect session | Architect via Agent Teams | Linear MCP, file read, peer messaging |
-| Planner (standalone) | Host (tmux session) | Per chunk, single-chunk work | Mayor or `dispatch plan --chunk` | Linear MCP, file read |
-| Worker | Host (tmux session via daemon) | Per Linear issue | dispatchd | Linear MCP, dispatch CLI, git |
-| Triage agent | Host (tmux session via daemon) | Per failed issue | dispatchd | Linear MCP, git, dispatch CLI |
+| Agent | Runs on | Model | Lifecycle | Spawned by | Primary tools |
+|-------|---------|-------|-----------|------------|---------------|
+| Mayor | Host (any terminal) | Opus | On-demand, stateless | User (`dispatch mayor`) | Linear MCP, dispatch CLI |
+| Architect | Host (tmux session) | Opus | Per planning session | Mayor or `dispatch plan --prd` | Agent Teams, Linear MCP, file read |
+| Planner (teammate) | Host (Agent Team) | Opus (Agent Teams constraint) | Per chunk, within Architect session | Architect via Agent Teams | Linear MCP, file read, peer messaging |
+| Planner (standalone) | Host (tmux session) | Opus | Per chunk, single-chunk work | Mayor or `dispatch plan --chunk` | Linear MCP, file read |
+| Design Reviewer | Host (subagent) | Sonnet | Per plan review (2 per plan) | Planner | file read |
+| Worker | Host (tmux session via daemon) | Sonnet (default) | Per Linear issue | dispatchd | Linear MCP, dispatch CLI, git, superpowers |
+| Review agent | Host (subagent via daemon) | Sonnet | Per worker completion | dispatchd | git diff, issue read |
+| Triage agent | Host (tmux session via daemon) | Sonnet | Per failed issue | dispatchd | Linear MCP, git, dispatch CLI |
 
 ### 3.3 Planning Flow: Single-Chunk vs. Multi-Chunk
 
@@ -184,7 +198,11 @@ User -> Mayor: "fix the auth module"
 Mayor: asks <=3 clarifying questions
 Mayor: dispatch plan --chunk "auth-fix" "<brief>"
   -> spawns standalone Planner session
-  -> Planner reads code, writes Linear issues
+  -> Planner reads code, writes plan doc to .dispatch/plans/<chunk-name>.md
+  -> Planner spawns oppositional design review (simplicity vs. completeness)
+  -> Review feedback presented to user in Mayor session
+  -> User approves (with optional edits) or requests changes
+  -> Planner writes Linear issues from approved plan
   -> Planner exits
 dispatchd: detects new ready issues, spawns workers
 ```
@@ -194,19 +212,42 @@ dispatchd: detects new ready issues, spawns workers
 User -> Mayor: attaches PRD
 Mayor: determines multi-chunk scope
 Mayor: dispatch plan --prd "<brief>"
-  -> spawns Architect session (CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1)
+  -> spawns Architect session
   -> Architect reads PRD, decomposes into N chunks
-  -> Architect establishes shared interface boundaries in conversation
-  -> Architect spawns Agent Team: one Planner teammate per chunk
-  -> Planners read their chunk's code in parallel
-  -> Planners message each other directly to resolve interface conflicts
-  -> Each Planner writes its chunk's Linear issues
+  -> Architect establishes shared interface boundaries
+  -> Architect spawns Planners (sequential or Agent Teams)
+  -> Each Planner reads its chunk's code, writes plan doc
+  -> Each Planner spawns oppositional design review
+  -> Architect collects review feedback across all chunks
+  -> Review feedback presented to user (via Mayor or TUI)
+  -> User approves (with optional edits) or requests changes
+  -> Planners write Linear issues from approved plans
   -> Architect does coherence review, wires cross-chunk blocking relationships
   -> Architect exits
 dispatchd: detects new ready issues, spawns workers in dependency order
 ```
 
-### 3.4 Key Invariants
+### 3.4 Branch Integration Strategy
+
+Workers operate in isolated worktrees, but dependent issues need access to their predecessors' changes. Dispatch uses **integration branches** scoped per chunk to solve this.
+
+**How it works:**
+
+1. When a Planner creates issues for a chunk (e.g. "auth-fix"), the daemon creates an integration branch: `dispatch/chunk/auth-fix`, forked from main.
+2. Issue 1 (no blockers) → worktree branches from `dispatch/chunk/auth-fix`. Worker commits to `dispatch/issue-1`, closes.
+3. Daemon merges `dispatch/issue-1` into `dispatch/chunk/auth-fix` (fast-forward when possible, merge commit otherwise).
+4. Issue 2 (blocked by issue 1) becomes ready → worktree branches from `dispatch/chunk/auth-fix` (which now contains issue 1's work).
+5. Repeat until all issues in the chunk are done. `dispatch/chunk/auth-fix` contains the complete chunk's work.
+
+**Merge conflicts:** If merging an issue branch into the chunk integration branch conflicts, the daemon transitions the issue to Triage with diagnosis "merge conflict with integration branch". The triage agent attempts a simple resolution; if it can't, the issue goes to Blocked for human intervention.
+
+**Concurrent workers within a chunk:** When two issues in the same chunk have no dependency between them, the daemon may run them in parallel. Both branch from the same integration branch snapshot. When both complete, the first merge succeeds, but the second may conflict — even though the Planner declared the issues independent. The Planner cannot perfectly predict file-level conflicts. The daemon handles this with a **merge queue**: within a chunk, only one merge into the integration branch happens at a time. If the second worker's branch conflicts after the first merge lands, it goes through the normal triage flow (merge conflict diagnosis). To reduce the frequency of this: the Planner should flag when two independent issues touch overlapping files, and the daemon should prefer serial execution for issues within the same chunk that lack explicit dependency but share file paths (detectable from the issue description's "files touched" field).
+
+**Cross-chunk dependencies:** When an issue in chunk B depends on an issue in chunk A, the daemon merges chunk A's integration branch into chunk B's integration branch before spawning the dependent worker. If chunk A is not yet complete, only the specific dependency issue's branch is merged.
+
+**PR flow:** When all issues in a chunk close, the chunk integration branch contains the complete, reviewed, tested work. The daemon automatically creates a draft PR from the integration branch (default behavior; disable with `auto_pr = false` in repo config). The PR description includes links to all issues, the plan doc, and any review feedback flagged during worker reviews. `dispatch pr <chunk-name>` can also be used to manually create a PR at any time.
+
+### 3.5 Key Invariants
 
 1. **Linear is the only task ledger.** Workers never write to progress files; they call the Linear API.
 2. **The daemon owns worker lifecycle.** Nothing spawns or kills workers except `dispatchd` (or explicit CLI commands).
@@ -215,8 +256,9 @@ dispatchd: detects new ready issues, spawns workers in dependency order
 5. **Closing the TUI changes nothing.** The daemon and all workers continue running.
 6. **All state reconstructable from Linear.** Kill the daemon at any time; restart and it re-derives state from Linear.
 7. **The Architect is planning-only.** It never writes code, never interacts with worktrees, and exits when issues are in Linear.
+8. **Integration branches are the unit of merge.** Individual issue branches are never merged directly to main; they merge into their chunk's integration branch, which becomes the PR.
 
-### 3.5 Failure Handling
+### 3.6 Failure Handling
 
 #### Unclean worker exit
 
@@ -238,9 +280,105 @@ Worker calls `dispatch block <issue-id> "<reason>"` and exits with code 0. Issue
 - **TUI** — blocked/triage issues shown with inline reason; investigate and reopen available without leaving TUI
 - **Mayor** — reads Linear state, can rewrite the issue, re-plan the chunk, or spawn an Architect for full re-decomposition
 
+#### Triage circuit breaker
+
+The daemon tracks a `triage_count` per issue (stored as a Linear custom field to survive daemon restarts). Each time triage recovers an issue (Triage → Todo), the counter increments. If `triage_count >= 3`, the daemon skips auto-recovery entirely — the issue transitions directly to Blocked with reason "max triage attempts exceeded (3); requires human intervention". `dispatch reopen` resets the counter, since a human explicitly choosing to retry is a different signal than automated recovery looping.
+
 #### Architect session failure
 
 If an Architect session dies mid-planning, any issues already committed to Linear remain (Architect commits chunk-by-chunk). Unfinished chunks have no issues and the daemon ignores them. The user reruns `dispatch plan --prd`; the Architect detects which chunks already have issues and skips them.
+
+### 3.7 Review Process
+
+Review happens at three stages: before execution (plan review), during execution (per-worker), and after execution (chunk completion). Each stage catches different classes of problems.
+
+#### Stage 1: Oppositional Design Review (before execution)
+
+After a Planner writes a plan doc but **before** any Linear issues are created, the plan undergoes an oppositional design review. Two review subagents are spawned concurrently, each reading the same plan doc:
+
+- **Simplicity Reviewer:** Argues for reducing scope. Looks for: over-engineering, unnecessary abstractions, features that could be deferred, issues that could be combined, dependencies that could be eliminated. Its bias is "what can we cut?"
+- **Completeness Reviewer:** Argues for gaps. Looks for: missing error handling, untested edge cases, unaddressed integration points, implicit assumptions, missing migration steps. Its bias is "what did we miss?"
+
+Each reviewer produces a short structured critique (max ~500 words): what they'd change and why. The two critiques are presented to the user together — the tension between them surfaces the real design decisions. The user then:
+- Approves the plan as-is
+- Provides specific feedback to incorporate
+- Asks the Planner to revise and re-review
+
+Only after approval does the Planner convert the plan into Linear issues. This prevents the most expensive failure mode: executing a bad plan across many workers.
+
+**Approval interaction model:** The Planner is a Claude Code session running in a tmux session. After the design review completes, the Planner writes the review summary (both critiques plus its own synthesis) to the plan doc and then **prompts the user for input** in its own session. The user can interact with the Planner session directly (via TUI tab attach, or `tmux attach` to the Planner session). The Planner blocks on user input — it does not proceed until the user explicitly approves, requests changes, or cancels.
+
+For the multi-chunk case, the Architect collects all Planner review summaries and presents them together when the user interacts with the Architect session. The user approves chunk-by-chunk or all-at-once.
+
+If a Planner session is left waiting for approval for more than 1 hour, the daemon emits a notification (socket + activity log) reminding the user that a plan is awaiting review. The Planner does not time out — it waits indefinitely, since approval is a human decision.
+
+Plan docs are saved to `.dispatch/plans/<chunk-name>.md` in the repo and committed. They serve as durable context for why decisions were made — workers can reference them, and future Planners can read past plans.
+
+#### Stage 2: Post-Worker Review (per issue)
+
+When a worker calls `dispatch close`, two things happen before the issue transitions to Done:
+
+**A) Automated test gate.** The daemon runs the repo's test command (`test_cmd` from config) against the worker's branch. If tests fail, the closure is rejected — the worker's code is not merged into the integration branch. This is a hard gate: no code merges without passing tests.
+
+For repos with slow test suites, two config options control the tradeoff between speed and safety:
+
+```toml
+[worker]
+test_cmd = "npm test"                   # full suite (required)
+test_cmd_fast = "npm test -- --related" # fast subset (optional, used on close)
+test_cmd_full_on_merge = true           # run full suite before integration merge (default: true)
+```
+
+When `test_cmd_fast` is set, `dispatch close` runs the fast test command (e.g., tests related to changed files). The full suite runs once before the issue branch merges into the integration branch. This keeps the worker feedback loop tight (~30s for targeted tests) while still gating the integration branch on the full suite. If `test_cmd_fast` is not set, `test_cmd` is used for both.
+
+**B) AI code review.** The daemon spawns a short-lived review agent (on Sonnet) that reads:
+- The issue description (what was requested)
+- The git diff (what was implemented)
+- The test results
+
+The review agent checks for:
+- **Spec compliance:** does the diff match what the issue asked for?
+- **Scope creep:** did the worker touch files or make changes beyond the issue's scope?
+- **Obvious defects:** broken error handling, missing null checks, hardcoded values, security issues
+
+If the review agent finds critical issues, the worker's closure is rejected — the issue stays In Progress and the review feedback is appended to the issue description. The worker (if still running) or a fresh worker picks up the feedback and addresses it. Non-critical feedback is noted on the issue but does not block closure.
+
+The review agent runs on Sonnet to keep costs low (~$0.20-0.40 per review). At the default issue sizing (<=8 files, <=200 lines), the diff is small enough for a fast, focused review.
+
+#### Stage 3: Chunk Completion (PR)
+
+When all issues in a chunk are Done and merged into the integration branch, the daemon automatically creates a draft PR from the integration branch (default behavior; can be disabled with `auto_pr = false` in config). The PR description includes:
+- Summary of all issues in the chunk with links
+- The original plan doc
+- Aggregate test results
+- Any review feedback that was flagged during Stage 2
+
+This is the human's opportunity for holistic review of the complete chunk before it merges to main.
+
+### 3.8 Superpowers Integration
+
+Dispatch integrates [superpowers](https://github.com/obra/superpowers) as the SWE practices layer for worker sessions. Superpowers enforces test-driven development, systematic debugging, and verification-before-completion through composable skills that are loaded into Claude Code sessions.
+
+**What workers get from superpowers:**
+
+- **Test-driven development:** Workers write failing tests before implementation. The TDD skill enforces a strict red-green-refactor cycle — code written before tests is rejected.
+- **Verification before completion:** Workers must provide fresh evidence (test output, not assertions) before calling `dispatch close`. No "should work" or "probably passes."
+- **Systematic debugging:** When a worker hits a problem, it follows a structured investigation cycle rather than guessing at fixes.
+
+**What Dispatch handles (not superpowers):**
+
+- Task decomposition and planning (Architect/Planner)
+- Worker lifecycle and coordination (daemon)
+- State management (Linear)
+- Code review (dispatch review agents, not superpowers' code review skill — to avoid conflicts with the dispatch review pipeline)
+
+**Configuration:** Workers are launched with superpowers installed as a Claude Code plugin. The worker CLAUDE.md references the relevant superpowers skills (TDD, verification, debugging) but not skills that conflict with Dispatch's own coordination (planning, code review, git worktrees). Per-repo config can disable superpowers for repos where TDD is not appropriate:
+
+```toml
+[worker]
+superpowers = true          # default: true
+superpowers_skills = ["test-driven-development", "verification-before-completion", "systematic-debugging"]
+```
 
 ---
 
@@ -258,12 +396,20 @@ A single long-running Go binary. Manages all worker lifecycle and serves the con
 - Reconcile: mark workers dead if session gone, triage if they were In Progress
 - Begin main loop
 
-**Main loop (every 5 seconds):**
+**Main loop (adaptive polling):**
+
+The daemon polls Linear on an adaptive interval:
+- **Eager mode (5s):** Active when any issues are In Progress, in Triage, or when a planning session has run in the last 60 seconds. This is the common case during active work.
+- **Idle mode (30s):** Active when no issues are in flight. Reduces unnecessary API calls during quiet periods.
+- **Immediate poll:** Workers and planners call `dispatch notify` after writing to Linear (closing, blocking, creating issues). This triggers an immediate poll cycle via the daemon socket, giving sub-second responsiveness for the transitions that matter most.
+
+Each poll cycle:
 1. Query Linear: issues in Todo state with no open blockers, up to parallelism limit
-2. For each ready issue not already running: create worktree, spawn worker session, transition to In Progress
-3. For each running issue: check tmux session liveness
-4. For any dead session: trigger triage flow
-5. Emit state snapshot to all connected socket clients
+2. For each ready issue not already running: create worktree from chunk integration branch, spawn worker session, transition to In Progress
+3. For each completed issue: merge issue branch into chunk integration branch
+4. For each running issue: check tmux session liveness
+5. For any dead session: trigger triage flow (subject to circuit breaker)
+6. Emit state snapshot to all connected socket clients
 
 **Socket protocol:** JSON over Unix socket. Daemon pushes state snapshots on every monitor tick. Clients send commands (stop, pause, resume, investigate, reopen). Request/response for commands, streaming for state updates. Version field in protocol; TUI shows warning on mismatch.
 
@@ -279,8 +425,11 @@ A Claude Code session launched for multi-chunk planning. Uses Claude Code Agent 
 - Establish shared interface boundaries before spawning Planners: types, API contracts, naming conventions, shared modules. Write a brief interface spec in the conversation.
 - Spawn an Agent Team: one teammate per chunk. Each teammate receives: the chunk brief, the interface spec, and instructions to message sibling Planners directly if they encounter a conflict or shared concern.
 - Monitor Planner progress via team task list. Nudge stuck Planners.
-- Commit each chunk's issues to Linear as the Planner for that chunk finishes — don't batch all at once.
-- When all Planners have written their issues: do a coherence review — check that cross-chunk blocking relationships are correctly wired, no two chunks are touching the same issue, shared interfaces match.
+- When all Planners have written their plan docs: collect oppositional review feedback across all chunks.
+- Present consolidated review feedback to user. Each chunk's simplicity and completeness critiques are shown together, plus any cross-chunk concerns the Architect identifies.
+- Wait for user approval before any issues are written to Linear.
+- On approval: Planners commit their plan docs and create Linear issues. Architect wires cross-chunk blocking relationships.
+- Do a coherence review — check that cross-chunk blocking relationships are correctly wired, no two chunks are touching the same files, shared interfaces match.
 - Fix any coherence issues by messaging the relevant Planner or making direct Linear API corrections.
 - Exit when all issues are committed and coherence review passes.
 
@@ -291,6 +440,17 @@ A Claude Code session launched for multi-chunk planning. Uses Claude Code Agent 
 - No session resumption: if the Architect session dies, planning must restart from where it left off. Chunk-by-chunk Linear commits reduce the blast radius.
 - Per-role model selection (Opus for Architect, Sonnet for Planners) is not yet supported but is a community feature request — adopt when available to reduce planning cost significantly.
 
+**Sequential fallback (no Agent Teams):**
+
+If Agent Teams is unavailable, unstable, or too expensive, the Architect falls back to sequential standalone Planners:
+
+1. Architect decomposes PRD into N chunks and writes a shared interface spec to a file in the repo (`.dispatch/interface-spec.md`).
+2. For each chunk sequentially: Architect calls `dispatch plan --chunk "<brief>"` with a reference to the interface spec.
+3. Each standalone Planner reads the interface spec, plans its chunk, writes Linear issues.
+4. After all Planners finish, Architect reads all created issues from Linear and does the coherence review / cross-chunk blocking wiring.
+
+This loses parallelism and direct Planner-to-Planner communication but preserves the decomposition and coherence review. The interface spec file substitutes for live peer messaging. Build this first (M4a), then upgrade to Agent Teams (M4b) when confidence in the feature is high.
+
 ### 4.3 Planner Agent (standalone)
 
 Used for single-chunk work spawned directly by the Mayor. Identical behavior to a Planner teammate but runs as a standalone Claude Code session.
@@ -299,10 +459,18 @@ Used for single-chunk work spawned directly by the Mayor. Identical behavior to 
 
 - Read the chunk brief.
 - Explore relevant repo code: `find`, `grep`, read files.
-- Propose a plan as a list of issues with descriptions and blocking relationships. Iterate with user if interactive.
-- Issue sizing: each issue touches <=8 files, <=200 lines of changes. Split larger tasks.
-- Write structured issue descriptions: exact files, approach, test commands to verify.
-- Create all issues in Linear via MCP. Wire dependencies in a second pass. Exit.
+- **Scope check:** if during code exploration you discover the work requires multiple independent workstreams (e.g., changes across unrelated modules with no shared interface), call `dispatch escalate --to-architect "<what you found>"` instead of writing a plan. Do not try to plan multi-chunk work as a single chunk.
+- Write a plan doc to `.dispatch/plans/<chunk-name>.md`. The plan contains:
+  - Summary of the chunk's goal and approach
+  - List of proposed issues with descriptions, files touched, and blocking relationships
+  - Issue sizing: each issue touches <=8 files, <=200 lines of changes. Split larger tasks.
+  - Test strategy per issue
+- Spawn oppositional design review: two subagents reading the plan doc concurrently.
+  - Simplicity reviewer: what can be cut, combined, or deferred?
+  - Completeness reviewer: what's missing, implicit, or under-specified?
+- Present review feedback to user (via Mayor session or directly if interactive). Wait for approval.
+- On approval: create all issues in Linear via MCP. Wire dependencies in a second pass. Call `dispatch notify` after creating issues. Commit the plan doc. Exit.
+- On revision request: update plan doc, re-run review if changes are substantial, re-present. Exit only after approval.
 
 ### 4.4 Mayor Agent
 
@@ -312,6 +480,7 @@ A Claude Code session launched with `disp mayor`. Routes work to Architect or Pl
 - **Single-chunk:** a focused task, one area of code. Use `dispatch plan --chunk`.
 - **Multi-chunk:** a PRD, large feature touching multiple independent areas, cross-cutting refactor. Use `dispatch plan --prd`.
 - When in doubt: ask one clarifying question about whether there are multiple independent workstreams.
+- **Misrouting is recoverable.** If a standalone Planner discovers the scope is larger than expected, it calls `dispatch escalate --to-architect "<findings>"` instead of writing issues. This kills the Planner session and spawns an Architect with the original brief plus the Planner's findings. The cost of one aborted Planner session is low; the cost of 30 issues in the wrong shape is high.
 
 **CLAUDE.md functional spec:**
 
@@ -326,19 +495,33 @@ A Claude Code session launched with `disp mayor`. Routes work to Architect or Pl
 A Claude Code process running in a managed tmux session, in a git worktree for its issue's branch.
 
 **Lifecycle:**
-1. Daemon creates git worktree: `git worktree add ~/.dispatch/worktrees/<issue-id> -b dispatch/<issue-id>`
+1. Daemon creates git worktree from the chunk integration branch: `git worktree add ~/.dispatch/worktrees/<issue-id> -b dispatch/<issue-id> dispatch/chunk/<chunk-name>`
 2. Daemon creates tmux session: `dispatch-<issue-id>`
-3. Daemon starts Claude Code with worker CLAUDE.md and issue ID as initial prompt
-4. Worker reads its Linear issue, implements, commits, closes via `dispatch close <issue-id>`, exits 0
-5. Daemon detects exit, tears down worktree, logs activity
+3. Daemon installs superpowers plugin (if enabled) and starts Claude Code with worker CLAUDE.md and issue ID as initial prompt
+4. Worker reads its Linear issue, implements with TDD, commits, calls `dispatch close <issue-id>`
+5. `dispatch close` is a **blocking call**. The worker process remains alive while the daemon runs the review pipeline. The worker waits for the result.
+6. Daemon runs test gate (repo test_cmd against worker branch). On failure: daemon rejects close, appends test output to issue, returns rejection to worker. Worker is expected to fix and re-close.
+7. Daemon spawns review agent (Sonnet). On critical issues: daemon rejects close, appends review feedback to issue, returns rejection to worker. Worker reads feedback and addresses it.
+8. On pass: issue transitions to Done, daemon merges issue branch into chunk integration branch, tears down worktree, logs activity.
+9. **Worker timeout on close:** If the review pipeline takes longer than 5 minutes (configurable), `dispatch close` returns a timeout error. The issue transitions to In Review and the worker exits. On daemon's next cycle, if the review has completed, the issue transitions to Done or back to In Progress (with feedback). This prevents workers from hanging indefinitely on slow test suites.
+8. When all chunk issues are Done: daemon creates draft PR from integration branch, emits notification
 
 **Worker CLAUDE.md functional spec:**
 
-- On start: call `dispatch read <issue-id>`. Read any context from closed blocking issues.
-- Implement the issue. Run tests as specified in the issue or repo config.
-- When done: commit with message referencing the issue ID. Call `dispatch close <issue-id>`. Exit 0.
-- When blocked: call `dispatch block <issue-id> "<reason including what was tried and what decision is needed>"`. Exit 0.
+- On start: call `dispatch read <issue-id>`. Read the plan doc (`.dispatch/plans/<chunk-name>.md`) for broader context. Read any context from closed blocking issues.
+- Follow superpowers TDD skill: write failing tests first, then implement, then verify tests pass. Do not write implementation code before tests.
+- Follow superpowers verification skill: before calling close, provide fresh test output as evidence. Never claim "should work" without proof.
+- When done: commit with message referencing the issue ID. Call `dispatch close <issue-id>` — this is a **blocking call** that waits for the test gate + AI review to complete. If close returns success, exit 0.
+- If `dispatch close` is rejected (test failure or critical review feedback): the rejection message includes the specific feedback. Read it, fix the issue, commit, and call `dispatch close` again. Do not exit until close succeeds or you determine the issue is unresolvable.
+- If `dispatch close` times out: exit 0. The daemon will complete the review asynchronously and either transition the issue to Done or back to In Progress (spawning a fresh worker to address feedback).
+- When blocked: call `dispatch block <issue-id> "<reason including what was tried and what decision is needed>"` (this also notifies the daemon). Exit 0.
 - Never manage progress files. Never write to Linear directly (use dispatch CLI). Never spawn subagents for coordination.
+
+**Worker guardrails:**
+
+- **Session timeout:** The daemon kills workers that have been running longer than `worker_timeout` (default: 30 minutes, configurable). On timeout, the issue transitions to Triage. The triage agent assesses whether partial work is salvageable. Rationale: well-scoped issues (<=8 files, <=200 lines) should complete in 10-20 minutes on Sonnet. A 30-minute worker is likely stuck in a loop.
+- **Max close attempts:** If a worker calls `dispatch close` and is rejected 3 times (test failure or review rejection), the daemon force-transitions the issue to Blocked with reason "max close attempts exceeded". This prevents workers from burning tokens in an infinite fix-and-retry loop.
+- **Opus escalation:** If `opus_escalation = true` and a worker has been triaged twice (triage_count >= 2), the daemon respawns with `model = "opus"` before going to human-blocked. This is a single retry with a more capable model, not an open-ended escalation.
 
 ### 4.6 Triage Agent
 
@@ -354,7 +537,9 @@ Short-lived Claude Code session spawned by the daemon on unclean worker exit. Re
 
 ### 4.7 Linear Structure
 
-One Linear workspace shared across all repos. Issues carry a `Repository` field that the daemon uses to route to the correct worktree root.
+All Dispatch work lives in a **single Linear project** shared across all repos. Issues carry a `Repository` custom field that the daemon uses to route to the correct worktree root. Use Linear views (filtered by Repository) for per-repo visibility.
+
+**Why one project, not per-repo projects:** Cross-repo blocking relationships work natively within a single project — no cross-project relation wiring. The daemon polls one project instead of N. The Architect can plan multi-repo work without coordinating across projects. The tradeoff is that Dispatch issues mix with any non-Dispatch work in the same project; if that becomes a problem, consider a dedicated "Dispatch" project or splitting to per-repo projects. Per-repo projects would require the daemon to poll multiple projects, and cross-repo dependencies would use Linear's cross-project relations (supported but less ergonomic).
 
 **Issue schema:**
 
@@ -362,22 +547,26 @@ One Linear workspace shared across all repos. Issues carry a `Repository` field 
 |-------|------|---------|
 | Title | string | Short description of the task |
 | Description | text | Detailed implementation instructions for the worker |
-| Status | enum | Todo, In Progress, Done, Blocked, Triage |
+| Status | enum | Todo, In Progress, In Review, Done, Blocked, Triage |
 | Repository | custom field | Repo name, maps to path in config |
+| Chunk | custom field | Chunk name; maps to integration branch `dispatch/chunk/<name>` |
 | Branch | custom field | Git branch for the worktree (auto-set by daemon) |
 | Block reason | custom field | Set by worker or triage agent on block |
+| Triage count | custom field (number) | Incremented on each triage recovery; reset on human reopen |
 | Blocking / Blocked by | relation | Dependency graph; daemon filters on no open blockers |
 
 **Status state machine:**
 
 ```
-Todo -> In Progress        (daemon, on spawn)
-In Progress -> Done        (worker, on close)
+Todo -> In Progress        (daemon, on spawn; worktree branched from chunk integration branch)
+In Progress -> In Review   (worker, on close; triggers test gate + AI review)
+In Review -> Done          (daemon, on review pass; merges issue branch into integration branch)
+In Review -> In Progress   (daemon, on review reject; feedback appended to issue for worker to address)
 In Progress -> Blocked     (worker, on block)
-In Progress -> Triage      (daemon, on unclean exit)
-Triage -> Todo             (triage agent, on recovery)
-Triage -> Blocked          (triage agent, on non-recoverable)
-Blocked -> Todo            (human or Mayor, on reopen)
+In Progress -> Triage      (daemon, on unclean exit; subject to circuit breaker)
+Triage -> Todo             (triage agent, on recovery; triage_count incremented)
+Triage -> Blocked          (triage agent, on non-recoverable; OR circuit breaker at triage_count >= 3)
+Blocked -> Todo            (human or Mayor, on reopen; triage_count reset)
 ```
 
 ### 4.8 Per-Repo Config
@@ -388,10 +577,18 @@ A minimal config file per repo, committed to the repo at `.dispatch/config.toml`
 [repo]
 name = "my-project"             # must match Linear Repository field value
 path = "~/projects/my-project"  # absolute or ~ path to repo root
+auto_pr = true                  # create draft PR on chunk completion (default: true)
 
 [worker]
+model = "sonnet"                # worker model (default: sonnet; "opus" for complex repos)
+timeout_minutes = 30            # kill worker after this long (default: 30)
+max_close_attempts = 3          # force-block after N rejected closes (default: 3)
 setup_cmd = "npm install"       # run once after worktree creation (optional)
-test_cmd = "npm test"           # surfaced to workers as the test command
+test_cmd = "npm test"           # full test suite, run before integration merge
+test_cmd_fast = ""              # optional fast subset for close-time feedback (omit to use test_cmd)
+superpowers = true              # install superpowers plugin in worker sessions (default: true)
+superpowers_skills = ["test-driven-development", "verification-before-completion", "systematic-debugging"]
+opus_escalation = true          # respawn with Opus after 2 triage cycles (default: true)
 
 [worker.env]
 NODE_ENV = "test"
@@ -500,12 +697,67 @@ All commands connect to the daemon socket. If the daemon is not running most com
 | `dispatch investigate <issue-id>` | Spawn triage agent for a Blocked or Triage issue. |
 | `dispatch reopen <issue-id>` | Transition Blocked → Todo; daemon spawns fresh worker. |
 | `dispatch read <issue-id>` | Print issue contents. Called by workers. |
+| `dispatch notify` | Signal daemon to poll Linear immediately. Called by workers/planners after Linear writes. |
+| `dispatch escalate --to-architect "<findings>"` | Abort standalone Planner, spawn Architect with findings. Called by Planners on scope discovery. |
+| `dispatch pr <chunk-name>` | Create a draft PR from the chunk's integration branch. |
 | `dispatch logs [--follow]` | Show activity log. `--follow` streams new entries. |
 | `dispatch worktrees` | List all active worktrees managed by the daemon. |
 
 ---
 
-## 7. Milestones
+## 7. Cost Model
+
+Workers are the dominant cost driver — they run most frequently and at scale. Model selection is the primary cost lever.
+
+### 7.1 Per-Session Estimates
+
+| Session type | Model | Avg tokens (in/out) | Est. cost | Frequency |
+|---|---|---|---|---|
+| Mayor | Opus | ~30K / ~5K | $1–2 | Per user interaction |
+| Architect | Opus | ~100K / ~20K | $4–6 | Per PRD |
+| Planner (standalone) | Opus | ~80K / ~15K | $2.50–4 | Per chunk |
+| Design Reviewer (x2) | Sonnet | ~40K / ~3K each | $0.30–0.50 total | Per plan |
+| Worker | Sonnet | ~50K / ~10K | $0.30–0.60 | Per issue (most frequent) |
+| Review agent | Sonnet | ~30K / ~5K | $0.20–0.40 | Per issue completion |
+| Triage agent | Sonnet | ~20K / ~5K | $0.15–0.30 | Per failure (~15% of issues) |
+
+### 7.2 Scenario Costs
+
+**Single-chunk, 7 issues:**
+- Planning (Planner + design review): ~$3–5
+- Workers (7 x $0.45 avg): ~$3.15
+- Reviews (7 x $0.30 avg): ~$2.10
+- Triage (1 failure): ~$0.25
+- **Total: ~$9–11**
+
+**Multi-chunk PRD, 3 chunks, 20 issues total:**
+- Planning (Architect + 3 Planners + design reviews): ~$15–20
+- Workers (20 x $0.45 avg): ~$9
+- Reviews (20 x $0.30 avg): ~$6
+- Triage (3 failures): ~$0.75
+- **Total: ~$31–37**
+
+**Same multi-chunk with Agent Teams (M4b):**
+- Planning adds ~$10–15 (all Planners on Opus within Agent Teams)
+- **Total: ~$41–52**
+
+### 7.3 Model Selection Strategy
+
+- **Opus:** Planning agents (Mayor, Architect, Planner). These sessions require deep reasoning about code architecture, decomposition, and cross-cutting concerns. Planning is infrequent and high-leverage — a bad plan wastes far more than the cost difference.
+- **Sonnet (default for workers):** Workers execute well-scoped issues with detailed instructions, specific files, and test commands. The Planner + design review process ensures issues are clear enough for Sonnet to handle. This is where the cost savings matter — workers are 80%+ of sessions.
+- **Opus escalation for workers:** If a worker blocks on the same issue twice (triage_count >= 2), the daemon can optionally respawn with Opus before going to human-blocked. Configurable: `opus_escalation = true` in config.
+- **GLM 4.7 / cheaper models (future):** Evaluate after v1 if Sonnet worker costs remain high. Well-scoped issues with TDD enforcement may be tractable for cheaper models. Out of scope for v1.
+
+### 7.4 Cost Controls
+
+- Parallelism limits (default 5 global, 2 per repo) bound concurrent spend
+- Adaptive polling reduces API calls during idle periods
+- Design review catches bad plans before they generate expensive worker runs
+- Issue sizing rules (<=8 files, <=200 lines) keep individual worker sessions short
+
+---
+
+## 8. Milestones
 
 ### M1: Daemon skeleton + Linear integration
 
@@ -519,40 +771,63 @@ All commands connect to the daemon socket. If the daemon is not running most com
 
 **Exit criteria:** Create a Linear issue manually. Run `dispatchd`. Issue transitions to In Progress, tmux session appears with Claude Code running in a worktree. Issue closes when Claude finishes.
 
-### M2: Failure handling + triage
+### M2: Failure handling + triage + review gates
 
-**Goal:** Unclean exits and worker-initiated blocks handled correctly.
+**Goal:** Unclean exits and worker-initiated blocks handled correctly. Post-worker review pipeline working.
 
 - Unclean exit detection and Linear transition to Triage
-- Triage agent spawn with correct context
+- Triage agent spawn with correct context (on Sonnet)
 - `dispatch block` and `dispatch investigate` CLI commands
 - Notification emission over socket
 - Reopen flow: Blocked → Todo → fresh worker
+- Triage circuit breaker (triage_count >= 3 → Blocked)
+- Test gate: daemon runs test_cmd before merging to integration branch
+- Review agent: Sonnet-based diff review on `dispatch close`, reject on critical issues
+- Superpowers plugin installation in worker sessions (TDD, verification, debugging skills)
 
-**Exit criteria:** `kill -9` a running worker. Triage agent spawns, either recovers or flags in Linear. `dispatch investigate` works on a blocked issue.
+**Exit criteria:** `kill -9` a running worker. Triage agent spawns, either recovers or flags in Linear. `dispatch investigate` works on a blocked issue. Worker that calls `dispatch close` with failing tests gets rejected and must fix before re-closing.
 
-### M3: Mayor + standalone Planner
+### M3: Mayor + standalone Planner + design review
 
-**Goal:** End-to-end workflow for single-chunk work.
+**Goal:** End-to-end workflow for single-chunk work with plan approval gate.
 
 - Mayor CLAUDE.md: reads Linear state, routes to Planner, handles blocked issues
-- Planner CLAUDE.md: reads repo, generates Linear issues with dependencies
+- Planner CLAUDE.md: reads repo, writes plan doc, triggers design review
+- Oppositional design review: simplicity + completeness subagents (on Sonnet)
+- User approval flow: review feedback presented, user approves/edits before issues created
 - `dispatch mayor` and `dispatch plan --chunk` CLI commands
+- Integration branch creation per chunk (`dispatch/chunk/<name>`)
+- Merge of issue branches into integration branch on completion
 - Parallelism limits and dependency-aware scheduling in daemon
+- Auto-PR creation on chunk completion (default on, `auto_pr = false` to disable)
+- `dispatch pr <chunk-name>` for manual PR creation
+- `dispatch notify` for immediate daemon polling after Linear writes
 
-**Exit criteria:** Describe a focused task to Mayor → Planner generates issues → daemon spawns workers in dependency order → issues close.
+**Exit criteria:** Describe a focused task to Mayor → Planner writes plan doc → design review produces simplicity/completeness critiques → user approves → issues created → workers execute with Sonnet + superpowers → review gates pass → integration branch merged → draft PR created automatically.
 
-### M4: Architect + Agent Teams
+### M4a: Architect + Sequential Planners
 
-**Goal:** Multi-chunk planning from PRD with coordinated Planners.
+**Goal:** Multi-chunk planning from PRD using sequential standalone Planners (no Agent Teams dependency).
 
-- Architect CLAUDE.md: reads PRD, decomposes chunks, spawns Agent Team
-- Planner teammate CLAUDE.md: peer-to-peer coordination variant
+- Architect CLAUDE.md: reads PRD, decomposes chunks, writes interface spec, spawns Planners sequentially
 - `dispatch plan --prd` CLI command
-- Coherence review pass in Architect before exiting
-- Incremental commit to Linear (chunk-by-chunk) for crash resilience
+- `dispatch escalate` CLI command (Planner → Architect promotion)
+- Coherence review pass in Architect after all Planners finish
+- Cross-chunk blocking relationship wiring
+- Integration branch creation per chunk
 
-**Exit criteria:** Hand a PRD to Mayor → Architect spawns Planner team → Planners coordinate on shared interfaces → all issues written to Linear → workers execute in dependency order.
+**Exit criteria:** Hand a PRD to Mayor → Architect decomposes into chunks → sequential Planners write issues → coherence review passes → workers execute in dependency order across integration branches.
+
+### M4b: Agent Teams upgrade (optional)
+
+**Goal:** Upgrade Architect to use Agent Teams for parallel Planner coordination.
+
+- Architect CLAUDE.md: Agent Teams variant with one Planner teammate per chunk
+- Planner teammate CLAUDE.md: peer-to-peer coordination variant
+- Incremental commit to Linear (chunk-by-chunk) for crash resilience
+- Feature-flagged: `dispatch plan --prd --parallel` or config toggle
+
+**Exit criteria:** Same as M4a but Planners run in parallel and resolve interface conflicts via direct messaging. Measurable reduction in planning time vs. sequential.
 
 ### M5: TUI
 
@@ -579,7 +854,7 @@ All commands connect to the daemon socket. If the daemon is not running most com
 
 ---
 
-## 8. Risks and Mitigations
+## 9. Risks and Mitigations
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
@@ -588,39 +863,50 @@ All commands connect to the daemon socket. If the daemon is not running most com
 | Linear API rate limits | Low | Medium | 5s poll interval keeps request rate low. Cache last state snapshot in daemon. |
 | Linear API downtime | Low | High | Daemon pauses spawning on API error. Running workers finish. Retry with backoff. |
 | Git worktree conflicts | Low | Low | Daemon uses issue-id-scoped branch names: `dispatch/<issue-id>`. Collisions essentially impossible. |
-| Triage agent makes things worse | Medium | Medium | Constrained to assessment + minimal recovery only. CLAUDE.md explicitly prohibits large-scale fixes. |
+| Triage agent makes things worse | Medium | Medium | Constrained to assessment + minimal recovery only. CLAUDE.md explicitly prohibits large-scale fixes. Circuit breaker: after 3 triage cycles, issue goes to Blocked unconditionally. |
 | Worker overshoots issue scope | High | Low | Planner sizing rule (<=8 files, <=200 lines). Triage detects oversized commits and flags. |
+| Merge conflicts on integration branch | Medium | Medium | Issues within a chunk are dependency-ordered, so sequential merges minimize conflicts. Conflicts trigger triage. Cross-chunk conflicts are rarer since chunks are independent workstreams. |
+| Planner misroutes scope (single vs. multi-chunk) | Medium | Low | Planner can escalate to Architect mid-session via `dispatch escalate`. Cost of one aborted Planner session is low. |
+| Review gate adds latency to worker pipeline | Medium | Low | Review agent runs on Sonnet with small diffs (~$0.30, <60s). Test gate runs repo test suite which varies by project. Both run only on close, not continuously. `test_cmd_fast` option for repos with slow suites. |
+| Design review slows down planning | Low | Low | Review subagents run concurrently on Sonnet (~$0.30 total). Human approval is the bottleneck by design — catching a bad plan is worth minutes of review. |
+| Runaway worker burns tokens | Medium | Medium | 30-minute session timeout (configurable). Max 3 close attempts before force-block. Issue sizing rules keep tasks small. Opus escalation is a single retry, not open-ended. |
+| Concurrent workers conflict on merge | Medium | Low | Per-chunk merge queue serializes integration merges. Planner flags overlapping files. Daemon prefers serial execution for issues sharing file paths. Conflicts fall through to triage. |
+| Plan approval left unattended | Low | Low | Planner waits indefinitely (correct — approval is human decision). Daemon emits reminder notification after 1 hour. No token burn while waiting. |
 
 ---
 
-## 9. Success Metrics
+## 10. Success Metrics
 
 After 2 weeks of daily use:
 
-- **Time from idea to first worker executing:** <5 minutes (single-chunk), <15 minutes (multi-chunk from PRD)
-- **Worker clean exit rate:** >85% of issues close without triage
+- **Time from idea to first worker executing:** <5 minutes (single-chunk), <15 minutes (multi-chunk from PRD). Includes plan approval time.
+- **Review gate first-pass rate:** >80% of workers pass test gate + AI review on first `dispatch close`
+- **Worker clean exit rate:** >85% of issues reach Done without triage
 - **Triage auto-recovery rate:** >60% of unclean exits recovered without human intervention
 - **Cross-chunk coherence:** no interface mismatches discovered during worker execution for Architect-planned work
+- **Design review value:** >50% of plans incorporate at least one piece of reviewer feedback before approval
 - **Daemon uptime between intentional restarts:** >48 hours
 - **TUI open/close cycle:** <1 second, zero effect on running workers
+- **Cost per issue (worker + review):** <$1.00 average on Sonnet
 
 ---
 
-## 10. Non-Goals and Future Considerations
+## 11. Non-Goals and Future Considerations
 
 **Explicitly out of scope for v1:**
 - Multi-user support
 - CI/CD integration (workers run tests locally; CI is separate)
-- Automatic PR creation (Mayor can offer, human confirms)
-- Windows support (macOS + Linux)
+- Windows support (macOS + Linux only; development may happen on Windows via WSL but Windows is not a supported target)
 - GUI of any kind
 - Persistent agent identity
 - Per-chunk model selection in Agent Teams (not yet supported)
+- Alternative worker models beyond Sonnet (e.g., GLM 4.7 — explore later if Sonnet costs are prohibitive)
 
 **Things to watch:**
 - Agent Teams stability and session resumption — adopt improvements as they land
 - Per-role model selection in Agent Teams (community feature request) — when available, run Planners on Sonnet to reduce planning cost significantly
 - Claude Code orchestration features generally — adopt anything that simplifies Architect or Worker design
+- GLM 4.7 and other cost-effective models for worker tasks — if well-scoped issues prove tractable for cheaper models, adopt to reduce operational cost
 
 ---
 
