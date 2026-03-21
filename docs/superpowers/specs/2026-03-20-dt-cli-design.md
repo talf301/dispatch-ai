@@ -135,15 +135,57 @@ ORDER BY (
 
 Reads one command per line from stdin. All commands execute in a single SQLite transaction. Any error rolls back the entire batch. Lines use the same syntax as regular commands (without the `dt` prefix).
 
+### `dt batch` Details
+
+Blank lines and lines starting with `#` are skipped. Leading/trailing whitespace is trimmed.
+
+### `dt note` Stdin Behavior
+
+When content argument is omitted, reads all of stdin until EOF as the note content.
+
+### `dt edit` Without Flags
+
+Running `dt edit <id>` with neither `-t` nor `-d` is a no-op (no error, no changes).
+
+### Status History
+
+Status transitions are recorded as system-generated notes with author `"system"`. For example, `dt done a3f8` appends a note: `"Status changed: active → done"`. This satisfies the PRD's `dt show` requirement to display status history without adding a separate table.
+
 ### `--json` Output
 
-Each command returns a Go struct. Default output is human-readable (formatted tables for lists, key-value pairs for single items). `--json` marshals the struct as JSON instead.
+Each command returns a Go struct. Default output is human-readable (formatted tables for lists, key-value pairs for single items). `--json` marshals the struct as JSON instead. Field names use `snake_case` matching the database columns.
+
+**Mutation commands** (add, edit, claim, done, etc.) return the affected task:
+```json
+{"id": "a3f8", "title": "Implement auth", "status": "done", ...}
+```
+
+`dt add` returns just the ID:
+```json
+{"id": "a3f8"}
+```
+
+**Query commands** (ready, list) return an array:
+```json
+[{"id": "a3f8", "title": "...", ...}, ...]
+```
+
+**Errors** (in `--json` mode) return:
+```json
+{"error": "task a3f8 is already claimed by worker-1"}
+```
+
+### Error Handling
+
+- Exit 0 on success.
+- Exit 1 on user errors (task not found, already claimed, cycle detected, invalid arguments).
+- Errors print to stderr in plain text by default, or as `{"error": "..."}` when `--json` is set.
 
 ## Architecture Decisions
 
 - **Business logic in `internal/db`** — command files are thin wrappers that parse flags, call db functions, and format output.
 - **No ORM** — direct SQL with `database/sql`. The schema is simple enough that an ORM adds complexity without value.
-- **`updated_at` trigger** — set via application code on writes, not a database trigger. Simpler.
+- **`updated_at` via SQLite trigger** — a CREATE TRIGGER ensures `updated_at` is always set correctly, eliminating the risk of missed updates in application code.
 - **Global `--db` flag** on the root cobra command, threaded through to all subcommands.
 
 ## Testing
