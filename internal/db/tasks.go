@@ -94,6 +94,101 @@ func (d *DB) GetTask(id string) (*Task, error) {
 	return t, nil
 }
 
+// addSystemNote records a status-change note authored by "system".
+func (d *DB) addSystemNote(taskID, oldStatus, newStatus string) {
+	author := "system"
+	content := fmt.Sprintf("Status changed: %s → %s", oldStatus, newStatus)
+	d.AddNote(taskID, content, &author)
+}
+
+// ClaimTask assigns a task and sets its status to active.
+func (d *DB) ClaimTask(id, assignee string) (*Task, error) {
+	task, err := d.GetTask(id)
+	if err != nil {
+		return nil, err
+	}
+	if task.Assignee != nil {
+		return nil, fmt.Errorf("task %s is already claimed by %s", id, *task.Assignee)
+	}
+
+	oldStatus := task.Status
+	_, err = d.q.Exec("UPDATE tasks SET status = 'active', assignee = ? WHERE id = ?", assignee, id)
+	if err != nil {
+		return nil, fmt.Errorf("claim task: %w", err)
+	}
+
+	d.addSystemNote(id, oldStatus, "active")
+	return d.GetTask(id)
+}
+
+// ReleaseTask removes the assignee and sets status to open.
+func (d *DB) ReleaseTask(id string) (*Task, error) {
+	task, err := d.GetTask(id)
+	if err != nil {
+		return nil, err
+	}
+
+	oldStatus := task.Status
+	_, err = d.q.Exec("UPDATE tasks SET status = 'open', assignee = NULL WHERE id = ?", id)
+	if err != nil {
+		return nil, fmt.Errorf("release task: %w", err)
+	}
+
+	d.addSystemNote(id, oldStatus, "open")
+	return d.GetTask(id)
+}
+
+// DoneTask marks a task as done and clears the assignee.
+func (d *DB) DoneTask(id string) (*Task, error) {
+	task, err := d.GetTask(id)
+	if err != nil {
+		return nil, err
+	}
+
+	oldStatus := task.Status
+	_, err = d.q.Exec("UPDATE tasks SET status = 'done', assignee = NULL WHERE id = ?", id)
+	if err != nil {
+		return nil, fmt.Errorf("done task: %w", err)
+	}
+
+	d.addSystemNote(id, oldStatus, "done")
+	return d.GetTask(id)
+}
+
+// BlockTask marks a task as blocked with a reason and clears the assignee.
+func (d *DB) BlockTask(id, reason string) (*Task, error) {
+	task, err := d.GetTask(id)
+	if err != nil {
+		return nil, err
+	}
+
+	oldStatus := task.Status
+	_, err = d.q.Exec("UPDATE tasks SET status = 'blocked', block_reason = ?, assignee = NULL WHERE id = ?", reason, id)
+	if err != nil {
+		return nil, fmt.Errorf("block task: %w", err)
+	}
+
+	d.addSystemNote(id, oldStatus, "blocked")
+	return d.GetTask(id)
+}
+
+// ReopenTask sets a task back to open, clearing block_reason and assignee.
+func (d *DB) ReopenTask(id string) (*Task, error) {
+	task, err := d.GetTask(id)
+	if err != nil {
+		return nil, err
+	}
+
+	oldStatus := task.Status
+	_, err = d.q.Exec("UPDATE tasks SET status = 'open', block_reason = NULL, assignee = NULL WHERE id = ?", id)
+	if err != nil {
+		return nil, fmt.Errorf("reopen task: %w", err)
+	}
+
+	d.addSystemNote(id, oldStatus, "open")
+	return d.GetTask(id)
+}
+
 // EditTask updates a task's title and/or description. Fields that are nil are left unchanged.
 func (d *DB) EditTask(id string, title, description *string) (*Task, error) {
 	if title == nil && description == nil {

@@ -387,3 +387,161 @@ func TestEditTask(t *testing.T) {
 		t.Errorf("expected description unchanged, got %q", updated.Description)
 	}
 }
+
+func TestClaimTask(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	task, err := d.AddTask("claim me", "", "", "")
+	if err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+
+	claimed, err := d.ClaimTask(task.ID, "alice")
+	if err != nil {
+		t.Fatalf("ClaimTask: %v", err)
+	}
+	if claimed.Status != "active" {
+		t.Errorf("expected status 'active', got %q", claimed.Status)
+	}
+	if claimed.Assignee == nil || *claimed.Assignee != "alice" {
+		t.Errorf("expected assignee 'alice', got %v", claimed.Assignee)
+	}
+}
+
+func TestClaimTask_AlreadyClaimed(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	task, _ := d.AddTask("claim me", "", "", "")
+	d.ClaimTask(task.ID, "alice")
+
+	_, err = d.ClaimTask(task.ID, "bob")
+	if err == nil {
+		t.Fatal("expected error when claiming already-claimed task")
+	}
+}
+
+func TestReleaseTask(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	task, _ := d.AddTask("release me", "", "", "")
+	d.ClaimTask(task.ID, "alice")
+
+	released, err := d.ReleaseTask(task.ID)
+	if err != nil {
+		t.Fatalf("ReleaseTask: %v", err)
+	}
+	if released.Status != "open" {
+		t.Errorf("expected status 'open', got %q", released.Status)
+	}
+	if released.Assignee != nil {
+		t.Errorf("expected nil assignee, got %v", released.Assignee)
+	}
+}
+
+func TestDoneTask(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	task, _ := d.AddTask("finish me", "", "", "")
+	done, err := d.DoneTask(task.ID)
+	if err != nil {
+		t.Fatalf("DoneTask: %v", err)
+	}
+	if done.Status != "done" {
+		t.Errorf("expected status 'done', got %q", done.Status)
+	}
+}
+
+func TestBlockTask(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	task, _ := d.AddTask("block me", "", "", "")
+	blocked, err := d.BlockTask(task.ID, "waiting on API")
+	if err != nil {
+		t.Fatalf("BlockTask: %v", err)
+	}
+	if blocked.Status != "blocked" {
+		t.Errorf("expected status 'blocked', got %q", blocked.Status)
+	}
+	if blocked.BlockReason == nil || *blocked.BlockReason != "waiting on API" {
+		t.Errorf("expected block_reason 'waiting on API', got %v", blocked.BlockReason)
+	}
+}
+
+func TestReopenTask(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	task, _ := d.AddTask("reopen me", "", "", "")
+	d.BlockTask(task.ID, "reason")
+
+	reopened, err := d.ReopenTask(task.ID)
+	if err != nil {
+		t.Fatalf("ReopenTask: %v", err)
+	}
+	if reopened.Status != "open" {
+		t.Errorf("expected status 'open', got %q", reopened.Status)
+	}
+	if reopened.BlockReason != nil {
+		t.Errorf("expected nil block_reason, got %v", reopened.BlockReason)
+	}
+	if reopened.Assignee != nil {
+		t.Errorf("expected nil assignee, got %v", reopened.Assignee)
+	}
+}
+
+func TestStatusTransition_CreatesNote(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	task, _ := d.AddTask("noted", "", "", "")
+
+	// Claim creates a note
+	d.ClaimTask(task.ID, "alice")
+
+	notes, err := d.GetNotes(task.ID)
+	if err != nil {
+		t.Fatalf("GetNotes: %v", err)
+	}
+	if len(notes) != 1 {
+		t.Fatalf("expected 1 note, got %d", len(notes))
+	}
+	if notes[0].Author == nil || *notes[0].Author != "system" {
+		t.Errorf("expected author 'system', got %v", notes[0].Author)
+	}
+	if notes[0].Content != "Status changed: open → active" {
+		t.Errorf("unexpected note content: %q", notes[0].Content)
+	}
+
+	// Release creates a second note
+	d.ReleaseTask(task.ID)
+	notes, _ = d.GetNotes(task.ID)
+	if len(notes) != 2 {
+		t.Fatalf("expected 2 notes after release, got %d", len(notes))
+	}
+}

@@ -35,6 +35,11 @@ func init() {
 	rootCmd.AddCommand(commands.NewShowCmd())
 	rootCmd.AddCommand(commands.NewDepCmd())
 	rootCmd.AddCommand(commands.NewUndepCmd())
+	rootCmd.AddCommand(commands.NewClaimCmd())
+	rootCmd.AddCommand(commands.NewReleaseCmd())
+	rootCmd.AddCommand(commands.NewDoneCmd())
+	rootCmd.AddCommand(commands.NewBlockCmd())
+	rootCmd.AddCommand(commands.NewReopenCmd())
 }
 
 func main() {
