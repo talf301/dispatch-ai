@@ -1,0 +1,63 @@
+package daemon
+
+import (
+	"fmt"
+	"os/exec"
+	"strings"
+)
+
+func DetectDefaultBranch(repoDir string) (string, error) {
+	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
+	cmd.Dir = repoDir
+	if out, err := cmd.Output(); err == nil {
+		ref := strings.TrimSpace(string(out))
+		parts := strings.Split(ref, "/")
+		return parts[len(parts)-1], nil
+	}
+
+	cmd = exec.Command("git", "branch", "--show-current")
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("detect default branch: %w", err)
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" {
+		return "main", nil
+	}
+	return branch, nil
+}
+
+func CreateWorktree(repoDir, wtDir, branchName, baseBranch string) error {
+	if baseBranch == "" {
+		var err error
+		baseBranch, err = DetectDefaultBranch(repoDir)
+		if err != nil {
+			return err
+		}
+	}
+
+	cmd := exec.Command("git", "worktree", "add", wtDir, "-b", branchName, baseBranch)
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("create worktree: %w\n%s", err, out)
+	}
+	return nil
+}
+
+func RemoveWorktree(repoDir, wtDir, branchName string, deleteBranch bool) error {
+	cmd := exec.Command("git", "worktree", "remove", wtDir, "--force")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("remove worktree: %w\n%s", err, out)
+	}
+
+	if deleteBranch {
+		cmd = exec.Command("git", "branch", "-D", branchName)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("delete branch %s: %w\n%s", branchName, err, out)
+		}
+	}
+	return nil
+}
