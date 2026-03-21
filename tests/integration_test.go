@@ -212,10 +212,7 @@ func TestExitCriteria_JSONOutput(t *testing.T) {
 	readyOut := runDT(t, bin, dbPath, "ready")
 	var readyResult []interface{}
 	if err := json.Unmarshal([]byte(readyOut), &readyResult); err != nil {
-		// ready might return null for empty array, which is valid
-		if readyOut != "null" {
-			t.Fatalf("ready output is not a JSON array: %v\noutput: %s", err, readyOut)
-		}
+		t.Fatalf("ready output is not a JSON array: %v\noutput: %s", err, readyOut)
 	}
 
 }

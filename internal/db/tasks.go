@@ -95,10 +95,11 @@ func (d *DB) GetTask(id string) (*Task, error) {
 }
 
 // addSystemNote records a status-change note authored by "system".
-func (d *DB) addSystemNote(taskID, oldStatus, newStatus string) {
+func (d *DB) addSystemNote(taskID, oldStatus, newStatus string) error {
 	author := "system"
 	content := fmt.Sprintf("Status changed: %s → %s", oldStatus, newStatus)
-	d.AddNote(taskID, content, &author)
+	_, err := d.AddNote(taskID, content, &author)
+	return err
 }
 
 // ClaimTask assigns a task and sets its status to active.
@@ -117,7 +118,9 @@ func (d *DB) ClaimTask(id, assignee string) (*Task, error) {
 		return nil, fmt.Errorf("claim task: %w", err)
 	}
 
-	d.addSystemNote(id, oldStatus, "active")
+	if err := d.addSystemNote(id, oldStatus, "active"); err != nil {
+		return nil, err
+	}
 	return d.GetTask(id)
 }
 
@@ -134,7 +137,9 @@ func (d *DB) ReleaseTask(id string) (*Task, error) {
 		return nil, fmt.Errorf("release task: %w", err)
 	}
 
-	d.addSystemNote(id, oldStatus, "open")
+	if err := d.addSystemNote(id, oldStatus, "open"); err != nil {
+		return nil, err
+	}
 	return d.GetTask(id)
 }
 
@@ -151,7 +156,9 @@ func (d *DB) DoneTask(id string) (*Task, error) {
 		return nil, fmt.Errorf("done task: %w", err)
 	}
 
-	d.addSystemNote(id, oldStatus, "done")
+	if err := d.addSystemNote(id, oldStatus, "done"); err != nil {
+		return nil, err
+	}
 	return d.GetTask(id)
 }
 
@@ -168,7 +175,9 @@ func (d *DB) BlockTask(id, reason string) (*Task, error) {
 		return nil, fmt.Errorf("block task: %w", err)
 	}
 
-	d.addSystemNote(id, oldStatus, "blocked")
+	if err := d.addSystemNote(id, oldStatus, "blocked"); err != nil {
+		return nil, err
+	}
 	return d.GetTask(id)
 }
 
@@ -185,7 +194,9 @@ func (d *DB) ReopenTask(id string) (*Task, error) {
 		return nil, fmt.Errorf("reopen task: %w", err)
 	}
 
-	d.addSystemNote(id, oldStatus, "open")
+	if err := d.addSystemNote(id, oldStatus, "open"); err != nil {
+		return nil, err
+	}
 	return d.GetTask(id)
 }
 

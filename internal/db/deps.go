@@ -119,7 +119,7 @@ func (d *DB) dfs(target, current string, visited map[string]bool) error {
 
 // scanTasks scans all rows into a slice of Task.
 func scanTasks(rows *sql.Rows) ([]Task, error) {
-	var tasks []Task
+	tasks := []Task{}
 	for rows.Next() {
 		var t Task
 		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.BlockReason, &t.Assignee, &t.ParentID, &t.CreatedAt, &t.UpdatedAt); err != nil {

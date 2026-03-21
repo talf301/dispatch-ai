@@ -54,7 +54,7 @@ func (d *DB) GetNotes(taskID string) ([]Note, error) {
 	}
 	defer rows.Close()
 
-	var notes []Note
+	notes := []Note{}
 	for rows.Next() {
 		var n Note
 		if err := rows.Scan(&n.ID, &n.TaskID, &n.Content, &n.Author, &n.CreatedAt); err != nil {
