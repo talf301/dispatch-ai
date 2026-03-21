@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -161,6 +162,40 @@ func TestDaemon_MaxWorkers(t *testing.T) {
 
 	if len(spawner.Spawned) != 2 {
 		t.Errorf("spawned %d tasks, want 2 (max_workers)", len(spawner.Spawned))
+	}
+}
+
+func TestDaemon_RunAndShutdown(t *testing.T) {
+	d := openTestDB(t)
+	repoDir := initTestRepo(t)
+	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
+
+	spawner := &MockSpawner{ExitCode: 0}
+	daemon := New(d, Config{
+		MaxWorkers:   4,
+		PollInterval: 50 * time.Millisecond,
+		RepoPath:     repoDir,
+		WorktreeBase: worktreeBase,
+	}, spawner)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Run(ctx)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Errorf("unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not shut down within 5 seconds")
 	}
 }
 

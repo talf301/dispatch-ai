@@ -258,6 +258,75 @@ func (d *Daemon) monitorWorkers() {
 	}
 }
 
+// Run starts the daemon main loop. It blocks until ctx is cancelled.
+func (d *Daemon) Run(ctx context.Context) error {
+	d.logger.Println("starting daemon")
+
+	d.recoverActive()
+	d.cleanOrphanedWorktrees()
+
+	ticker := time.NewTicker(d.cfg.PollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			d.logger.Println("shutting down...")
+			d.shutdown()
+			return ctx.Err()
+		case <-ticker.C:
+			d.spawnReady()
+			d.monitorWorkers()
+			d.logSummary()
+		}
+	}
+}
+
+// shutdown sends SIGTERM to all workers and waits for them to exit.
+func (d *Daemon) shutdown() {
+	if len(d.workers) == 0 {
+		return
+	}
+
+	d.logger.Printf("sending SIGTERM to %d workers", len(d.workers))
+	for taskID, handle := range d.workers {
+		proc, err := os.FindProcess(handle.PID())
+		if err == nil {
+			proc.Signal(syscall.SIGTERM)
+		}
+		d.logger.Printf("sent SIGTERM to worker %s (pid %d)", taskID, handle.PID())
+	}
+
+	deadline := time.After(30 * time.Second)
+	for len(d.workers) > 0 {
+		select {
+		case <-deadline:
+			d.logger.Printf("timeout: %d workers still running, exiting anyway", len(d.workers))
+			return
+		case <-time.After(500 * time.Millisecond):
+			// Deleting from a map during range iteration is safe in Go.
+			for taskID, handle := range d.workers {
+				if !isProcessAlive(handle.PID()) {
+					delete(d.workers, taskID)
+					d.logger.Printf("worker %s exited during shutdown", taskID)
+				}
+			}
+		}
+	}
+	d.logger.Println("all workers stopped")
+}
+
+// logSummary prints a brief status summary.
+func (d *Daemon) logSummary() {
+	if len(d.workers) > 0 {
+		ids := make([]string, 0, len(d.workers))
+		for id := range d.workers {
+			ids = append(ids, id)
+		}
+		d.logger.Printf("active workers: %d [%s]", len(d.workers), strings.Join(ids, ", "))
+	}
+}
+
 // cleanOrphanedWorktrees removes worktree directories that don't correspond
 // to any active task.
 func (d *Daemon) cleanOrphanedWorktrees() {
