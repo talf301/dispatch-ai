@@ -48,6 +48,37 @@ func (d *DB) GetBlockers(taskID string) ([]Task, error) {
 	return scanTasks(rows)
 }
 
+// RemoveDep removes a dependency. Returns an error if the dependency does not exist.
+func (d *DB) RemoveDep(blockerID, blockedID string) error {
+	res, err := d.q.Exec("DELETE FROM deps WHERE blocker_id = ? AND blocked_id = ?", blockerID, blockedID)
+	if err != nil {
+		return fmt.Errorf("delete dep: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("dependency not found")
+	}
+	return nil
+}
+
+// GetBlocking returns the tasks that this task blocks.
+func (d *DB) GetBlocking(taskID string) ([]Task, error) {
+	rows, err := d.q.Query(
+		`SELECT t.id, t.title, t.description, t.status, t.block_reason, t.assignee, t.parent_id, t.created_at, t.updated_at
+		 FROM tasks t
+		 JOIN deps d ON d.blocked_id = t.id
+		 WHERE d.blocker_id = ?`, taskID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get blocking: %w", err)
+	}
+	defer rows.Close()
+	return scanTasks(rows)
+}
+
 // checkCycle returns an error if adding blockerID->blockedID would create a cycle.
 func (d *DB) checkCycle(blockerID, blockedID string) error {
 	if blockerID == blockedID {
@@ -57,7 +88,7 @@ func (d *DB) checkCycle(blockerID, blockedID string) error {
 	return d.dfs(blockerID, blockedID, visited)
 }
 
-// dfs walks blocker_id edges starting from current, looking for target.
+// dfs walks downstream from current (following blocked_id edges), looking for target.
 // If target is reachable from current, adding target->current would create a cycle.
 func (d *DB) dfs(target, current string, visited map[string]bool) error {
 	if visited[current] {
@@ -65,21 +96,21 @@ func (d *DB) dfs(target, current string, visited map[string]bool) error {
 	}
 	visited[current] = true
 
-	rows, err := d.q.Query("SELECT blocker_id FROM deps WHERE blocked_id = ?", current)
+	rows, err := d.q.Query("SELECT blocked_id FROM deps WHERE blocker_id = ?", current)
 	if err != nil {
 		return fmt.Errorf("dfs query: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		var blockerID string
-		if err := rows.Scan(&blockerID); err != nil {
+		var blockedID string
+		if err := rows.Scan(&blockedID); err != nil {
 			return fmt.Errorf("dfs scan: %w", err)
 		}
-		if blockerID == target {
+		if blockedID == target {
 			return fmt.Errorf("dependency would create a cycle")
 		}
-		if err := d.dfs(target, blockerID, visited); err != nil {
+		if err := d.dfs(target, blockedID, visited); err != nil {
 			return err
 		}
 	}

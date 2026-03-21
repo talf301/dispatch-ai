@@ -229,6 +229,139 @@ func TestGetTask_NotFound(t *testing.T) {
 	}
 }
 
+func TestAddDep(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	a, err := d.AddTask("task A", "", "", "")
+	if err != nil {
+		t.Fatalf("AddTask A: %v", err)
+	}
+	b, err := d.AddTask("task B", "", "", "")
+	if err != nil {
+		t.Fatalf("AddTask B: %v", err)
+	}
+
+	if err := d.AddDep(a.ID, b.ID); err != nil {
+		t.Fatalf("AddDep: %v", err)
+	}
+
+	blockers, err := d.GetBlockers(b.ID)
+	if err != nil {
+		t.Fatalf("GetBlockers: %v", err)
+	}
+	if len(blockers) != 1 {
+		t.Fatalf("expected 1 blocker, got %d", len(blockers))
+	}
+	if blockers[0].ID != a.ID {
+		t.Errorf("expected blocker %q, got %q", a.ID, blockers[0].ID)
+	}
+}
+
+func TestAddDep_CycleDetection(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	a, _ := d.AddTask("A", "", "", "")
+	b, _ := d.AddTask("B", "", "", "")
+	c, _ := d.AddTask("C", "", "", "")
+
+	if err := d.AddDep(a.ID, b.ID); err != nil {
+		t.Fatalf("A->B: %v", err)
+	}
+	if err := d.AddDep(b.ID, c.ID); err != nil {
+		t.Fatalf("B->C: %v", err)
+	}
+
+	// C->A should create a cycle
+	if err := d.AddDep(c.ID, a.ID); err == nil {
+		t.Fatal("expected cycle error, got nil")
+	}
+}
+
+func TestAddDep_SelfCycle(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	a, _ := d.AddTask("A", "", "", "")
+
+	if err := d.AddDep(a.ID, a.ID); err == nil {
+		t.Fatal("expected self-cycle error, got nil")
+	}
+}
+
+func TestRemoveDep(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	a, _ := d.AddTask("A", "", "", "")
+	b, _ := d.AddTask("B", "", "", "")
+
+	if err := d.AddDep(a.ID, b.ID); err != nil {
+		t.Fatalf("AddDep: %v", err)
+	}
+
+	if err := d.RemoveDep(a.ID, b.ID); err != nil {
+		t.Fatalf("RemoveDep: %v", err)
+	}
+
+	blockers, err := d.GetBlockers(b.ID)
+	if err != nil {
+		t.Fatalf("GetBlockers: %v", err)
+	}
+	if len(blockers) != 0 {
+		t.Errorf("expected 0 blockers after remove, got %d", len(blockers))
+	}
+}
+
+func TestRemoveDep_NotFound(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	if err := d.RemoveDep("xxxx", "yyyy"); err == nil {
+		t.Fatal("expected error for non-existent dep")
+	}
+}
+
+func TestGetBlocking(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	a, _ := d.AddTask("A", "", "", "")
+	b, _ := d.AddTask("B", "", "", "")
+	c, _ := d.AddTask("C", "", "", "")
+
+	// A blocks B and C
+	d.AddDep(a.ID, b.ID)
+	d.AddDep(a.ID, c.ID)
+
+	blocking, err := d.GetBlocking(a.ID)
+	if err != nil {
+		t.Fatalf("GetBlocking: %v", err)
+	}
+	if len(blocking) != 2 {
+		t.Fatalf("expected 2 tasks blocked by A, got %d", len(blocking))
+	}
+}
+
 func TestEditTask(t *testing.T) {
 	d, err := Open(tempDBPath(t))
 	if err != nil {

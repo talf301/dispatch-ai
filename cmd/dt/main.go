@@ -33,6 +33,8 @@ func init() {
 	rootCmd.AddCommand(commands.NewAddCmd())
 	rootCmd.AddCommand(commands.NewEditCmd())
 	rootCmd.AddCommand(commands.NewShowCmd())
+	rootCmd.AddCommand(commands.NewDepCmd())
+	rootCmd.AddCommand(commands.NewUndepCmd())
 }
 
 func main() {
