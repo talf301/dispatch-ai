@@ -41,6 +41,8 @@ func init() {
 	rootCmd.AddCommand(commands.NewBlockCmd())
 	rootCmd.AddCommand(commands.NewReopenCmd())
 	rootCmd.AddCommand(commands.NewNoteCmd())
+	rootCmd.AddCommand(commands.NewReadyCmd())
+	rootCmd.AddCommand(commands.NewListCmd())
 }
 
 func main() {

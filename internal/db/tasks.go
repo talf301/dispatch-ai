@@ -202,6 +202,61 @@ func (d *DB) GetChildren(parentID string) ([]Task, error) {
 	return scanTasks(rows)
 }
 
+// ReadyTasks returns open, unassigned tasks whose blockers are all done,
+// ordered by the number of tasks they unblock (desc), then created_at (asc).
+func (d *DB) ReadyTasks() ([]Task, error) {
+	rows, err := d.q.Query(`
+		SELECT t.id, t.title, t.description, t.status, t.block_reason,
+		       t.assignee, t.parent_id, t.created_at, t.updated_at
+		FROM tasks t
+		WHERE t.status = 'open'
+		  AND t.assignee IS NULL
+		  AND NOT EXISTS (
+		    SELECT 1 FROM deps d
+		    JOIN tasks blocker ON d.blocker_id = blocker.id
+		    WHERE d.blocked_id = t.id
+		    AND blocker.status != 'done'
+		  )
+		ORDER BY (
+		    SELECT COUNT(*) FROM deps d2
+		    WHERE d2.blocker_id = t.id
+		    AND EXISTS (SELECT 1 FROM tasks t2 WHERE t2.id = d2.blocked_id AND t2.status != 'done')
+		  ) DESC,
+		  t.created_at ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("ready tasks: %w", err)
+	}
+	defer rows.Close()
+	return scanTasks(rows)
+}
+
+// ListTasks returns tasks filtered by status. If status is set, only that status
+// is returned. If all is false and status is empty, done tasks are excluded.
+func (d *DB) ListTasks(status string, all bool) ([]Task, error) {
+	var query string
+	var args []any
+
+	if status != "" {
+		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, created_at, updated_at
+		         FROM tasks WHERE status = ? ORDER BY created_at ASC`
+		args = append(args, status)
+	} else if !all {
+		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, created_at, updated_at
+		         FROM tasks WHERE status != 'done' ORDER BY created_at ASC`
+	} else {
+		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, created_at, updated_at
+		         FROM tasks ORDER BY created_at ASC`
+	}
+
+	rows, err := d.q.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list tasks: %w", err)
+	}
+	defer rows.Close()
+	return scanTasks(rows)
+}
+
 // EditTask updates a task's title and/or description. Fields that are nil are left unchanged.
 func (d *DB) EditTask(id string, title, description *string) (*Task, error) {
 	if title == nil && description == nil {

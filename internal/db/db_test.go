@@ -587,6 +587,221 @@ func TestAddNote(t *testing.T) {
 	}
 }
 
+func TestReadyTasks(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	// A blocks B, C is independent
+	a, _ := d.AddTask("task A", "", "", "")
+	b, _ := d.AddTask("task B", "", "", "")
+	c, _ := d.AddTask("task C", "", "", "")
+	d.AddDep(a.ID, b.ID)
+
+	ready, err := d.ReadyTasks()
+	if err != nil {
+		t.Fatalf("ReadyTasks: %v", err)
+	}
+
+	ids := make(map[string]bool)
+	for _, task := range ready {
+		ids[task.ID] = true
+	}
+
+	if !ids[a.ID] {
+		t.Errorf("expected A (%s) to be ready", a.ID)
+	}
+	if ids[b.ID] {
+		t.Errorf("expected B (%s) to NOT be ready (blocked by A)", b.ID)
+	}
+	if !ids[c.ID] {
+		t.Errorf("expected C (%s) to be ready", c.ID)
+	}
+}
+
+func TestReadyTasks_OrderByUnblockCount(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	// A blocks B, C, E (3 dependents) — created first
+	a, _ := d.AddTask("task A", "", "", "")
+	b, _ := d.AddTask("task B", "", "", "")
+	c, _ := d.AddTask("task C", "", "", "")
+	// D blocks E only (1 dependent) — created after A
+	dd, _ := d.AddTask("task D", "", "", "")
+	e, _ := d.AddTask("task E", "", "", "")
+
+	d.AddDep(a.ID, b.ID)
+	d.AddDep(a.ID, c.ID)
+	d.AddDep(a.ID, e.ID)
+	d.AddDep(dd.ID, e.ID)
+
+	ready, err := d.ReadyTasks()
+	if err != nil {
+		t.Fatalf("ReadyTasks: %v", err)
+	}
+
+	// A should come before D since A unblocks more tasks
+	aIdx, dIdx := -1, -1
+	for i, task := range ready {
+		if task.ID == a.ID {
+			aIdx = i
+		}
+		if task.ID == dd.ID {
+			dIdx = i
+		}
+	}
+	if aIdx == -1 {
+		t.Fatal("A not found in ready tasks")
+	}
+	if dIdx == -1 {
+		t.Fatal("D not found in ready tasks")
+	}
+	if aIdx > dIdx {
+		t.Errorf("expected A (unblocks 3) before D (unblocks 1), got A at %d, D at %d", aIdx, dIdx)
+	}
+}
+
+func TestReadyTasks_ExcludesClaimed(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	a, _ := d.AddTask("task A", "", "", "")
+	d.ClaimTask(a.ID, "alice")
+
+	ready, err := d.ReadyTasks()
+	if err != nil {
+		t.Fatalf("ReadyTasks: %v", err)
+	}
+
+	for _, task := range ready {
+		if task.ID == a.ID {
+			t.Errorf("claimed task %s should not be in ready list", a.ID)
+		}
+	}
+}
+
+func TestReadyTasks_BlockerDoneUnblocks(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	a, _ := d.AddTask("task A", "", "", "")
+	b, _ := d.AddTask("task B", "", "", "")
+	d.AddDep(a.ID, b.ID)
+
+	// B should not be ready initially
+	ready, _ := d.ReadyTasks()
+	for _, task := range ready {
+		if task.ID == b.ID {
+			t.Fatal("B should not be ready before A is done")
+		}
+	}
+
+	// Mark A as done
+	d.DoneTask(a.ID)
+
+	// Now B should be ready
+	ready, err = d.ReadyTasks()
+	if err != nil {
+		t.Fatalf("ReadyTasks: %v", err)
+	}
+	found := false
+	for _, task := range ready {
+		if task.ID == b.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("B should be ready after blocker A is done")
+	}
+}
+
+func TestListTasks(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	a, _ := d.AddTask("open task", "", "", "")
+	b, _ := d.AddTask("done task", "", "", "")
+	d.DoneTask(b.ID)
+
+	// Default (no --all) excludes done
+	tasks, err := d.ListTasks("", false)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	ids := make(map[string]bool)
+	for _, task := range tasks {
+		ids[task.ID] = true
+	}
+	if !ids[a.ID] {
+		t.Error("expected open task in default list")
+	}
+	if ids[b.ID] {
+		t.Error("expected done task excluded from default list")
+	}
+
+	// --all includes done
+	tasks, err = d.ListTasks("", true)
+	if err != nil {
+		t.Fatalf("ListTasks all: %v", err)
+	}
+	ids = make(map[string]bool)
+	for _, task := range tasks {
+		ids[task.ID] = true
+	}
+	if !ids[a.ID] {
+		t.Error("expected open task in all list")
+	}
+	if !ids[b.ID] {
+		t.Error("expected done task in all list")
+	}
+}
+
+func TestListTasks_StatusFilter(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	a, _ := d.AddTask("open task", "", "", "")
+	b, _ := d.AddTask("blocked task", "", "", "")
+	d.BlockTask(b.ID, "reason")
+
+	tasks, err := d.ListTasks("blocked", false)
+	if err != nil {
+		t.Fatalf("ListTasks blocked: %v", err)
+	}
+
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 blocked task, got %d", len(tasks))
+	}
+	if tasks[0].ID != b.ID {
+		t.Errorf("expected blocked task %q, got %q", b.ID, tasks[0].ID)
+	}
+
+	// Ensure open task not included
+	for _, task := range tasks {
+		if task.ID == a.ID {
+			t.Error("open task should not appear in blocked filter")
+		}
+	}
+}
+
 func TestGetChildren(t *testing.T) {
 	d, err := Open(tempDBPath(t))
 	if err != nil {

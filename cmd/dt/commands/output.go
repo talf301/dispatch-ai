@@ -56,6 +56,49 @@ func printTaskList(tasks []db.Task) {
 	w.Flush()
 }
 
+// printTaskTree prints tasks as a tree grouped by parent-child relationships.
+func printTaskTree(tasks []db.Task) {
+	// Build parent -> children map.
+	childrenMap := make(map[string][]db.Task)
+	taskMap := make(map[string]db.Task)
+	for _, t := range tasks {
+		taskMap[t.ID] = t
+		parentKey := ""
+		if t.ParentID != nil {
+			parentKey = *t.ParentID
+		}
+		childrenMap[parentKey] = append(childrenMap[parentKey], t)
+	}
+
+	// Find roots: tasks with no parent or whose parent is not in the task set.
+	var roots []db.Task
+	for _, t := range tasks {
+		if t.ParentID == nil {
+			roots = append(roots, t)
+		} else if _, ok := taskMap[*t.ParentID]; !ok {
+			roots = append(roots, t)
+		}
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "ID\tSTATUS\tTITLE\n")
+	var printTree func(tasks []db.Task, indent int)
+	printTree = func(tasks []db.Task, indent int) {
+		for _, t := range tasks {
+			prefix := ""
+			for i := 0; i < indent; i++ {
+				prefix += "  "
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s%s\n", t.ID, t.Status, prefix, t.Title)
+			if children, ok := childrenMap[t.ID]; ok {
+				printTree(children, indent+1)
+			}
+		}
+	}
+	printTree(roots, 0)
+	w.Flush()
+}
+
 // printShowResult prints the full show output with notes, deps, and children.
 func printShowResult(r ShowResult) {
 	printTask(r.Task)

@@ -67,3 +67,64 @@ func NewShowCmd() *cobra.Command {
 
 	return cmd
 }
+
+// NewReadyCmd returns the cobra command for listing ready tasks.
+func NewReadyCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "ready",
+		Short: "List tasks ready to be worked on",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			d := openDB(cmd)
+			defer d.Close()
+
+			tasks, err := d.ReadyTasks()
+			if err != nil {
+				exitError(cmd, err)
+			}
+
+			if jsonFlag(cmd) {
+				printJSON(tasks)
+			} else {
+				printTaskList(tasks)
+			}
+		},
+	}
+	return cmd
+}
+
+// NewListCmd returns the cobra command for listing tasks.
+func NewListCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List tasks",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			d := openDB(cmd)
+			defer d.Close()
+
+			all, _ := cmd.Flags().GetBool("all")
+			status, _ := cmd.Flags().GetString("status")
+			tree, _ := cmd.Flags().GetBool("tree")
+
+			tasks, err := d.ListTasks(status, all)
+			if err != nil {
+				exitError(cmd, err)
+			}
+
+			if jsonFlag(cmd) {
+				printJSON(tasks)
+			} else if tree {
+				printTaskTree(tasks)
+			} else {
+				printTaskList(tasks)
+			}
+		},
+	}
+
+	cmd.Flags().BoolP("all", "a", false, "include done tasks")
+	cmd.Flags().Bool("tree", false, "display as tree grouped by parent")
+	cmd.Flags().StringP("status", "s", "", "filter by status")
+
+	return cmd
+}
