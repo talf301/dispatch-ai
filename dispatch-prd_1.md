@@ -147,19 +147,25 @@ ORDER BY (
 
 A long-running process. No socket protocol, no IPC. It reads and writes the same SQLite database as the CLI. Communicates with the outside world through the database and the filesystem.
 
+#### Database access
+
+The daemon imports `internal/db` directly rather than shelling out to `dt`. This gives it compiled Go function calls (`db.ReadyTasks()`, `db.ClaimTask()`, etc.) instead of process spawning, JSON parsing, and exit code handling on every state transition. The `db.Open(path)` function takes a path, so the daemon can manage multiple databases (one per project) by holding multiple `*DB` instances — this does not couple it to a single database.
+
+The `dt` CLI remains the interface for humans and for Claude Code agent sessions (workers, triage). The daemon uses the library.
+
 #### Main loop (every 5 seconds)
 
 ```
-1. Query `dt ready` for available work.
+1. Call db.ReadyTasks() for available work.
 2. For each ready task, up to the concurrency limit:
    a. Create a git worktree: git worktree add ~/.dispatch/worktrees/<id> -b dispatch/<id>
    b. Run per-repo setup command if configured (e.g. npm install).
    c. Start Claude Code in the worktree with the worker CLAUDE.md
       and the task description as the initial prompt.
-   d. `dt claim <id> <session-id>`
+   d. db.ClaimTask(id, sessionID)
 3. For each active task:
    a. Check if the Claude Code process is still alive.
-   b. If exited cleanly (code 0): `dt done <id>`, tear down worktree.
+   b. If exited cleanly (code 0): db.DoneTask(id), tear down worktree.
    c. If exited uncleanly: run triage flow.
 4. Log state summary to ~/.dispatch/dispatch.log.
 ```
@@ -169,10 +175,10 @@ A long-running process. No socket protocol, no IPC. It reads and writes the same
 Workers run as child processes. The daemon tracks PID → task ID mapping in memory (not in the database — this is ephemeral orchestration state that dies with the daemon).
 
 On daemon startup:
-1. Query all tasks with `status = 'active'`.
+1. Call db.ListTasks("active", false) to get all active tasks.
 2. For each, check if a worktree and process exist.
 3. If the process is gone: run triage flow.
-4. If the worktree is gone: `dt release <id>`.
+4. If the worktree is gone: db.ReleaseTask(id).
 
 This handles restarts cleanly. Active tasks with dead processes get triaged. Active tasks with live processes can't happen after a restart (PIDs don't survive), so they all go through triage.
 
@@ -180,15 +186,15 @@ This handles restarts cleanly. Active tasks with dead processes get triaged. Act
 
 When a worker exits non-zero:
 
-1. Set `dt block <id> "Worker exited with code <N>"`.
+1. db.BlockTask(id, "Worker exited with code <N>").
 2. Capture last 100 lines of the worker's stdout/stderr (logged to `~/.dispatch/sessions/<id>.log`).
 3. Capture `git log --oneline -10` and `git diff --stat` from the worktree.
 4. Spawn a short-lived Claude Code session with the triage CLAUDE.md, passing:
    - The task description
    - The captured log tail
    - The git state
-5. The triage agent either:
-   - Commits partial work, adds a note, runs `dt reopen <id>` → daemon spawns a fresh worker.
+5. The triage agent uses `dt` CLI commands (it's a Claude Code session, not Go code):
+   - Commits partial work, adds a note with `dt note`, runs `dt reopen <id>` → daemon spawns a fresh worker.
    - Adds a detailed note explaining what went wrong, leaves the task blocked → human deals with it.
 6. Tear down the triage session.
 
@@ -229,13 +235,13 @@ Three markdown files, not code.
 Injected into each worker's Claude Code session via `--system-prompt` or equivalent.
 
 Core instructions:
-- Your task ID is $TASK_ID. Run `dt show $TASK_ID` to read your assignment.
+- Your task ID is $TASK_ID. Run `dt show $TASK_ID` to read your assignment. Note: `dt show --json` returns `{"task": {...}, "notes": [...], "blockers": [...], "blocking": [...], "children": [...]}`.
 - Read notes from any tasks that blocked you (context from previous work).
 - Implement the task. Run tests as described in the task description.
 - When done: commit with message referencing the task ID, run `dt done $TASK_ID`, exit.
 - When stuck: run `dt block $TASK_ID "<what you tried and what decision is needed>"`, exit.
 - Do not create new tasks. Do not modify other tasks. Do not manage git branches.
-- Add notes with `dt note $TASK_ID` to document non-obvious decisions for future workers.
+- Add notes with `dt note $TASK_ID --author $SESSION_ID` to document non-obvious decisions for future workers.
 
 #### `triage.md`
 
@@ -376,6 +382,17 @@ Lightweight terminal UI showing live worker state, task tree, and session attach
 
 ---
 
-## 6. Language
+## 6. Phase 1 Implementation Notes
+
+Decisions made during Phase 1 that inform later phases:
+
+- **`internal/db` package with `queryable` interface.** The `DB` struct uses an interface satisfied by both `*sql.DB` and `*sql.Tx`. All methods (AddTask, ClaimTask, ReadyTasks, etc.) work transparently in both contexts. `BeginTx()` returns a `*DB` whose queries run inside the transaction. This means `dispatchd` imports the same package and gets full type-safe access to all operations.
+- **`dt show --json` returns an envelope.** Shape: `{"task": {...}, "notes": [...], "blockers": [...], "blocking": [...], "children": [...]}`. Worker and triage agents that parse this output need to account for the nesting.
+- **Empty arrays serialize as `[]`, not `null`.** `dt ready --json` and `dt list --json` return `[]` when there are no results.
+- **`dt note` has an `--author` flag** (default "human"). Workers should use `--author $SESSION_ID` to identify which agent wrote each note.
+- **Status transitions create system notes.** Every call to ClaimTask, DoneTask, BlockTask, etc. appends a note with `author="system"` and content like "Status changed: open → active". These appear in `dt show` output and provide status history without a separate table.
+- **Module path:** `github.com/dispatch-ai/dispatch`. Both `dt` and `dispatchd` binaries live in `cmd/`.
+
+## 7. Language
 
 Go. SQLite via `mattn/go-sqlite3` (CGO). CLI via `cobra`. Single binary for `dt`, single binary for `dispatchd`.
