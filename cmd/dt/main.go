@@ -43,6 +43,7 @@ func init() {
 	rootCmd.AddCommand(commands.NewNoteCmd())
 	rootCmd.AddCommand(commands.NewReadyCmd())
 	rootCmd.AddCommand(commands.NewListCmd())
+	rootCmd.AddCommand(commands.NewBatchCmd())
 }
 
 func main() {

@@ -88,21 +88,22 @@ func TestBeginTxCommit(t *testing.T) {
 		t.Fatalf("BeginTx failed: %v", err)
 	}
 
-	_, err = tx.q.Exec("INSERT INTO tasks (id, title) VALUES ('t001', 'test task')")
+	task, err := tx.AddTask("tx task", "tx desc", "", "")
 	if err != nil {
-		t.Fatalf("insert in tx: %v", err)
+		t.Fatalf("AddTask in tx: %v", err)
 	}
 
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("Commit failed: %v", err)
 	}
 
-	var title string
-	if err := d.q.QueryRow("SELECT title FROM tasks WHERE id='t001'").Scan(&title); err != nil {
-		t.Fatalf("query after commit: %v", err)
+	// Verify task visible via original db after commit
+	got, err := d.GetTask(task.ID)
+	if err != nil {
+		t.Fatalf("GetTask after commit: %v", err)
 	}
-	if title != "test task" {
-		t.Errorf("expected 'test task', got %q", title)
+	if got.Title != "tx task" {
+		t.Errorf("expected 'tx task', got %q", got.Title)
 	}
 }
 
@@ -118,21 +119,19 @@ func TestBeginTxRollback(t *testing.T) {
 		t.Fatalf("BeginTx failed: %v", err)
 	}
 
-	_, err = tx.q.Exec("INSERT INTO tasks (id, title) VALUES ('t002', 'rollback task')")
+	task, err := tx.AddTask("rollback task", "", "", "")
 	if err != nil {
-		t.Fatalf("insert in tx: %v", err)
+		t.Fatalf("AddTask in tx: %v", err)
 	}
 
 	if err := tx.Rollback(); err != nil {
 		t.Fatalf("Rollback failed: %v", err)
 	}
 
-	var count int
-	if err := d.q.QueryRow("SELECT COUNT(*) FROM tasks WHERE id='t002'").Scan(&count); err != nil {
-		t.Fatalf("query after rollback: %v", err)
-	}
-	if count != 0 {
-		t.Errorf("expected 0 rows after rollback, got %d", count)
+	// Verify task NOT visible via original db after rollback
+	_, err = d.GetTask(task.ID)
+	if err == nil {
+		t.Fatal("expected error for task after rollback, got nil")
 	}
 }
 
