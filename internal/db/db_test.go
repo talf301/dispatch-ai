@@ -135,3 +135,122 @@ func TestBeginTxRollback(t *testing.T) {
 		t.Errorf("expected 0 rows after rollback, got %d", count)
 	}
 }
+
+func TestAddTask(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	task, err := d.AddTask("my task", "some desc", "", "")
+	if err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+
+	if len(task.ID) != 4 {
+		t.Errorf("expected 4-char ID, got %q (len %d)", task.ID, len(task.ID))
+	}
+	if task.Title != "my task" {
+		t.Errorf("expected title 'my task', got %q", task.Title)
+	}
+	if task.Description != "some desc" {
+		t.Errorf("expected description 'some desc', got %q", task.Description)
+	}
+	if task.Status != "open" {
+		t.Errorf("expected status 'open', got %q", task.Status)
+	}
+}
+
+func TestAddTask_WithParent(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	parent, err := d.AddTask("parent", "", "", "")
+	if err != nil {
+		t.Fatalf("AddTask parent failed: %v", err)
+	}
+
+	child, err := d.AddTask("child", "", parent.ID, "")
+	if err != nil {
+		t.Fatalf("AddTask child failed: %v", err)
+	}
+
+	if child.ParentID == nil {
+		t.Fatal("expected parent_id to be set")
+	}
+	if *child.ParentID != parent.ID {
+		t.Errorf("expected parent_id %q, got %q", parent.ID, *child.ParentID)
+	}
+}
+
+func TestAddTask_WithAfter(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	blocker, err := d.AddTask("blocker", "", "", "")
+	if err != nil {
+		t.Fatalf("AddTask blocker failed: %v", err)
+	}
+
+	blocked, err := d.AddTask("blocked", "", "", blocker.ID)
+	if err != nil {
+		t.Fatalf("AddTask blocked failed: %v", err)
+	}
+
+	blockers, err := d.GetBlockers(blocked.ID)
+	if err != nil {
+		t.Fatalf("GetBlockers failed: %v", err)
+	}
+	if len(blockers) != 1 {
+		t.Fatalf("expected 1 blocker, got %d", len(blockers))
+	}
+	if blockers[0].ID != blocker.ID {
+		t.Errorf("expected blocker ID %q, got %q", blocker.ID, blockers[0].ID)
+	}
+}
+
+func TestGetTask_NotFound(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	_, err = d.GetTask("xxxx")
+	if err == nil {
+		t.Fatal("expected error for non-existent task")
+	}
+}
+
+func TestEditTask(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	task, err := d.AddTask("original", "original desc", "", "")
+	if err != nil {
+		t.Fatalf("AddTask failed: %v", err)
+	}
+
+	newTitle := "updated"
+	updated, err := d.EditTask(task.ID, &newTitle, nil)
+	if err != nil {
+		t.Fatalf("EditTask failed: %v", err)
+	}
+
+	if updated.Title != "updated" {
+		t.Errorf("expected title 'updated', got %q", updated.Title)
+	}
+	if updated.Description != "original desc" {
+		t.Errorf("expected description unchanged, got %q", updated.Description)
+	}
+}
