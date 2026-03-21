@@ -76,7 +76,9 @@ func (d *Daemon) recoverActive() {
 
 		if _, err := os.Stat(wtDir); os.IsNotExist(err) {
 			d.logger.Printf("recovery: task %s has no worktree, blocking", task.ID)
-			d.db.BlockTask(task.ID, "unknown worker state after daemon restart")
+			if _, err := d.db.BlockTask(task.ID, "unknown worker state after daemon restart"); err != nil {
+				d.logger.Printf("recovery: block task %s: %v", task.ID, err)
+			}
 			continue
 		}
 
@@ -84,14 +86,18 @@ func (d *Daemon) recoverActive() {
 		pidBytes, err := os.ReadFile(pidPath)
 		if err != nil {
 			d.logger.Printf("recovery: task %s has no PID file, blocking", task.ID)
-			d.db.BlockTask(task.ID, "unknown worker state after daemon restart")
+			if _, err := d.db.BlockTask(task.ID, "unknown worker state after daemon restart"); err != nil {
+				d.logger.Printf("recovery: block task %s: %v", task.ID, err)
+			}
 			continue
 		}
 
 		pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 		if err != nil {
 			d.logger.Printf("recovery: task %s has invalid PID file, blocking", task.ID)
-			d.db.BlockTask(task.ID, "invalid PID file after daemon restart")
+			if _, err := d.db.BlockTask(task.ID, "invalid PID file after daemon restart"); err != nil {
+				d.logger.Printf("recovery: block task %s: %v", task.ID, err)
+			}
 			continue
 		}
 
@@ -100,7 +106,9 @@ func (d *Daemon) recoverActive() {
 			d.workers[task.ID] = newAdoptedHandle(pid)
 		} else {
 			d.logger.Printf("recovery: task %s worker (pid %d) is dead, blocking", task.ID, pid)
-			d.db.BlockTask(task.ID, "worker died while daemon was down")
+			if _, err := d.db.BlockTask(task.ID, "worker died while daemon was down"); err != nil {
+				d.logger.Printf("recovery: block task %s: %v", task.ID, err)
+			}
 		}
 	}
 }
@@ -172,7 +180,9 @@ func (d *Daemon) spawnReady() {
 		branchName := fmt.Sprintf("dispatch/%s", task.ID)
 		if err := CreateWorktree(d.repoPath, wtDir, branchName, d.baseBranch); err != nil {
 			d.logger.Printf("spawn: worktree %s: %v", task.ID, err)
-			d.db.ReleaseTask(task.ID)
+			if _, err := d.db.ReleaseTask(task.ID); err != nil {
+				d.logger.Printf("spawn: release task %s: %v", task.ID, err)
+			}
 			continue
 		}
 
@@ -182,13 +192,17 @@ func (d *Daemon) spawnReady() {
 		if err != nil {
 			d.logger.Printf("spawn: worker %s: %v", task.ID, err)
 			RemoveWorktree(d.repoPath, wtDir, branchName, true)
-			d.db.ReleaseTask(task.ID)
+			if _, err := d.db.ReleaseTask(task.ID); err != nil {
+				d.logger.Printf("spawn: release task %s: %v", task.ID, err)
+			}
 			continue
 		}
 
 		// Write PID file.
 		pidPath := filepath.Join(wtDir, "worker.pid")
-		os.WriteFile(pidPath, []byte(strconv.Itoa(handle.PID())), 0o644)
+		if err := os.WriteFile(pidPath, []byte(strconv.Itoa(handle.PID())), 0o644); err != nil {
+			d.logger.Printf("spawn: write PID file %s: %v", task.ID, err)
+		}
 
 		d.workers[task.ID] = handle
 		d.logger.Printf("spawned worker for task %s (pid %d)", task.ID, handle.PID())
@@ -210,10 +224,19 @@ func (d *Daemon) monitorWorkers() {
 		case <-handle.Done():
 			// Worker has exited.
 		default:
-			continue
+			continue // Still running.
 		}
 
 		waitErr := handle.Err()
+
+		// For adopted processes, we can't know the real exit code.
+		// Check if the worker already called dt done before blocking.
+		if waitErr != nil {
+			if task, err := d.db.GetTask(taskID); err == nil && task.Status == "done" {
+				waitErr = nil // Worker completed successfully before we could track it.
+			}
+		}
+
 		finished = append(finished, struct {
 			taskID string
 			err    error
@@ -235,7 +258,9 @@ func (d *Daemon) monitorWorkers() {
 				continue
 			}
 			if task.Status != "done" {
-				d.db.DoneTask(f.taskID)
+				if _, err := d.db.DoneTask(f.taskID); err != nil {
+					d.logger.Printf("monitor: done task %s: %v", f.taskID, err)
+				}
 			}
 			if err := RemoveWorktree(d.repoPath, wtDir, branchName, true); err != nil {
 				d.logger.Printf("monitor: cleanup worktree %s: %v", f.taskID, err)
@@ -248,7 +273,9 @@ func (d *Daemon) monitorWorkers() {
 			if len(reason) > 4000 {
 				reason = reason[:4000]
 			}
-			d.db.BlockTask(f.taskID, reason)
+			if _, err := d.db.BlockTask(f.taskID, reason); err != nil {
+				d.logger.Printf("monitor: block task %s: %v", f.taskID, err)
+			}
 			// Remove worktree but keep branch for inspection.
 			if err := RemoveWorktree(d.repoPath, wtDir, branchName, false); err != nil {
 				d.logger.Printf("monitor: cleanup worktree %s: %v", f.taskID, err)
@@ -277,6 +304,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-ticker.C:
 			d.spawnReady()
 			d.monitorWorkers()
+			d.cleanOrphanedWorktrees()
 			d.logSummary()
 		}
 	}
