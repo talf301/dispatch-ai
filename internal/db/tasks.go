@@ -189,6 +189,19 @@ func (d *DB) ReopenTask(id string) (*Task, error) {
 	return d.GetTask(id)
 }
 
+// GetChildren returns tasks whose parent_id matches the given ID, ordered by created_at ASC.
+func (d *DB) GetChildren(parentID string) ([]Task, error) {
+	rows, err := d.q.Query(
+		`SELECT id, title, description, status, block_reason, assignee, parent_id, created_at, updated_at
+		 FROM tasks WHERE parent_id = ? ORDER BY created_at ASC`, parentID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get children: %w", err)
+	}
+	defer rows.Close()
+	return scanTasks(rows)
+}
+
 // EditTask updates a task's title and/or description. Fields that are nil are left unchanged.
 func (d *DB) EditTask(id string, title, description *string) (*Task, error) {
 	if title == nil && description == nil {

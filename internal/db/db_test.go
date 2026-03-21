@@ -545,3 +545,92 @@ func TestStatusTransition_CreatesNote(t *testing.T) {
 		t.Fatalf("expected 2 notes after release, got %d", len(notes))
 	}
 }
+
+func TestAddNote(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	task, err := d.AddTask("noted task", "", "", "")
+	if err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+
+	author := "human"
+	note, err := d.AddNote(task.ID, "this is a note", &author)
+	if err != nil {
+		t.Fatalf("AddNote: %v", err)
+	}
+
+	if note.Content != "this is a note" {
+		t.Errorf("expected content 'this is a note', got %q", note.Content)
+	}
+	if note.Author == nil || *note.Author != "human" {
+		t.Errorf("expected author 'human', got %v", note.Author)
+	}
+	if note.TaskID != task.ID {
+		t.Errorf("expected task_id %q, got %q", task.ID, note.TaskID)
+	}
+
+	// Verify via GetNotes
+	notes, err := d.GetNotes(task.ID)
+	if err != nil {
+		t.Fatalf("GetNotes: %v", err)
+	}
+	if len(notes) != 1 {
+		t.Fatalf("expected 1 note, got %d", len(notes))
+	}
+	if notes[0].Content != "this is a note" {
+		t.Errorf("expected content 'this is a note', got %q", notes[0].Content)
+	}
+}
+
+func TestGetChildren(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	parent, err := d.AddTask("parent task", "", "", "")
+	if err != nil {
+		t.Fatalf("AddTask parent: %v", err)
+	}
+
+	child1, err := d.AddTask("child 1", "", parent.ID, "")
+	if err != nil {
+		t.Fatalf("AddTask child1: %v", err)
+	}
+
+	child2, err := d.AddTask("child 2", "", parent.ID, "")
+	if err != nil {
+		t.Fatalf("AddTask child2: %v", err)
+	}
+
+	children, err := d.GetChildren(parent.ID)
+	if err != nil {
+		t.Fatalf("GetChildren: %v", err)
+	}
+	if len(children) != 2 {
+		t.Fatalf("expected 2 children, got %d", len(children))
+	}
+
+	// Verify order (created_at ASC) and content
+	if children[0].ID != child1.ID {
+		t.Errorf("expected first child %q, got %q", child1.ID, children[0].ID)
+	}
+	if children[1].ID != child2.ID {
+		t.Errorf("expected second child %q, got %q", child2.ID, children[1].ID)
+	}
+
+	// Task with no children should return empty slice
+	noChildren, err := d.GetChildren(child1.ID)
+	if err != nil {
+		t.Fatalf("GetChildren for leaf: %v", err)
+	}
+	if len(noChildren) != 0 {
+		t.Errorf("expected 0 children for leaf task, got %d", len(noChildren))
+	}
+}

@@ -56,6 +56,47 @@ func printTaskList(tasks []db.Task) {
 	w.Flush()
 }
 
+// printShowResult prints the full show output with notes, deps, and children.
+func printShowResult(r ShowResult) {
+	printTask(r.Task)
+
+	if len(r.Blockers) > 0 {
+		fmt.Println()
+		fmt.Println("Blocked by:")
+		for _, t := range r.Blockers {
+			fmt.Printf("  %s  %s  (%s)\n", t.ID, t.Title, t.Status)
+		}
+	}
+
+	if len(r.Blocking) > 0 {
+		fmt.Println()
+		fmt.Println("Blocking:")
+		for _, t := range r.Blocking {
+			fmt.Printf("  %s  %s  (%s)\n", t.ID, t.Title, t.Status)
+		}
+	}
+
+	if len(r.Children) > 0 {
+		fmt.Println()
+		fmt.Println("Children:")
+		for _, t := range r.Children {
+			fmt.Printf("  %s  %s  (%s)\n", t.ID, t.Title, t.Status)
+		}
+	}
+
+	if len(r.Notes) > 0 {
+		fmt.Println()
+		fmt.Println("Notes:")
+		for _, n := range r.Notes {
+			author := "unknown"
+			if n.Author != nil {
+				author = *n.Author
+			}
+			fmt.Printf("  [%s] %s: %s\n", n.CreatedAt, author, n.Content)
+		}
+	}
+}
+
 // exitError prints the error and exits with code 1.
 func exitError(cmd *cobra.Command, err error) {
 	if jsonFlag(cmd) {
