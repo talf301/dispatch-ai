@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -110,3 +111,84 @@ func TestDaemon_RecoverActive_LiveProcess(t *testing.T) {
 		t.Errorf("status = %s, want active", updated.Status)
 	}
 }
+
+func TestDaemon_SpawnWorker(t *testing.T) {
+	d := openTestDB(t)
+	repoDir := initTestRepo(t)
+	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
+
+	task, _ := d.AddTask("spawn test", "", "", "")
+
+	spawner := &MockSpawner{ExitCode: 0}
+	daemon := New(d, Config{
+		MaxWorkers:   4,
+		RepoPath:     repoDir,
+		WorktreeBase: worktreeBase,
+	}, spawner)
+
+	daemon.spawnReady()
+
+	updated, _ := d.GetTask(task.ID)
+	if updated.Status != "active" {
+		t.Errorf("status = %s, want active", updated.Status)
+	}
+
+	if len(spawner.Spawned) != 1 {
+		t.Fatalf("expected 1 spawn, got %d", len(spawner.Spawned))
+	}
+	if spawner.Spawned[0].ID != task.ID {
+		t.Errorf("spawned task ID = %s, want %s", spawner.Spawned[0].ID, task.ID)
+	}
+}
+
+func TestDaemon_MaxWorkers(t *testing.T) {
+	d := openTestDB(t)
+	repoDir := initTestRepo(t)
+	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
+
+	for i := 0; i < 5; i++ {
+		d.AddTask(fmt.Sprintf("task %d", i), "", "", "")
+	}
+
+	spawner := &MockSpawner{ExitCode: 0}
+	daemon := New(d, Config{
+		MaxWorkers:   2,
+		RepoPath:     repoDir,
+		WorktreeBase: worktreeBase,
+	}, spawner)
+
+	daemon.spawnReady()
+
+	if len(spawner.Spawned) != 2 {
+		t.Errorf("spawned %d tasks, want 2 (max_workers)", len(spawner.Spawned))
+	}
+}
+
+func TestDaemon_MonitorCleanExit(t *testing.T) {
+	d := openTestDB(t)
+	repoDir := initTestRepo(t)
+	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
+
+	task, _ := d.AddTask("monitor test", "", "", "")
+
+	spawner := &MockSpawner{ExitCode: 0}
+	daemon := New(d, Config{
+		MaxWorkers:   4,
+		RepoPath:     repoDir,
+		WorktreeBase: worktreeBase,
+	}, spawner)
+
+	daemon.spawnReady()
+
+	// Manually mark task done (simulating worker calling dt done).
+	d.DoneTask(task.ID)
+
+	// Now monitor should detect the exit and clean up.
+	daemon.monitorWorkers()
+
+	// Worker should be removed from the map.
+	if _, exists := daemon.workers[task.ID]; exists {
+		t.Error("worker still in map after clean exit")
+	}
+}
+

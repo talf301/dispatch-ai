@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -139,3 +140,155 @@ func (h *adoptedHandle) Done() <-chan struct{} { return h.done }
 func (h *adoptedHandle) Err() error           { <-h.done; return h.exitErr }
 func (h *adoptedHandle) Wait() error          { return h.Err() }
 func (h *adoptedHandle) Output() string       { return h.output }
+
+// spawnReady polls for ready tasks and spawns workers up to MaxWorkers.
+func (d *Daemon) spawnReady() {
+	activeCount := len(d.workers)
+	available := d.cfg.MaxWorkers - activeCount
+	if available <= 0 {
+		return
+	}
+
+	tasks, err := d.db.ReadyTasks()
+	if err != nil {
+		d.logger.Printf("poll: ready tasks: %v", err)
+		return
+	}
+
+	for _, task := range tasks {
+		if available <= 0 {
+			break
+		}
+
+		// Claim first to prevent double-spawn.
+		sessionID := fmt.Sprintf("dispatchd-%s", task.ID)
+		if _, err := d.db.ClaimTask(task.ID, sessionID); err != nil {
+			d.logger.Printf("spawn: claim %s: %v (already claimed?)", task.ID, err)
+			continue
+		}
+
+		// Create worktree.
+		wtDir := filepath.Join(d.worktreeBase, task.ID)
+		branchName := fmt.Sprintf("dispatch/%s", task.ID)
+		if err := CreateWorktree(d.repoPath, wtDir, branchName, d.baseBranch); err != nil {
+			d.logger.Printf("spawn: worktree %s: %v", task.ID, err)
+			d.db.ReleaseTask(task.ID)
+			continue
+		}
+
+		// Spawn worker.
+		ctx := context.Background()
+		handle, err := d.spawner.Spawn(ctx, task, wtDir)
+		if err != nil {
+			d.logger.Printf("spawn: worker %s: %v", task.ID, err)
+			RemoveWorktree(d.repoPath, wtDir, branchName, true)
+			d.db.ReleaseTask(task.ID)
+			continue
+		}
+
+		// Write PID file.
+		pidPath := filepath.Join(wtDir, "worker.pid")
+		os.WriteFile(pidPath, []byte(strconv.Itoa(handle.PID())), 0o644)
+
+		d.workers[task.ID] = handle
+		d.logger.Printf("spawned worker for task %s (pid %d)", task.ID, handle.PID())
+		available--
+	}
+}
+
+// monitorWorkers checks each active worker using the Done() channel
+// for non-blocking exit detection.
+func (d *Daemon) monitorWorkers() {
+	var finished []struct {
+		taskID string
+		err    error
+	}
+
+	for taskID, handle := range d.workers {
+		// Non-blocking check: has the worker exited?
+		select {
+		case <-handle.Done():
+			// Worker has exited.
+		default:
+			continue
+		}
+
+		waitErr := handle.Err()
+		finished = append(finished, struct {
+			taskID string
+			err    error
+		}{taskID, waitErr})
+	}
+
+	for _, f := range finished {
+		handle := d.workers[f.taskID]
+		delete(d.workers, f.taskID)
+
+		wtDir := filepath.Join(d.worktreeBase, f.taskID)
+		branchName := fmt.Sprintf("dispatch/%s", f.taskID)
+
+		if f.err == nil {
+			// Clean exit. Check if worker already called dt done.
+			task, err := d.db.GetTask(f.taskID)
+			if err != nil {
+				d.logger.Printf("monitor: get task %s: %v", f.taskID, err)
+				continue
+			}
+			if task.Status != "done" {
+				d.db.DoneTask(f.taskID)
+			}
+			if err := RemoveWorktree(d.repoPath, wtDir, branchName, true); err != nil {
+				d.logger.Printf("monitor: cleanup worktree %s: %v", f.taskID, err)
+			}
+			d.logger.Printf("task %s completed", f.taskID)
+		} else {
+			// Unclean exit. Block with log tail.
+			output := handle.Output()
+			reason := fmt.Sprintf("Worker exited: %v\n\nLast output:\n%s", f.err, output)
+			if len(reason) > 4000 {
+				reason = reason[:4000]
+			}
+			d.db.BlockTask(f.taskID, reason)
+			// Remove worktree but keep branch for inspection.
+			if err := RemoveWorktree(d.repoPath, wtDir, branchName, false); err != nil {
+				d.logger.Printf("monitor: cleanup worktree %s: %v", f.taskID, err)
+			}
+			d.logger.Printf("task %s blocked: %v", f.taskID, f.err)
+		}
+	}
+}
+
+// cleanOrphanedWorktrees removes worktree directories that don't correspond
+// to any active task.
+func (d *Daemon) cleanOrphanedWorktrees() {
+	entries, err := os.ReadDir(d.worktreeBase)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		d.logger.Printf("cleanup: read worktree dir: %v", err)
+		return
+	}
+
+	activeTasks, err := d.db.ListTasks("active", false)
+	if err != nil {
+		d.logger.Printf("cleanup: list active tasks: %v", err)
+		return
+	}
+	activeIDs := make(map[string]bool, len(activeTasks))
+	for _, t := range activeTasks {
+		activeIDs[t.ID] = true
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if !activeIDs[entry.Name()] {
+			wtDir := filepath.Join(d.worktreeBase, entry.Name())
+			branchName := fmt.Sprintf("dispatch/%s", entry.Name())
+			d.logger.Printf("cleanup: removing orphaned worktree %s", entry.Name())
+			RemoveWorktree(d.repoPath, wtDir, branchName, true)
+		}
+	}
+}
