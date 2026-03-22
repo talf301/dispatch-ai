@@ -158,7 +158,8 @@ The `dt` CLI remains the interface for humans and for Claude Code agent sessions
 ```
 1. Call db.ReadyTasks() for available work.
 2. For each ready task, up to the concurrency limit:
-   a. Create a git worktree: git worktree add ~/.dispatch/worktrees/<id> -b dispatch/<id>
+   a. Create a git worktree: git worktree add ~/.dispatch/worktrees/<id> -b dispatch/<id> <base_branch>
+      (base_branch defaults to repo default branch, configurable via --base-branch flag)
    b. Run per-repo setup command if configured (e.g. npm install).
    c. Start Claude Code in the worktree with the worker CLAUDE.md
       and the task description as the initial prompt.
@@ -172,15 +173,15 @@ The `dt` CLI remains the interface for humans and for Claude Code agent sessions
 
 #### Process management
 
-Workers run as child processes. The daemon tracks PID → task ID mapping in memory (not in the database — this is ephemeral orchestration state that dies with the daemon).
+Workers run as child processes. The daemon tracks PID → task ID mapping in memory (not in the database — this is ephemeral orchestration state that dies with the daemon). A PID file is written to `~/.dispatch/worktrees/<id>/worker.pid` on spawn to bridge daemon restarts.
 
 On daemon startup:
 1. Call db.ListTasks("active", false) to get all active tasks.
-2. For each, check if a worktree and process exist.
-3. If the process is gone: run triage flow.
-4. If the worktree is gone: db.ReleaseTask(id).
-
-This handles restarts cleanly. Active tasks with dead processes get triaged. Active tasks with live processes can't happen after a restart (PIDs don't survive), so they all go through triage.
+2. For each, check if a worktree exists at `~/.dispatch/worktrees/<id>`.
+3. If worktree exists, read `worker.pid` and check if the process is alive.
+4. If alive: re-adopt into PID map, resume monitoring.
+5. If dead: block the task (Phase 2) or run triage flow (Phase 3+).
+6. If no worktree or PID file: block the task with "unknown state".
 
 #### Triage flow
 
@@ -202,12 +203,17 @@ If you don't want automated triage (reasonable initially), skip step 4-5 and jus
 
 #### Worktree cleanup
 
-On `dt done`: `git worktree remove ~/.dispatch/worktrees/<id>` and delete the branch.
+**Standalone tasks (no parent):** On `dt done`: `git worktree remove ~/.dispatch/worktrees/<id>` and delete the branch.
+
+**Child tasks (Phase 3+):** On completion, the daemon merges the child branch into the parent plan branch, then removes both the worktree and child branch. On merge conflict, the task is blocked and the worktree and branch are preserved for human resolution.
+
 On triage that reopens: same cleanup, fresh worktree will be created on next spawn.
 
 #### Concurrency
 
-Config file at `~/.dispatch/config.toml`:
+**Phase 2:** CLI flags with environment variable fallbacks (`--max-workers`/`DISPATCH_MAX_WORKERS`, default 4). No config file.
+
+**Phase 5:** Config file at `~/.dispatch/config.toml` with per-repo settings:
 
 ```toml
 max_workers = 4
@@ -223,6 +229,8 @@ The daemon reads this on startup and on SIGHUP.
 #### Session logging
 
 Each worker's stdout/stderr is tee'd to `~/.dispatch/sessions/<id>.log`. This serves double duty: human debugging and triage agent context.
+
+**Phase 2:** Output captured in-memory only (last 100 lines ring buffer) for crash block reasons. Disk logging deferred to Phase 3 when the triage agent needs full session logs as context.
 
 ---
 
@@ -255,18 +263,20 @@ Core instructions:
 - If not recoverable: add a note with structured diagnosis (what was attempted, what failed, what a human should look at), leave the task blocked.
 - Do not attempt large-scale fixes. You are assessing, not implementing.
 
-#### `planner.md`
+#### `dispatch-planner` skill
 
-Not a daemon component. A prompt you use in a regular Claude Code session when you want to decompose work into tasks.
+Not a daemon component. A superpowers skill (`/dispatch-planner`) you invoke in a Claude Code session after brainstorming produces an approved spec. It replaces `writing-plans` when targeting dispatch for execution.
 
-Core instructions:
-- You have access to `dt` CLI and the project codebase.
-- The human will describe what they want. Read relevant code, then propose a task breakdown.
-- Each task should touch ≤8 files and represent ≤200 lines of changes. Split larger work.
-- Write concrete task descriptions: list the files to modify, the approach, and how to verify.
-- Wire dependencies with `dt dep`. A task should only be blocked by tasks it genuinely cannot start without.
-- Use `dt batch` to create all tasks atomically.
-- Do not implement anything. Planning only.
+See `docs/superpowers/specs/2026-03-21-dispatch-planner-design.md` for the full design.
+
+Core behavior:
+- Reads the spec and relevant codebase areas.
+- Presents a parallelism rationale (what's parallel, what's sequential, why) for user approval.
+- Proposes a task list with descriptions (what/scope/footprint/verification/context) and dependency wiring.
+- Dispatches a reviewer subagent to check for overlapping files, oversized tasks, missing deps, underspecified scope.
+- Creates a parent task + children atomically via `dt batch` with back-references (`$1`, `$2`, etc.).
+- Tasks sized by scope coherence and decision density, not hard line counts. Heuristic: >10 files or >300 lines of non-trivial logic = consider splitting.
+- Does not implement anything. Planning only.
 
 ---
 
@@ -347,11 +357,26 @@ Build `dispatchd` with the main loop: poll ready → create worktree → spawn C
 
 **Exit criteria:** Create a task manually. Start daemon. Worker spawns in a worktree, implements the task, calls `dt done`, daemon tears down worktree. Kill a worker with SIGKILL. Daemon detects death, blocks the task with log tail.
 
-### Phase 3: Triage agent
+### Phase 3: Planner, triage agent, and prompt files
 
-Add the triage flow: on worker crash, spawn a short-lived Claude session with triage.md and crash context. Test with deliberately crashable tasks.
+Phase 3 adds the three agent roles and the merge model that makes the planner usable:
 
-**Exit criteria:** Worker crashes on a task with partial work committed. Triage agent assesses, commits partial work, reopens. Fresh worker picks up and completes.
+- **`dispatch-planner` skill** — decomposes specs into parallel task graphs with dependency wiring. Creates parent task + children via `dt batch` with back-references.
+- **`worker.md` system prompt** — injected into worker sessions (currently empty in `ClaudeSpawner`).
+- **`triage.md` system prompt** — injected into triage sessions on worker crash.
+- **Session logging to disk** (`~/.dispatch/sessions/<id>.log`) — full session context for the triage agent.
+- **Triage flow** — on worker crash, spawn a short-lived Claude session with triage.md and crash context.
+- **Parent task / merge model:**
+  - Parent tasks (tasks with children) are excluded from `ReadyTasks` and never get workers.
+  - Child worktrees branch from the parent's plan branch (`dispatch/plan-<id>`), created lazily on first child spawn.
+  - On child completion, the daemon merges the child branch into the parent branch before marking done. Merge conflicts block the task, preserving the branch and worktree for human resolution.
+  - Parent auto-completes when all children are done. The parent branch is the PR branch.
+- **`dt batch` back-references** — `$1`, `$2` syntax so the planner can create parent + children + deps atomically.
+
+**Exit criteria:**
+- Planner decomposes a spec into ≥5 tasks with dependencies. Parent branch accumulates completed work via merge. Dependent tasks see blocker's merged work when they start. Merge conflict blocks the task. Parent auto-completes when all children done. Parent branch is PR-ready.
+- Worker crashes on a task with partial work committed. Triage agent assesses, commits partial work, reopens. Fresh worker picks up and completes.
+- Worker sessions are logged to disk. Worker receives the `worker.md` system prompt.
 
 ### Phase 4: Polish from use
 
@@ -373,7 +398,7 @@ Lightweight terminal UI showing live worker state, task tree, and session attach
 
 ### Future phases (evaluate from experience)
 
-- **Chunks (epics).** A chunk is a group of tasks that represents a PR-sized unit of work — what a single planning session produces. Chunks carry architectural context that individual task descriptions shouldn't duplicate. Each task still gets its own worktree and branch for full parallelism. Chunks are metadata: they group tasks, they're what the planner outputs, and they scope the eventual PR. When all tasks in a chunk are done, a merge step collects the branches in dependency order into a single chunk branch, runs the full test suite, and opens (or prepares) a PR. This merge step can be manual, a CLI command (`dt merge-chunk <id>`), or a short-lived agent session with a merge prompt. The merge agent's instructions: check out a fresh branch from main, merge each task branch in dependency order, resolve conflicts (or flag them for human), run tests, commit. If conflicts are non-trivial, block the chunk and surface the conflicting files. Schema change: add a `type` field to tasks (`task` or `chunk`), or just use parent/child semantics where a parent with children is a chunk.
+- **Chunks (epics).** Phase 3's parent task / merge model partially addresses this — a parent task groups children and its branch accumulates completed work into a PR-ready branch. The full chunk concept adds: merge agents for automated conflict resolution, `dt merge-chunk <id>` command, full test suite runs before PR creation, and architectural context that individual task descriptions shouldn't duplicate. The current model uses a shared parent branch where all children merge sequentially; a more sophisticated model where branch topology mirrors the dependency graph (each task branches from its dependency's completed branch, merges only at convergence points) is documented as a deferred design option.
 - FTS search on tasks
 - Git sync / JSONL export for cross-machine portability
 - Task templates with structured description fields
@@ -393,6 +418,33 @@ Decisions made during Phase 1 that inform later phases:
 - **Status transitions create system notes.** Every call to ClaimTask, DoneTask, BlockTask, etc. appends a note with `author="system"` and content like "Status changed: open → active". These appear in `dt show` output and provide status history without a separate table.
 - **Module path:** `github.com/dispatch-ai/dispatch`. Both `dt` and `dispatchd` binaries live in `cmd/`.
 
-## 7. Language
+## 8. Phase 2 Implementation Notes
+
+Decisions made during Phase 2 that inform later phases:
+
+- **`WorkerSpawner` interface with `Done()` channel.** The PRD described `WorkerHandle` with just `PID()`, `Wait()`, and `Output()`. The implementation adds `Done() <-chan struct{}` and `Err() error` for non-blocking exit detection. `monitorWorkers()` uses `select` on `Done()` instead of polling `isProcessAlive()` — this is necessary because PID-based liveness checks don't work for test doubles. The `Done()` channel is closed when the process exits; `Err()` returns the exit error after `Done()` is closed. Both `claudeHandle` and `adoptedHandle` implement this pattern.
+- **`ClaudeSpawner` is separate from `MockSpawner`.** `MockSpawner` lives in `mock_spawner.go` (not a `_test.go` file) because integration tests in the `tests` package need to import it. `ClaudeSpawner` is in `claude_spawner.go`.
+- **Re-adopted workers check task status before blocking.** The `adoptedHandle` always reports "status unknown" on exit since we can't get the real exit code from a process we didn't spawn. `monitorWorkers()` checks if the task is already `done` (worker called `dt done` before exiting) before deciding to block. This prevents incorrectly blocking workers that completed successfully while the daemon was down.
+- **`worker.md` system prompt not loaded yet.** `ClaudeSpawner.SystemPrompt` is empty string with a TODO. Phase 3 needs to load the `worker.md` file and pass its contents. Consider a `--worker-prompt` flag or reading from a conventional path like `~/.dispatch/worker.md`.
+- **No config file.** Configuration is CLI flags with env var fallbacks (`--max-workers`/`DISPATCH_MAX_WORKERS`, `--db`/`DISPATCH_DB`, `--base-branch`/`DISPATCH_BASE_BRANCH`, `--repo`/`DISPATCH_REPO`, `--poll-interval`/`DISPATCH_POLL_INTERVAL`). Config file deferred to Phase 5.
+- **Session logging deferred.** Worker output is captured in-memory only (100-line ring buffer) for crash block reasons. Phase 3 needs to add disk logging (`~/.dispatch/sessions/<id>.log`) for the triage agent to read full session context.
+- **Orphaned worktree cleanup runs every poll cycle.** The daemon scans `~/.dispatch/worktrees/` and removes directories that don't correspond to active tasks. This handles edge cases like daemon crashes mid-spawn.
+- **`ClaimTask` is not atomic.** The DB layer's `ClaimTask` does a read-then-write (check assignee is nil, then update). Two concurrent daemons could theoretically double-claim. This is acceptable for single-daemon use but would need a `WHERE assignee IS NULL` atomic update for multi-daemon scenarios.
+- **On unclean exit, branch is preserved.** Worktree is removed but the `dispatch/<task_id>` branch is kept for human inspection. On clean exit, both worktree and branch are removed.
+
+## 10. Phase 3 Implementation Notes
+
+Decisions made during Phase 3 that inform later phases:
+
+- **`dt batch` back-references.** `$1`, `$2`, etc. in batch input are substituted with the task ID returned by the corresponding earlier `add` command (1-indexed). This allows the planner to create parent + children + deps in a single atomic transaction. Note: `$N` patterns inside quoted strings (descriptions, titles) are also substituted — the planner should avoid literal `$N` in task descriptions.
+- **Parent branch naming convention.** `dispatch/plan-<parentID>` for parent plan branches. Created lazily by the daemon when the first child task is ready to spawn, branched from the base branch.
+- **Merge-on-completion ordering.** For child tasks, the daemon merges the child branch into the parent branch *before* calling `DoneTask`. This ensures dependent tasks (which wait for `status = 'done'` via `ReadyTasks`) always see the blocker's work on the parent branch when they spawn. On merge conflict, the task is blocked without ever being marked done.
+- **Parent auto-completion.** `DoneTask` recursively checks if all siblings are done and auto-completes the parent. Errors from the recursive call are propagated to the caller.
+- **Parent tasks excluded from `ReadyTasks`.** Any task with children is excluded via `NOT EXISTS (SELECT 1 FROM tasks child WHERE child.parent_id = t.id)`. The daemon never spawns workers for parent tasks.
+- **Parent plan branches are safe from orphan cleanup.** `cleanOrphanedWorktrees` only removes worktree directories, not bare branches. Parent plan branches have no worktree directory, so they are never cleaned up. This is an implicit invariant — if orphan cleanup is ever changed to also clean branches, parent plan branches must be explicitly excluded.
+
+## 11. Language
+
+Go. SQLite via `mattn/go-sqlite3` (CGO). CLI via `cobra`. Single binary for `dt`, single binary for `dispatchd`.
 
 Go. SQLite via `mattn/go-sqlite3` (CGO). CLI via `cobra`. Single binary for `dt`, single binary for `dispatchd`.
