@@ -53,18 +53,27 @@ Present the full set of tasks — title, description, and dependency wiring. See
 
 ### Phase 4: Review Loop
 
-Dispatch a reviewer subagent that checks:
+Dispatch a reviewer subagent (via the Agent tool within the Claude Code session) that checks:
 
 - Overlapping files between tasks marked as parallel
 - Tasks with too many independent decisions or scattered scope (see sizing guidelines)
 - Missing dependencies (task B clearly needs task A's output but no dep wired)
 - Underspecified scope boundaries (description doesn't make clear what's in/out)
 
-Fix issues and re-dispatch. Max 3 iterations, then surface to human for guidance.
+The planner fixes issues identified by the reviewer and re-dispatches the review. Max 3 iterations, then surface to human for guidance.
 
 ### Phase 5: Create
 
-Run `dt batch` to create the parent task and all child tasks atomically. Wire dependencies with `dt dep`.
+Run `dt batch` to create the parent task and all child tasks atomically. The batch input is one command per line via stdin:
+
+```
+add "Plan: <spec title>" -d "<plan-level description>"
+add "<task 1 title>" -d "<task 1 description>" -p <parent_id>
+add "<task 2 title>" -d "<task 2 description>" -p <parent_id>
+dep <task_1_id> <task_2_id>
+```
+
+Note: since `dt batch` executes in a single transaction, the planner uses placeholder IDs and maps them to the real IDs returned by each `add` command. (This may require a batch format enhancement if `dt batch` doesn't currently support back-references — flag in implementation planning.)
 
 ---
 
@@ -84,7 +93,7 @@ A task description includes:
 
 ## 5. Task Sizing
 
-Tasks are sized by **scope coherence** and **decision density**, not hard line counts.
+Tasks are sized by **scope coherence** and **decision density**, not hard line counts. This supersedes the PRD's `planner.md` guideline of "≤8 files and ≤200 lines" — those numbers were a placeholder before the planner was fully designed.
 
 **Scope coherence:** The task touches one logical area. A task that modifies the database layer is coherent. A task that modifies the database layer, the API endpoints, and the frontend components is not — even if the total line count is small.
 
@@ -100,7 +109,9 @@ Tasks are sized by **scope coherence** and **decision density**, not hard line c
 
 ### Parent Branch
 
-The planner creates a parent task representing the overall plan. This parent task gets a long-lived branch (`dispatch/plan-<id>`). The parent task is never assigned to a worker — it exists as a grouping mechanism and merge target.
+The planner creates a parent task representing the overall plan. This parent task is never assigned to a worker — it exists as a grouping mechanism and merge target.
+
+When the daemon first encounters a ready child task whose parent has no branch yet, it creates the parent branch (`dispatch/plan-<id>`) from the base branch. This is the trigger — the branch is created lazily on first child spawn, not when the parent task is created via `dt`.
 
 All child tasks are created with `-p <parent_id>`.
 
@@ -114,7 +125,7 @@ When a child task completes successfully:
 
 1. Daemon merges the child's branch into the parent branch
 2. If merge is clean: delete the child branch and worktree
-3. If merge conflicts: block the task, surface to human for resolution
+3. If merge conflicts: block the task with a description of the conflicting files. Preserve the child branch and worktree so a human can resolve the conflict. After human resolution, the task can be reopened and the daemon retries the merge.
 
 Dependent tasks don't start until their blockers have completed *and been merged into the parent branch*. This guarantees a worker always sees the work it depends on.
 
@@ -175,3 +186,4 @@ The following PRD sections need updating to reflect this design:
 2. **Phase 3 scope (Section 5):** Add planner skill, parent task concept, and merge model to Phase 3 deliverables. Update exit criteria.
 3. **Worktree cleanup (Section 2.2):** Update to reflect that child task branches merge into parent rather than being deleted on clean exit.
 4. **Phase 2 implementation notes (Section 8):** Note that branch deletion on clean exit will change in Phase 3 when parent tasks are introduced.
+5. **Future phases (Section 5):** Note that the chunks/epics concept is partially addressed by the parent task / merge model — the full chunk design (merge agents, `dt merge-chunk`) builds on this foundation.
