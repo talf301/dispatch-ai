@@ -252,7 +252,15 @@ func TestDaemon_MonitorCleanExit(t *testing.T) {
 	// Manually mark task done (simulating worker calling dt done).
 	d.DoneTask(task.ID)
 
-	// Now monitor should detect the exit and clean up.
+	// First monitorWorkers detects worker exit and spawns reviewer.
+	daemon.monitorWorkers()
+
+	// Reviewer should now be in the map (MockSpawner exits 0 immediately).
+	if role := daemon.taskRoles[task.ID]; role != RoleReviewer {
+		t.Errorf("expected reviewer role, got %q", role)
+	}
+
+	// Second monitorWorkers detects reviewer exit (clean) and completes the task.
 	daemon.monitorWorkers()
 
 	// Worker should be removed from the map.
@@ -303,7 +311,15 @@ func TestDaemon_MergeChildOnCompletion(t *testing.T) {
 	// Mark child done (simulating worker calling dt done).
 	d.DoneTask(child.ID)
 
-	// Run monitorWorkers — should merge child into parent branch then clean up.
+	// First monitorWorkers detects worker exit and spawns reviewer.
+	daemon.monitorWorkers()
+
+	// Reviewer should now be in the map.
+	if role := daemon.taskRoles[child.ID]; role != RoleReviewer {
+		t.Errorf("expected reviewer role, got %q", role)
+	}
+
+	// Second monitorWorkers detects reviewer exit (clean) and merges.
 	daemon.monitorWorkers()
 
 	// Verify: child worker removed from map.

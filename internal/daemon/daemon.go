@@ -23,6 +23,7 @@ type Config struct {
 	RepoPath     string
 	PollInterval time.Duration
 	WorktreeBase string // default ~/.dispatch/worktrees
+	SessionDir   string // path to ~/.dispatch/sessions/
 }
 
 // DefaultConfig returns configuration with defaults.
@@ -39,27 +40,33 @@ func DefaultConfig() Config {
 
 // Daemon orchestrates worker processes.
 type Daemon struct {
-	db           *db.DB
-	cfg          Config
-	spawner      WorkerSpawner
-	worktreeBase string
-	repoPath     string
-	baseBranch   string
-	workers      map[string]WorkerHandle // taskID -> handle
-	logger       *log.Logger
+	db                     *db.DB
+	cfg                    Config
+	spawner                WorkerSpawner
+	worktreeBase           string
+	repoPath               string
+	baseBranch             string
+	workers                map[string]WorkerHandle // taskID -> handle
+	taskRoles              map[string]SpawnRole     // taskID -> current role
+	reviewRound            map[string]int           // taskID -> review round count
+	noteCountAtReviewStart map[string]int           // taskID -> note count when reviewer was spawned
+	logger                 *log.Logger
 }
 
 // New creates a Daemon from the given config and spawner.
 func New(database *db.DB, cfg Config, spawner WorkerSpawner) *Daemon {
 	return &Daemon{
-		db:           database,
-		cfg:          cfg,
-		spawner:      spawner,
-		worktreeBase: cfg.WorktreeBase,
-		repoPath:     cfg.RepoPath,
-		baseBranch:   cfg.BaseBranch,
-		workers:      make(map[string]WorkerHandle),
-		logger:       log.New(os.Stderr, "[dispatchd] ", log.LstdFlags),
+		db:                     database,
+		cfg:                    cfg,
+		spawner:                spawner,
+		worktreeBase:           cfg.WorktreeBase,
+		repoPath:               cfg.RepoPath,
+		baseBranch:             cfg.BaseBranch,
+		workers:                make(map[string]WorkerHandle),
+		taskRoles:              make(map[string]SpawnRole),
+		reviewRound:            make(map[string]int),
+		noteCountAtReviewStart: make(map[string]int),
+		logger:                 log.New(os.Stderr, "[dispatchd] ", log.LstdFlags),
 	}
 }
 
@@ -176,35 +183,54 @@ func (d *Daemon) spawnReady() {
 			continue
 		}
 
-		// Determine which branch to base the worktree on.
-		baseBranch := d.baseBranch
-		if task.ParentID != nil {
-			parentBranch := fmt.Sprintf("dispatch/plan-%s", *task.ParentID)
-			if !BranchExists(d.repoPath, parentBranch) {
-				base := d.baseBranch
-				if base == "" {
-					base, _ = DetectDefaultBranch(d.repoPath)
-				}
-				cmd := exec.Command("git", "branch", parentBranch, base)
-				cmd.Dir = d.repoPath
-				if out, err := cmd.CombinedOutput(); err != nil {
-					d.logger.Printf("spawn: create parent branch %s: %v\n%s", parentBranch, err, out)
-					d.db.ReleaseTask(task.ID)
-					continue
-				}
-			}
-			baseBranch = parentBranch
-		}
-
-		// Create worktree.
 		wtDir := filepath.Join(d.worktreeBase, task.ID)
 		branchName := fmt.Sprintf("dispatch/%s", task.ID)
-		if err := CreateWorktree(d.repoPath, wtDir, branchName, baseBranch); err != nil {
-			d.logger.Printf("spawn: worktree %s: %v", task.ID, err)
-			if _, err := d.db.ReleaseTask(task.ID); err != nil {
-				d.logger.Printf("spawn: release task %s: %v", task.ID, err)
+
+		// Check if worktree already exists (reopened after review rejection).
+		if _, statErr := os.Stat(wtDir); statErr != nil {
+			// Worktree doesn't exist — create it.
+			// Determine which branch to base the worktree on.
+			baseBranch := d.baseBranch
+			if task.ParentID != nil {
+				parentBranch := fmt.Sprintf("dispatch/plan-%s", *task.ParentID)
+				if !BranchExists(d.repoPath, parentBranch) {
+					base := d.baseBranch
+					if base == "" {
+						base, _ = DetectDefaultBranch(d.repoPath)
+					}
+					cmd := exec.Command("git", "branch", parentBranch, base)
+					cmd.Dir = d.repoPath
+					if out, err := cmd.CombinedOutput(); err != nil {
+						d.logger.Printf("spawn: create parent branch %s: %v\n%s", parentBranch, err, out)
+						d.db.ReleaseTask(task.ID)
+						continue
+					}
+				}
+				baseBranch = parentBranch
 			}
-			continue
+
+			if err := CreateWorktree(d.repoPath, wtDir, branchName, baseBranch); err != nil {
+				d.logger.Printf("spawn: worktree %s: %v", task.ID, err)
+				if _, err := d.db.ReleaseTask(task.ID); err != nil {
+					d.logger.Printf("spawn: release task %s: %v", task.ID, err)
+				}
+				continue
+			}
+		}
+
+		// Recover review round from existing log files (handles daemon restart).
+		if _, ok := d.reviewRound[task.ID]; !ok {
+			d.reviewRound[task.ID] = recoverReviewRound(d.cfg.SessionDir, task.ID)
+		}
+
+		// Set log suffix for session logging.
+		round := d.reviewRound[task.ID]
+		if cs, ok := d.spawner.(*ClaudeSpawner); ok {
+			if round == 0 {
+				cs.LogSuffix = ""
+			} else {
+				cs.LogSuffix = fmt.Sprintf("-%d", round+1)
+			}
 		}
 
 		// Spawn worker.
@@ -226,6 +252,7 @@ func (d *Daemon) spawnReady() {
 		}
 
 		d.workers[task.ID] = handle
+		d.taskRoles[task.ID] = RoleWorker
 		d.logger.Printf("spawned worker for task %s (pid %d)", task.ID, handle.PID())
 		available--
 	}
@@ -266,71 +293,195 @@ func (d *Daemon) monitorWorkers() {
 
 	for _, f := range finished {
 		handle := d.workers[f.taskID]
+		role := d.taskRoles[f.taskID]
 		delete(d.workers, f.taskID)
+		delete(d.taskRoles, f.taskID)
 
-		if f.err == nil {
-			task, err := d.db.GetTask(f.taskID)
-			if err != nil {
-				d.logger.Printf("monitor: get task %s: %v", f.taskID, err)
-				continue
+		// Preserve adopted-process check.
+		waitErr := f.err
+		if waitErr != nil {
+			if task, err := d.db.GetTask(f.taskID); err == nil && task.Status == "done" {
+				waitErr = nil
 			}
+		}
 
-			wtDir := filepath.Join(d.worktreeBase, f.taskID)
-			branchName := fmt.Sprintf("dispatch/%s", f.taskID)
-
-			if task.ParentID != nil {
-				// Child task — merge into parent branch BEFORE marking done.
-				parentBranch := fmt.Sprintf("dispatch/plan-%s", *task.ParentID)
-				if err := MergeBranch(d.repoPath, branchName, parentBranch); err != nil {
-					d.logger.Printf("monitor: merge %s into %s failed: %v", branchName, parentBranch, err)
-					reason := fmt.Sprintf("Merge conflict merging into plan branch:\n%v", err)
-					if _, err := d.db.BlockTask(f.taskID, reason); err != nil {
-						d.logger.Printf("monitor: block task %s: %v", f.taskID, err)
-					}
-					// Preserve branch and worktree for human resolution.
-					continue
-				}
-				// Merge succeeded — now mark done (which may auto-complete parent).
-				if task.Status != "done" {
-					if _, err := d.db.DoneTask(f.taskID); err != nil {
-						d.logger.Printf("monitor: done task %s: %v", f.taskID, err)
-					}
-				}
-				// Clean merge — remove child branch and worktree.
-				if err := RemoveWorktree(d.repoPath, wtDir, branchName, true); err != nil {
-					d.logger.Printf("monitor: cleanup worktree %s: %v", f.taskID, err)
-				}
+		if waitErr == nil {
+			if role == RoleReviewer {
+				d.handleReviewApproval(f.taskID)
 			} else {
-				// Standalone task (no parent) — original behavior.
-				if task.Status != "done" {
-					if _, err := d.db.DoneTask(f.taskID); err != nil {
-						d.logger.Printf("monitor: done task %s: %v", f.taskID, err)
-					}
-				}
-				if err := RemoveWorktree(d.repoPath, wtDir, branchName, true); err != nil {
-					d.logger.Printf("monitor: cleanup worktree %s: %v", f.taskID, err)
-				}
+				d.handleWorkerComplete(f.taskID)
 			}
-			d.logger.Printf("task %s completed", f.taskID)
 		} else {
-			// Unclean exit. Block with log tail.
-			wtDir := filepath.Join(d.worktreeBase, f.taskID)
-			branchName := fmt.Sprintf("dispatch/%s", f.taskID)
-			output := handle.Output()
-			reason := fmt.Sprintf("Worker exited: %v\n\nLast output:\n%s", f.err, output)
-			if len(reason) > 4000 {
-				reason = reason[:4000]
+			if role == RoleReviewer {
+				d.handleReviewerExit(f.taskID, handle)
+			} else {
+				d.handleWorkerCrash(f.taskID, waitErr, handle)
 			}
-			if _, err := d.db.BlockTask(f.taskID, reason); err != nil {
-				d.logger.Printf("monitor: block task %s: %v", f.taskID, err)
-			}
-			// Remove worktree but keep branch for inspection.
-			if err := RemoveWorktree(d.repoPath, wtDir, branchName, false); err != nil {
-				d.logger.Printf("monitor: cleanup worktree %s: %v", f.taskID, err)
-			}
-			d.logger.Printf("task %s blocked: %v", f.taskID, f.err)
 		}
 	}
+}
+
+// recoverReviewRound globs session log files to determine the current review round.
+func recoverReviewRound(sessionDir, taskID string) int {
+	if sessionDir == "" {
+		return 0
+	}
+	pattern := filepath.Join(sessionDir, taskID+"-review-*.log")
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) == 0 {
+		return 0
+	}
+	return len(matches)
+}
+
+// handleWorkerComplete spawns a reviewer in the same worktree after a worker exits 0.
+func (d *Daemon) handleWorkerComplete(taskID string) {
+	wtDir := filepath.Join(d.worktreeBase, taskID)
+
+	task, err := d.db.GetTask(taskID)
+	if err != nil {
+		d.logger.Printf("review: get task %s: %v", taskID, err)
+		return
+	}
+
+	// Record note count before reviewer spawns.
+	notes, err := d.db.GetNotes(taskID)
+	if err != nil {
+		d.logger.Printf("review: get notes %s: %v", taskID, err)
+		notes = nil
+	}
+	d.noteCountAtReviewStart[taskID] = len(notes)
+
+	// Set log suffix for session logging.
+	round := d.reviewRound[taskID] + 1
+	if cs, ok := d.spawner.(*ClaudeSpawner); ok {
+		cs.LogSuffix = fmt.Sprintf("-review-%d", round)
+	}
+
+	ctx := context.Background()
+	handle, err := d.spawner.Spawn(ctx, *task, wtDir, RoleReviewer)
+	if err != nil {
+		d.logger.Printf("review: spawn reviewer %s: %v", taskID, err)
+		if _, err := d.db.BlockTask(taskID, fmt.Sprintf("failed to spawn reviewer: %v", err)); err != nil {
+			d.logger.Printf("review: block task %s: %v", taskID, err)
+		}
+		return
+	}
+
+	// Write PID file for reviewer.
+	pidPath := filepath.Join(wtDir, "worker.pid")
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(handle.PID())), 0o644); err != nil {
+		d.logger.Printf("review: write PID file %s: %v", taskID, err)
+	}
+
+	d.workers[taskID] = handle
+	d.taskRoles[taskID] = RoleReviewer
+	d.logger.Printf("spawned reviewer for task %s (pid %d)", taskID, handle.PID())
+}
+
+// handleReviewApproval merges the branch and marks the task done.
+func (d *Daemon) handleReviewApproval(taskID string) {
+	task, err := d.db.GetTask(taskID)
+	if err != nil {
+		d.logger.Printf("review-done: get task %s: %v", taskID, err)
+		return
+	}
+
+	wtDir := filepath.Join(d.worktreeBase, taskID)
+	branchName := fmt.Sprintf("dispatch/%s", taskID)
+
+	if task.ParentID != nil {
+		parentBranch := fmt.Sprintf("dispatch/plan-%s", *task.ParentID)
+		if err := MergeBranch(d.repoPath, branchName, parentBranch); err != nil {
+			d.logger.Printf("review-done: merge %s into %s failed: %v", branchName, parentBranch, err)
+			reason := fmt.Sprintf("Merge conflict merging into plan branch:\n%v", err)
+			if _, err := d.db.BlockTask(taskID, reason); err != nil {
+				d.logger.Printf("review-done: block task %s: %v", taskID, err)
+			}
+			return
+		}
+		if task.Status != "done" {
+			if _, err := d.db.DoneTask(taskID); err != nil {
+				d.logger.Printf("review-done: done task %s: %v", taskID, err)
+			}
+		}
+		if err := RemoveWorktree(d.repoPath, wtDir, branchName, true); err != nil {
+			d.logger.Printf("review-done: cleanup worktree %s: %v", taskID, err)
+		}
+	} else {
+		if task.Status != "done" {
+			if _, err := d.db.DoneTask(taskID); err != nil {
+				d.logger.Printf("review-done: done task %s: %v", taskID, err)
+			}
+		}
+		if err := RemoveWorktree(d.repoPath, wtDir, branchName, true); err != nil {
+			d.logger.Printf("review-done: cleanup worktree %s: %v", taskID, err)
+		}
+	}
+	delete(d.reviewRound, taskID)
+	delete(d.noteCountAtReviewStart, taskID)
+	d.logger.Printf("task %s completed (review approved)", taskID)
+}
+
+// handleReviewerExit handles a reviewer that exited non-zero.
+// Compares current note count to the count recorded when the reviewer was spawned.
+func (d *Daemon) handleReviewerExit(taskID string, handle WorkerHandle) {
+	notes, err := d.db.GetNotes(taskID)
+	if err != nil {
+		d.logger.Printf("review-exit: get notes %s: %v", taskID, err)
+	}
+
+	startCount := d.noteCountAtReviewStart[taskID]
+	newNotes := len(notes) > startCount
+
+	if newNotes {
+		// Intentional rejection — reopen for retry.
+		if _, err := d.db.ReopenTask(taskID); err != nil {
+			d.logger.Printf("review-reject: reopen task %s: %v", taskID, err)
+			return
+		}
+		d.reviewRound[taskID]++
+		delete(d.noteCountAtReviewStart, taskID)
+		d.logger.Printf("task %s review rejected (round %d), reopening", taskID, d.reviewRound[taskID])
+	} else {
+		// Reviewer crashed — block.
+		wtDir := filepath.Join(d.worktreeBase, taskID)
+		branchName := fmt.Sprintf("dispatch/%s", taskID)
+		output := handle.Output()
+		reason := fmt.Sprintf("Reviewer crashed: exit non-zero without feedback\n\nLast output:\n%s", output)
+		if len(reason) > 4000 {
+			reason = reason[:4000]
+		}
+		if _, err := d.db.BlockTask(taskID, reason); err != nil {
+			d.logger.Printf("review-crash: block task %s: %v", taskID, err)
+		}
+		if err := RemoveWorktree(d.repoPath, wtDir, branchName, false); err != nil {
+			d.logger.Printf("review-crash: cleanup worktree %s: %v", taskID, err)
+		}
+		delete(d.reviewRound, taskID)
+		delete(d.noteCountAtReviewStart, taskID)
+		d.logger.Printf("task %s blocked: reviewer crashed", taskID)
+	}
+}
+
+// handleWorkerCrash blocks a crashed worker with log context.
+func (d *Daemon) handleWorkerCrash(taskID string, exitErr error, handle WorkerHandle) {
+	wtDir := filepath.Join(d.worktreeBase, taskID)
+	branchName := fmt.Sprintf("dispatch/%s", taskID)
+	output := handle.Output()
+	reason := fmt.Sprintf("Worker exited: %v\n\nLast output:\n%s", exitErr, output)
+	if len(reason) > 4000 {
+		reason = reason[:4000]
+	}
+	if _, err := d.db.BlockTask(taskID, reason); err != nil {
+		d.logger.Printf("monitor: block task %s: %v", taskID, err)
+	}
+	if err := RemoveWorktree(d.repoPath, wtDir, branchName, false); err != nil {
+		d.logger.Printf("monitor: cleanup worktree %s: %v", taskID, err)
+	}
+	delete(d.reviewRound, taskID)
+	delete(d.noteCountAtReviewStart, taskID)
+	d.logger.Printf("task %s blocked: %v", taskID, exitErr)
 }
 
 // Run starts the daemon main loop. It blocks until ctx is cancelled.
@@ -432,12 +583,17 @@ func (d *Daemon) cleanOrphanedWorktrees() {
 		d.logger.Printf("cleanup: list blocked tasks: %v", err)
 		return
 	}
-	keepIDs := make(map[string]bool, len(activeTasks)+len(blockedTasks))
+	keepIDs := make(map[string]bool, len(activeTasks)+len(blockedTasks)+len(d.workers))
 	for _, t := range activeTasks {
 		keepIDs[t.ID] = true
 	}
 	for _, t := range blockedTasks {
 		keepIDs[t.ID] = true
+	}
+	// Also keep worktrees for tasks the daemon is actively managing
+	// (e.g., reviewer running after worker marked task done).
+	for taskID := range d.workers {
+		keepIDs[taskID] = true
 	}
 
 	for _, entry := range entries {
