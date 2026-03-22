@@ -404,7 +404,8 @@ func (d *Daemon) logSummary() {
 }
 
 // cleanOrphanedWorktrees removes worktree directories that don't correspond
-// to any active task.
+// to any active or blocked task. Blocked tasks may have worktrees preserved
+// for human merge conflict resolution.
 func (d *Daemon) cleanOrphanedWorktrees() {
 	entries, err := os.ReadDir(d.worktreeBase)
 	if err != nil {
@@ -420,16 +421,24 @@ func (d *Daemon) cleanOrphanedWorktrees() {
 		d.logger.Printf("cleanup: list active tasks: %v", err)
 		return
 	}
-	activeIDs := make(map[string]bool, len(activeTasks))
+	blockedTasks, err := d.db.ListTasks("blocked", false)
+	if err != nil {
+		d.logger.Printf("cleanup: list blocked tasks: %v", err)
+		return
+	}
+	keepIDs := make(map[string]bool, len(activeTasks)+len(blockedTasks))
 	for _, t := range activeTasks {
-		activeIDs[t.ID] = true
+		keepIDs[t.ID] = true
+	}
+	for _, t := range blockedTasks {
+		keepIDs[t.ID] = true
 	}
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		if !activeIDs[entry.Name()] {
+		if !keepIDs[entry.Name()] {
 			wtDir := filepath.Join(d.worktreeBase, entry.Name())
 			branchName := fmt.Sprintf("dispatch/%s", entry.Name())
 			d.logger.Printf("cleanup: removing orphaned worktree %s", entry.Name())
