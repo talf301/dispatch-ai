@@ -79,9 +79,11 @@ var rootCmd = &cobra.Command{
 		}
 
 		spawner := &daemon.ClaudeSpawner{
-			ClaudeBin:    "claude",
-			WorkerPrompt: "", // TODO: load worker.md in Phase 3
-			OutputLines:  100,
+			ClaudeBin:      "claude",
+			WorkerPrompt:   "", // TODO: load in Task 5
+			ReviewerPrompt: "", // TODO: load in Task 5
+			OutputLines:    100,
+			SessionDir:     filepath.Join(home, ".dispatch", "sessions"),
 		}
 
 		d := daemon.New(database, cfg, spawner)

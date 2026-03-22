@@ -337,6 +337,12 @@ func (d *Daemon) monitorWorkers() {
 func (d *Daemon) Run(ctx context.Context) error {
 	d.logger.Println("starting daemon")
 
+	// Ensure sessions directory exists.
+	sessDir := filepath.Join(filepath.Dir(d.worktreeBase), "sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		return fmt.Errorf("create sessions dir: %w", err)
+	}
+
 	d.recoverActive()
 	d.cleanOrphanedWorktrees()
 
