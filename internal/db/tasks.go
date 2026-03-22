@@ -159,6 +159,19 @@ func (d *DB) DoneTask(id string) (*Task, error) {
 	if err := d.addSystemNote(id, oldStatus, "done"); err != nil {
 		return nil, err
 	}
+
+	// Auto-complete parent if all children are done.
+	if task.ParentID != nil {
+		var notDone int
+		err := d.q.QueryRow(
+			`SELECT COUNT(*) FROM tasks WHERE parent_id = ? AND status != 'done'`,
+			*task.ParentID,
+		).Scan(&notDone)
+		if err == nil && notDone == 0 {
+			d.DoneTask(*task.ParentID)
+		}
+	}
+
 	return d.GetTask(id)
 }
 

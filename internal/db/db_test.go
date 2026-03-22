@@ -848,6 +848,96 @@ func TestReadyTasks_ExcludesParentTasks(t *testing.T) {
 	}
 }
 
+func TestDoneTask_AutoCompletesParent(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	parent, err := d.AddTask("parent task", "", "", "")
+	if err != nil {
+		t.Fatalf("AddTask parent: %v", err)
+	}
+
+	child1, err := d.AddTask("child 1", "", parent.ID, "")
+	if err != nil {
+		t.Fatalf("AddTask child1: %v", err)
+	}
+
+	child2, err := d.AddTask("child 2", "", parent.ID, "")
+	if err != nil {
+		t.Fatalf("AddTask child2: %v", err)
+	}
+
+	// Done child1 — parent should NOT be done yet (child2 still open)
+	if _, err := d.DoneTask(child1.ID); err != nil {
+		t.Fatalf("DoneTask child1: %v", err)
+	}
+
+	p, err := d.GetTask(parent.ID)
+	if err != nil {
+		t.Fatalf("GetTask parent after child1 done: %v", err)
+	}
+	if p.Status == "done" {
+		t.Errorf("parent should NOT be done after only child1 is done")
+	}
+
+	// Done child2 — parent SHOULD now be done (all children done)
+	if _, err := d.DoneTask(child2.ID); err != nil {
+		t.Fatalf("DoneTask child2: %v", err)
+	}
+
+	p, err = d.GetTask(parent.ID)
+	if err != nil {
+		t.Fatalf("GetTask parent after child2 done: %v", err)
+	}
+	if p.Status != "done" {
+		t.Errorf("parent should be done after all children are done, got %q", p.Status)
+	}
+}
+
+func TestDoneTask_ParentNotCompletedWithOpenChildren(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	parent, err := d.AddTask("parent task", "", "", "")
+	if err != nil {
+		t.Fatalf("AddTask parent: %v", err)
+	}
+
+	child1, err := d.AddTask("child 1", "", parent.ID, "")
+	if err != nil {
+		t.Fatalf("AddTask child1: %v", err)
+	}
+
+	_, err = d.AddTask("child 2", "", parent.ID, "")
+	if err != nil {
+		t.Fatalf("AddTask child2: %v", err)
+	}
+
+	_, err = d.AddTask("child 3", "", parent.ID, "")
+	if err != nil {
+		t.Fatalf("AddTask child3: %v", err)
+	}
+
+	// Done child1 — parent should NOT be done (child2 and child3 still open)
+	if _, err := d.DoneTask(child1.ID); err != nil {
+		t.Fatalf("DoneTask child1: %v", err)
+	}
+
+	p, err := d.GetTask(parent.ID)
+	if err != nil {
+		t.Fatalf("GetTask parent: %v", err)
+	}
+	if p.Status == "done" {
+		t.Errorf("parent should NOT be done when 2 children are still open")
+	}
+}
+
 func TestGetChildren(t *testing.T) {
 	d, err := Open(tempDBPath(t))
 	if err != nil {
