@@ -4,11 +4,16 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
 	"github.com/spf13/cobra"
 )
+
+// refPattern matches $1, $2, etc. back-references in batch lines.
+var refPattern = regexp.MustCompile(`\$(\d+)`)
 
 // NewBatchCmd returns the cobra command for executing batch operations in a transaction.
 func NewBatchCmd() *cobra.Command {
@@ -28,6 +33,7 @@ func NewBatchCmd() *cobra.Command {
 			scanner := bufio.NewScanner(os.Stdin)
 			lineNum := 0
 			executed := 0
+			var refs []string
 
 			for scanner.Scan() {
 				lineNum++
@@ -38,9 +44,19 @@ func NewBatchCmd() *cobra.Command {
 					continue
 				}
 
-				if err := executeLine(tx, line); err != nil {
+				resolved, err := substituteRefs(line, refs)
+				if err != nil {
 					tx.Rollback()
 					exitError(cmd, fmt.Errorf("line %d: %s: %w", lineNum, line, err))
+				}
+
+				id, err := executeLine(tx, resolved)
+				if err != nil {
+					tx.Rollback()
+					exitError(cmd, fmt.Errorf("line %d: %s: %w", lineNum, line, err))
+				}
+				if id != "" {
+					refs = append(refs, id)
 				}
 				executed++
 			}
@@ -63,72 +79,72 @@ func NewBatchCmd() *cobra.Command {
 	}
 }
 
-func executeLine(database *db.DB, line string) error {
+func executeLine(database *db.DB, line string) (string, error) {
 	parts := splitArgs(line)
 	if len(parts) == 0 {
-		return fmt.Errorf("empty command")
+		return "", fmt.Errorf("empty command")
 	}
 
 	switch parts[0] {
 	case "add":
 		return batchAdd(database, parts[1:])
 	case "edit":
-		return batchEdit(database, parts[1:])
+		return "", batchEdit(database, parts[1:])
 	case "dep":
 		if len(parts) != 3 {
-			return fmt.Errorf("dep requires 2 arguments: <blocker> <blocked>")
+			return "", fmt.Errorf("dep requires 2 arguments: <blocker> <blocked>")
 		}
-		return database.AddDep(parts[1], parts[2])
+		return "", database.AddDep(parts[1], parts[2])
 	case "undep":
 		if len(parts) != 3 {
-			return fmt.Errorf("undep requires 2 arguments: <blocker> <blocked>")
+			return "", fmt.Errorf("undep requires 2 arguments: <blocker> <blocked>")
 		}
-		return database.RemoveDep(parts[1], parts[2])
+		return "", database.RemoveDep(parts[1], parts[2])
 	case "claim":
 		if len(parts) != 3 {
-			return fmt.Errorf("claim requires 2 arguments: <id> <assignee>")
+			return "", fmt.Errorf("claim requires 2 arguments: <id> <assignee>")
 		}
 		_, err := database.ClaimTask(parts[1], parts[2])
-		return err
+		return "", err
 	case "release":
 		if len(parts) != 2 {
-			return fmt.Errorf("release requires 1 argument: <id>")
+			return "", fmt.Errorf("release requires 1 argument: <id>")
 		}
 		_, err := database.ReleaseTask(parts[1])
-		return err
+		return "", err
 	case "done":
 		if len(parts) != 2 {
-			return fmt.Errorf("done requires 1 argument: <id>")
+			return "", fmt.Errorf("done requires 1 argument: <id>")
 		}
 		_, err := database.DoneTask(parts[1])
-		return err
+		return "", err
 	case "block":
 		if len(parts) != 3 {
-			return fmt.Errorf("block requires 2 arguments: <id> <reason>")
+			return "", fmt.Errorf("block requires 2 arguments: <id> <reason>")
 		}
 		_, err := database.BlockTask(parts[1], parts[2])
-		return err
+		return "", err
 	case "reopen":
 		if len(parts) != 2 {
-			return fmt.Errorf("reopen requires 1 argument: <id>")
+			return "", fmt.Errorf("reopen requires 1 argument: <id>")
 		}
 		_, err := database.ReopenTask(parts[1])
-		return err
+		return "", err
 	case "note":
 		if len(parts) < 3 {
-			return fmt.Errorf("note requires at least 2 arguments: <id> <content>")
+			return "", fmt.Errorf("note requires at least 2 arguments: <id> <content>")
 		}
 		author := "batch"
 		_, err := database.AddNote(parts[1], strings.Join(parts[2:], " "), &author)
-		return err
+		return "", err
 	default:
-		return fmt.Errorf("unknown command: %s", parts[0])
+		return "", fmt.Errorf("unknown command: %s", parts[0])
 	}
 }
 
-func batchAdd(database *db.DB, args []string) error {
+func batchAdd(database *db.DB, args []string) (string, error) {
 	if len(args) == 0 {
-		return fmt.Errorf("add requires a title")
+		return "", fmt.Errorf("add requires a title")
 	}
 
 	title := ""
@@ -142,19 +158,19 @@ func batchAdd(database *db.DB, args []string) error {
 		switch args[i] {
 		case "-d":
 			if i+1 >= len(args) {
-				return fmt.Errorf("flag -d requires a value")
+				return "", fmt.Errorf("flag -d requires a value")
 			}
 			desc = args[i+1]
 			i += 2
 		case "-p":
 			if i+1 >= len(args) {
-				return fmt.Errorf("flag -p requires a value")
+				return "", fmt.Errorf("flag -p requires a value")
 			}
 			parent = args[i+1]
 			i += 2
 		case "--after":
 			if i+1 >= len(args) {
-				return fmt.Errorf("flag --after requires a value")
+				return "", fmt.Errorf("flag --after requires a value")
 			}
 			after = args[i+1]
 			i += 2
@@ -162,18 +178,21 @@ func batchAdd(database *db.DB, args []string) error {
 			if title == "" {
 				title = args[i]
 			} else {
-				return fmt.Errorf("unexpected argument: %s", args[i])
+				return "", fmt.Errorf("unexpected argument: %s", args[i])
 			}
 			i++
 		}
 	}
 
 	if title == "" {
-		return fmt.Errorf("add requires a title")
+		return "", fmt.Errorf("add requires a title")
 	}
 
-	_, err := database.AddTask(title, desc, parent, after)
-	return err
+	task, err := database.AddTask(title, desc, parent, after)
+	if err != nil {
+		return "", err
+	}
+	return task.ID, nil
 }
 
 func batchEdit(database *db.DB, args []string) error {
@@ -248,4 +267,34 @@ func splitArgs(line string) []string {
 	}
 
 	return args
+}
+
+// substituteRefs replaces $1, $2, etc. in line with the corresponding IDs from refs.
+// References are 1-indexed. Returns an error for out-of-range or zero references.
+func substituteRefs(line string, refs []string) (string, error) {
+	var errOut error
+	result := refPattern.ReplaceAllStringFunc(line, func(match string) string {
+		if errOut != nil {
+			return match
+		}
+		numStr := match[1:] // strip leading $
+		n, err := strconv.Atoi(numStr)
+		if err != nil {
+			errOut = fmt.Errorf("invalid back-reference %s", match)
+			return match
+		}
+		if n < 1 {
+			errOut = fmt.Errorf("invalid back-reference %s: must be >= $1", match)
+			return match
+		}
+		if n > len(refs) {
+			errOut = fmt.Errorf("invalid back-reference %s: only %d add(s) so far", match, len(refs))
+			return match
+		}
+		return refs[n-1]
+	})
+	if errOut != nil {
+		return "", errOut
+	}
+	return result, nil
 }
