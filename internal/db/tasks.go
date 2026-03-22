@@ -228,6 +228,9 @@ func (d *DB) ReadyTasks() ([]Task, error) {
 		    WHERE d.blocked_id = t.id
 		    AND blocker.status != 'done'
 		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM tasks child WHERE child.parent_id = t.id
+		  )
 		ORDER BY (
 		    SELECT COUNT(*) FROM deps d2
 		    WHERE d2.blocker_id = t.id

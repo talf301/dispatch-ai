@@ -801,6 +801,53 @@ func TestListTasks_StatusFilter(t *testing.T) {
 	}
 }
 
+func TestReadyTasks_ExcludesParentTasks(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	// Create a parent task with 2 children
+	parent, err := d.AddTask("parent task", "", "", "")
+	if err != nil {
+		t.Fatalf("AddTask parent: %v", err)
+	}
+
+	child1, err := d.AddTask("child 1", "", parent.ID, "")
+	if err != nil {
+		t.Fatalf("AddTask child1: %v", err)
+	}
+
+	child2, err := d.AddTask("child 2", "", parent.ID, "")
+	if err != nil {
+		t.Fatalf("AddTask child2: %v", err)
+	}
+
+	ready, err := d.ReadyTasks()
+	if err != nil {
+		t.Fatalf("ReadyTasks: %v", err)
+	}
+
+	ids := make(map[string]bool)
+	for _, task := range ready {
+		ids[task.ID] = true
+	}
+
+	// Parent should NOT appear — it has children
+	if ids[parent.ID] {
+		t.Errorf("parent task %s should NOT be in ReadyTasks (it has children)", parent.ID)
+	}
+
+	// Both children SHOULD appear — they are open, unassigned, and have no blockers
+	if !ids[child1.ID] {
+		t.Errorf("child1 %s should be in ReadyTasks", child1.ID)
+	}
+	if !ids[child2.ID] {
+		t.Errorf("child2 %s should be in ReadyTasks", child2.ID)
+	}
+}
+
 func TestGetChildren(t *testing.T) {
 	d, err := Open(tempDBPath(t))
 	if err != nil {
