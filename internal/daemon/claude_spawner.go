@@ -4,21 +4,23 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
 
 // ClaudeSpawner spawns Claude Code CLI processes as workers.
 type ClaudeSpawner struct {
-	ClaudeBin    string // path to claude binary, default "claude"
-	SystemPrompt string // contents of worker.md
-	OutputLines  int    // ring buffer size, default 100
+	ClaudeBin      string // path to claude binary, default "claude"
+	WorkerPrompt   string // contents of worker.md (with $TASK_ID placeholder)
+	ReviewerPrompt string // contents of reviewer.md (with $TASK_ID placeholder)
+	OutputLines    int    // ring buffer size, default 100
 }
 
 // Compile-time check that ClaudeSpawner implements WorkerSpawner.
 var _ WorkerSpawner = (*ClaudeSpawner)(nil)
 
-func (s *ClaudeSpawner) Spawn(ctx context.Context, task db.Task, workDir string) (WorkerHandle, error) {
+func (s *ClaudeSpawner) Spawn(ctx context.Context, task db.Task, workDir string, role SpawnRole) (WorkerHandle, error) {
 	bin := s.ClaudeBin
 	if bin == "" {
 		bin = "claude"
@@ -30,9 +32,16 @@ func (s *ClaudeSpawner) Spawn(ctx context.Context, task db.Task, workDir string)
 
 	prompt := fmt.Sprintf("Your task ID is %s. Run `dt show %s` to read your assignment.", task.ID, task.ID)
 
+	systemPrompt := s.WorkerPrompt
+	if role == RoleReviewer {
+		systemPrompt = s.ReviewerPrompt
+	}
+	// Substitute $TASK_ID in the system prompt.
+	systemPrompt = strings.ReplaceAll(systemPrompt, "$TASK_ID", task.ID)
+
 	args := []string{
 		"--print",
-		"--system-prompt", s.SystemPrompt,
+		"--system-prompt", systemPrompt,
 		"--prompt", prompt,
 	}
 

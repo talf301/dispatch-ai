@@ -9,7 +9,7 @@ import (
 
 func TestMockSpawner_Success(t *testing.T) {
 	spawner := &MockSpawner{ExitCode: 0}
-	handle, err := spawner.Spawn(context.Background(), db.Task{ID: "test"}, "/tmp")
+	handle, err := spawner.Spawn(context.Background(), db.Task{ID: "test"}, "/tmp", RoleWorker)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +23,7 @@ func TestMockSpawner_Success(t *testing.T) {
 
 func TestMockSpawner_Failure(t *testing.T) {
 	spawner := &MockSpawner{ExitCode: 1, OutputText: "something went wrong"}
-	handle, err := spawner.Spawn(context.Background(), db.Task{ID: "test"}, "/tmp")
+	handle, err := spawner.Spawn(context.Background(), db.Task{ID: "test"}, "/tmp", RoleWorker)
 	if err != nil {
 		t.Fatal(err)
 	}

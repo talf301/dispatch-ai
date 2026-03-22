@@ -182,7 +182,7 @@ type doneCallingSpawner struct {
 	db *db.DB
 }
 
-func (s *doneCallingSpawner) Spawn(_ context.Context, task db.Task, _ string) (daemon.WorkerHandle, error) {
+func (s *doneCallingSpawner) Spawn(_ context.Context, task db.Task, _ string, _ daemon.SpawnRole) (daemon.WorkerHandle, error) {
 	s.db.DoneTask(task.ID)
 	done := make(chan struct{})
 	close(done) // immediately done
@@ -202,7 +202,7 @@ func (h *immediateHandle) Output() string       { return "" }
 // hangingSpawner creates workers that never exit.
 type hangingSpawner struct{}
 
-func (s *hangingSpawner) Spawn(_ context.Context, task db.Task, _ string) (daemon.WorkerHandle, error) {
+func (s *hangingSpawner) Spawn(_ context.Context, task db.Task, _ string, _ daemon.SpawnRole) (daemon.WorkerHandle, error) {
 	return &hangingHandle{done: make(chan struct{})}, nil // never closed
 }
 
@@ -223,7 +223,7 @@ type fileCommittingSpawner struct {
 	db *db.DB
 }
 
-func (s *fileCommittingSpawner) Spawn(_ context.Context, task db.Task, workDir string) (daemon.WorkerHandle, error) {
+func (s *fileCommittingSpawner) Spawn(_ context.Context, task db.Task, workDir string, _ daemon.SpawnRole) (daemon.WorkerHandle, error) {
 	// Create a file unique to this task.
 	filePath := filepath.Join(workDir, task.ID+".txt")
 	if err := os.WriteFile(filePath, []byte("work from "+task.ID), 0o644); err != nil {
@@ -258,7 +258,7 @@ type conflictingSpawner struct {
 	content map[string]string // taskID -> content to write
 }
 
-func (s *conflictingSpawner) Spawn(_ context.Context, task db.Task, workDir string) (daemon.WorkerHandle, error) {
+func (s *conflictingSpawner) Spawn(_ context.Context, task db.Task, workDir string, _ daemon.SpawnRole) (daemon.WorkerHandle, error) {
 	content, ok := s.content[task.ID]
 	if !ok {
 		content = "default content from " + task.ID

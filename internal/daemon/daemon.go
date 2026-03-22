@@ -209,7 +209,7 @@ func (d *Daemon) spawnReady() {
 
 		// Spawn worker.
 		ctx := context.Background()
-		handle, err := d.spawner.Spawn(ctx, task, wtDir)
+		handle, err := d.spawner.Spawn(ctx, task, wtDir, RoleWorker)
 		if err != nil {
 			d.logger.Printf("spawn: worker %s: %v", task.ID, err)
 			RemoveWorktree(d.repoPath, wtDir, branchName, true)

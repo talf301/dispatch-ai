@@ -19,12 +19,12 @@ func TestClaudeSpawner_BuildsCommand(t *testing.T) {
 
 	spawner := &ClaudeSpawner{
 		ClaudeBin:    fakeClaude,
-		SystemPrompt: "You are a worker.",
+		WorkerPrompt: "You are a worker.",
 		OutputLines:  10,
 	}
 
 	task := db.Task{ID: "abc1", Title: "Test task", Description: "Do the thing"}
-	handle, err := spawner.Spawn(context.Background(), task, tmpDir)
+	handle, err := spawner.Spawn(context.Background(), task, tmpDir, RoleWorker)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,12 +48,12 @@ func TestClaudeSpawner_NonZeroExit(t *testing.T) {
 
 	spawner := &ClaudeSpawner{
 		ClaudeBin:    fakeClaude,
-		SystemPrompt: "You are a worker.",
+		WorkerPrompt: "You are a worker.",
 		OutputLines:  10,
 	}
 
 	task := db.Task{ID: "abc2", Title: "Failing task"}
-	handle, err := spawner.Spawn(context.Background(), task, tmpDir)
+	handle, err := spawner.Spawn(context.Background(), task, tmpDir, RoleWorker)
 	if err != nil {
 		t.Fatal(err)
 	}

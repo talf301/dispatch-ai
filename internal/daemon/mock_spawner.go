@@ -17,7 +17,7 @@ type MockSpawner struct {
 	Spawned    []db.Task
 }
 
-func (m *MockSpawner) Spawn(_ context.Context, task db.Task, _ string) (WorkerHandle, error) {
+func (m *MockSpawner) Spawn(_ context.Context, task db.Task, _ string, _ SpawnRole) (WorkerHandle, error) {
 	if m.SpawnErr != nil {
 		return nil, m.SpawnErr
 	}

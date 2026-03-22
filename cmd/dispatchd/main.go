@@ -80,7 +80,7 @@ var rootCmd = &cobra.Command{
 
 		spawner := &daemon.ClaudeSpawner{
 			ClaudeBin:    "claude",
-			SystemPrompt: "", // TODO: load worker.md in Phase 3
+			WorkerPrompt: "", // TODO: load worker.md in Phase 3
 			OutputLines:  100,
 		}
 
