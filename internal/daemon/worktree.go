@@ -6,6 +6,12 @@ import (
 	"strings"
 )
 
+func BranchExists(repoDir, branchName string) bool {
+	cmd := exec.Command("git", "rev-parse", "--verify", branchName)
+	cmd.Dir = repoDir
+	return cmd.Run() == nil
+}
+
 func DetectDefaultBranch(repoDir string) (string, error) {
 	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
 	cmd.Dir = repoDir

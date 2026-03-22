@@ -199,6 +199,39 @@ func TestDaemon_RunAndShutdown(t *testing.T) {
 	}
 }
 
+func TestDaemon_SpawnChildUsesParentBranch(t *testing.T) {
+	d := openTestDB(t)
+	repoDir := initTestRepo(t)
+	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
+
+	parent, _ := d.AddTask("parent plan", "meta", "", "")
+	child, _ := d.AddTask("child task", "do work", parent.ID, "")
+
+	spawner := &MockSpawner{ExitCode: 0}
+	daemon := New(d, Config{
+		MaxWorkers:   4,
+		RepoPath:     repoDir,
+		WorktreeBase: worktreeBase,
+	}, spawner)
+
+	daemon.spawnReady()
+
+	// Parent should NOT be spawned (has children — excluded by ReadyTasks).
+	// Child should be spawned.
+	if len(spawner.Spawned) != 1 {
+		t.Fatalf("expected 1 spawn, got %d", len(spawner.Spawned))
+	}
+	if spawner.Spawned[0].ID != child.ID {
+		t.Errorf("spawned task = %s, want %s", spawner.Spawned[0].ID, child.ID)
+	}
+
+	// Parent branch should exist.
+	parentBranch := fmt.Sprintf("dispatch/plan-%s", parent.ID)
+	if !BranchExists(repoDir, parentBranch) {
+		t.Errorf("parent branch %s should exist", parentBranch)
+	}
+}
+
 func TestDaemon_MonitorCleanExit(t *testing.T) {
 	d := openTestDB(t)
 	repoDir := initTestRepo(t)

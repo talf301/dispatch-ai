@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -175,10 +176,30 @@ func (d *Daemon) spawnReady() {
 			continue
 		}
 
+		// Determine which branch to base the worktree on.
+		baseBranch := d.baseBranch
+		if task.ParentID != nil {
+			parentBranch := fmt.Sprintf("dispatch/plan-%s", *task.ParentID)
+			if !BranchExists(d.repoPath, parentBranch) {
+				base := d.baseBranch
+				if base == "" {
+					base, _ = DetectDefaultBranch(d.repoPath)
+				}
+				cmd := exec.Command("git", "branch", parentBranch, base)
+				cmd.Dir = d.repoPath
+				if out, err := cmd.CombinedOutput(); err != nil {
+					d.logger.Printf("spawn: create parent branch %s: %v\n%s", parentBranch, err, out)
+					d.db.ReleaseTask(task.ID)
+					continue
+				}
+			}
+			baseBranch = parentBranch
+		}
+
 		// Create worktree.
 		wtDir := filepath.Join(d.worktreeBase, task.ID)
 		branchName := fmt.Sprintf("dispatch/%s", task.ID)
-		if err := CreateWorktree(d.repoPath, wtDir, branchName, d.baseBranch); err != nil {
+		if err := CreateWorktree(d.repoPath, wtDir, branchName, baseBranch); err != nil {
 			d.logger.Printf("spawn: worktree %s: %v", task.ID, err)
 			if _, err := d.db.ReleaseTask(task.ID); err != nil {
 				d.logger.Printf("spawn: release task %s: %v", task.ID, err)
