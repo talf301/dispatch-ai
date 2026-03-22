@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -257,6 +258,75 @@ func TestDaemon_MonitorCleanExit(t *testing.T) {
 	// Worker should be removed from the map.
 	if _, exists := daemon.workers[task.ID]; exists {
 		t.Error("worker still in map after clean exit")
+	}
+}
+
+func TestDaemon_MergeChildOnCompletion(t *testing.T) {
+	d := openTestDB(t)
+	repoDir := initTestRepo(t)
+	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
+
+	// Create parent + child tasks.
+	parent, _ := d.AddTask("parent plan", "meta", "", "")
+	child, _ := d.AddTask("child task", "do work", parent.ID, "")
+
+	spawner := &MockSpawner{ExitCode: 0}
+	daemon := New(d, Config{
+		MaxWorkers:   4,
+		RepoPath:     repoDir,
+		WorktreeBase: worktreeBase,
+	}, spawner)
+
+	// Spawn ready — this creates the worktree and branch for the child.
+	daemon.spawnReady()
+
+	if len(spawner.Spawned) != 1 {
+		t.Fatalf("expected 1 spawn, got %d", len(spawner.Spawned))
+	}
+
+	// Simulate work: create a file and commit in the child's worktree.
+	childWT := filepath.Join(worktreeBase, child.ID)
+	if err := os.WriteFile(filepath.Join(childWT, "child-work.txt"), []byte("child output"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "child-work.txt"},
+		{"git", "commit", "-m", "child work"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = childWT
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+
+	// Mark child done (simulating worker calling dt done).
+	d.DoneTask(child.ID)
+
+	// Run monitorWorkers — should merge child into parent branch then clean up.
+	daemon.monitorWorkers()
+
+	// Verify: child worker removed from map.
+	if _, exists := daemon.workers[child.ID]; exists {
+		t.Error("child worker still in map after completion")
+	}
+
+	// Verify: child-work.txt is now on the parent branch.
+	parentBranch := fmt.Sprintf("dispatch/plan-%s", parent.ID)
+	cmd := exec.Command("git", "show", parentBranch+":child-work.txt")
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("child-work.txt not found on parent branch: %v", err)
+	}
+	if string(out) != "child output" {
+		t.Errorf("child-work.txt content = %q, want %q", string(out), "child output")
+	}
+
+	// Verify: child branch was deleted (clean merge).
+	childBranch := fmt.Sprintf("dispatch/%s", child.ID)
+	if BranchExists(repoDir, childBranch) {
+		t.Error("child branch should be deleted after clean merge")
 	}
 }
 

@@ -268,27 +268,54 @@ func (d *Daemon) monitorWorkers() {
 		handle := d.workers[f.taskID]
 		delete(d.workers, f.taskID)
 
-		wtDir := filepath.Join(d.worktreeBase, f.taskID)
-		branchName := fmt.Sprintf("dispatch/%s", f.taskID)
-
 		if f.err == nil {
-			// Clean exit. Check if worker already called dt done.
 			task, err := d.db.GetTask(f.taskID)
 			if err != nil {
 				d.logger.Printf("monitor: get task %s: %v", f.taskID, err)
 				continue
 			}
-			if task.Status != "done" {
-				if _, err := d.db.DoneTask(f.taskID); err != nil {
-					d.logger.Printf("monitor: done task %s: %v", f.taskID, err)
+
+			wtDir := filepath.Join(d.worktreeBase, f.taskID)
+			branchName := fmt.Sprintf("dispatch/%s", f.taskID)
+
+			if task.ParentID != nil {
+				// Child task — merge into parent branch BEFORE marking done.
+				parentBranch := fmt.Sprintf("dispatch/plan-%s", *task.ParentID)
+				if err := MergeBranch(d.repoPath, branchName, parentBranch); err != nil {
+					d.logger.Printf("monitor: merge %s into %s failed: %v", branchName, parentBranch, err)
+					reason := fmt.Sprintf("Merge conflict merging into plan branch:\n%v", err)
+					if _, err := d.db.BlockTask(f.taskID, reason); err != nil {
+						d.logger.Printf("monitor: block task %s: %v", f.taskID, err)
+					}
+					// Preserve branch and worktree for human resolution.
+					continue
 				}
-			}
-			if err := RemoveWorktree(d.repoPath, wtDir, branchName, true); err != nil {
-				d.logger.Printf("monitor: cleanup worktree %s: %v", f.taskID, err)
+				// Merge succeeded — now mark done (which may auto-complete parent).
+				if task.Status != "done" {
+					if _, err := d.db.DoneTask(f.taskID); err != nil {
+						d.logger.Printf("monitor: done task %s: %v", f.taskID, err)
+					}
+				}
+				// Clean merge — remove child branch and worktree.
+				if err := RemoveWorktree(d.repoPath, wtDir, branchName, true); err != nil {
+					d.logger.Printf("monitor: cleanup worktree %s: %v", f.taskID, err)
+				}
+			} else {
+				// Standalone task (no parent) — original behavior.
+				if task.Status != "done" {
+					if _, err := d.db.DoneTask(f.taskID); err != nil {
+						d.logger.Printf("monitor: done task %s: %v", f.taskID, err)
+					}
+				}
+				if err := RemoveWorktree(d.repoPath, wtDir, branchName, true); err != nil {
+					d.logger.Printf("monitor: cleanup worktree %s: %v", f.taskID, err)
+				}
 			}
 			d.logger.Printf("task %s completed", f.taskID)
 		} else {
 			// Unclean exit. Block with log tail.
+			wtDir := filepath.Join(d.worktreeBase, f.taskID)
+			branchName := fmt.Sprintf("dispatch/%s", f.taskID)
 			output := handle.Output()
 			reason := fmt.Sprintf("Worker exited: %v\n\nLast output:\n%s", f.err, output)
 			if len(reason) > 4000 {

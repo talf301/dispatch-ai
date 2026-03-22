@@ -85,6 +85,129 @@ func TestRemoveWorktree(t *testing.T) {
 	}
 }
 
+func TestMergeBranch_CleanMerge(t *testing.T) {
+	repo := initTestRepo(t)
+
+	// Create a target branch (not checked out in main worktree).
+	targetBranch := "dispatch/plan-target"
+	targetWT := filepath.Join(t.TempDir(), "wt-target")
+	if err := CreateWorktree(repo, targetWT, targetBranch, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveWorktree(repo, targetWT, targetBranch, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a feature branch with a new file.
+	featureBranch := "dispatch/feature-1"
+	featureWT := filepath.Join(t.TempDir(), "wt-feature")
+	if err := CreateWorktree(repo, featureWT, featureBranch, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add a file on the feature branch.
+	if err := os.WriteFile(filepath.Join(featureWT, "feature.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "feature.txt"},
+		{"git", "commit", "-m", "add feature"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = featureWT
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	// Remove the feature worktree (keep branch).
+	if err := RemoveWorktree(repo, featureWT, featureBranch, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Merge feature into target.
+	if err := MergeBranch(repo, featureBranch, targetBranch); err != nil {
+		t.Fatalf("MergeBranch failed: %v", err)
+	}
+
+	// Verify the file exists on the target branch.
+	cmd := exec.Command("git", "show", targetBranch+":feature.txt")
+	cmd.Dir = repo
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("feature.txt not found on %s: %v", targetBranch, err)
+	}
+	if strings.TrimSpace(string(out)) != "hello" {
+		t.Errorf("feature.txt content = %q, want %q", string(out), "hello")
+	}
+}
+
+func TestMergeBranch_Conflict(t *testing.T) {
+	repo := initTestRepo(t)
+
+	// Create a target branch (not checked out in main worktree).
+	targetBranch := "dispatch/plan-conflict"
+	targetWT := filepath.Join(t.TempDir(), "wt-target")
+	if err := CreateWorktree(repo, targetWT, targetBranch, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveWorktree(repo, targetWT, targetBranch, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create branch A and modify a file.
+	branchA := "dispatch/branch-a"
+	wtA := filepath.Join(t.TempDir(), "wt-a")
+	if err := CreateWorktree(repo, wtA, branchA, ""); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(wtA, "conflict.txt"), []byte("version A"), 0o644)
+	for _, args := range [][]string{
+		{"git", "add", "conflict.txt"},
+		{"git", "commit", "-m", "branch A change"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = wtA
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+	RemoveWorktree(repo, wtA, branchA, false)
+
+	// Create branch B and modify the same file differently.
+	branchB := "dispatch/branch-b"
+	wtB := filepath.Join(t.TempDir(), "wt-b")
+	if err := CreateWorktree(repo, wtB, branchB, ""); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(wtB, "conflict.txt"), []byte("version B"), 0o644)
+	for _, args := range [][]string{
+		{"git", "add", "conflict.txt"},
+		{"git", "commit", "-m", "branch B change"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = wtB
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+	RemoveWorktree(repo, wtB, branchB, false)
+
+	// Merge A into target — should succeed.
+	if err := MergeBranch(repo, branchA, targetBranch); err != nil {
+		t.Fatalf("merge A should succeed: %v", err)
+	}
+
+	// Merge B into target — should conflict.
+	err := MergeBranch(repo, branchB, targetBranch)
+	if err == nil {
+		t.Fatal("expected merge conflict error, got nil")
+	}
+	if !strings.Contains(err.Error(), "merge conflict") {
+		t.Errorf("error should contain 'merge conflict', got: %v", err)
+	}
+}
+
 func TestRemoveWorktree_KeepBranch(t *testing.T) {
 	repo := initTestRepo(t)
 	wtDir := filepath.Join(t.TempDir(), "wt-keep")

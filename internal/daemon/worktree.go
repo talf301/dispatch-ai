@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -47,6 +48,38 @@ func CreateWorktree(repoDir, wtDir, branchName, baseBranch string) error {
 	cmd.Dir = repoDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("create worktree: %w\n%s", err, out)
+	}
+	return nil
+}
+
+// MergeBranch merges sourceBranch into targetBranch using a temporary worktree.
+func MergeBranch(repoDir, sourceBranch, targetBranch string) error {
+	tmpDir, err := os.MkdirTemp("", "dispatch-merge-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Checkout target branch in temp worktree.
+	cmd := exec.Command("git", "worktree", "add", tmpDir, targetBranch)
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("checkout target: %w\n%s", err, out)
+	}
+	defer func() {
+		rmCmd := exec.Command("git", "worktree", "remove", tmpDir, "--force")
+		rmCmd.Dir = repoDir
+		rmCmd.Run()
+	}()
+
+	// Merge source into target.
+	cmd = exec.Command("git", "merge", sourceBranch, "--no-edit")
+	cmd.Dir = tmpDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		abort := exec.Command("git", "merge", "--abort")
+		abort.Dir = tmpDir
+		abort.Run()
+		return fmt.Errorf("merge conflict: %s into %s:\n%s", sourceBranch, targetBranch, out)
 	}
 	return nil
 }
