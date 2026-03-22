@@ -161,6 +161,8 @@ func (d *DB) DoneTask(id string) (*Task, error) {
 	}
 
 	// Auto-complete parent if all children are done.
+	// Note: the count query runs after the UPDATE above, so this task's status
+	// is already 'done' in the DB and correctly excluded from the count.
 	if task.ParentID != nil {
 		var notDone int
 		err := d.q.QueryRow(
@@ -168,7 +170,9 @@ func (d *DB) DoneTask(id string) (*Task, error) {
 			*task.ParentID,
 		).Scan(&notDone)
 		if err == nil && notDone == 0 {
-			d.DoneTask(*task.ParentID)
+			if _, err := d.DoneTask(*task.ParentID); err != nil {
+				return nil, fmt.Errorf("auto-complete parent %s: %w", *task.ParentID, err)
+			}
 		}
 	}
 
