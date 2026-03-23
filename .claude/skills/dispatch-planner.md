@@ -52,11 +52,17 @@ Present the full set of tasks. For each task:
 
 ### Sizing Guidance
 
-Size by **scope coherence** (one logical area) and **decision density** (non-obvious choices the worker must make).
+A task should be one atomic idea — a single coherent change you can explain in one sentence. The test is not file count or line count but decision count: if a worker needs to make two independent decisions, it's two tasks.
 
-- Boilerplate and tests are cheap. Novel logic, API design, error handling are expensive.
-- Heuristic: >10 files or >300 lines of non-trivial logic means consider splitting.
-- The test: can a worker hold the full context and execute reliably without going off the rails?
+Split when:
+- The task requires unrelated changes that don't inform each other.
+- A natural description uses "and" to connect two independent actions.
+- A reviewer would need to evaluate two separate concerns.
+
+Don't split when:
+- Multiple files change but they're all part of the same logical change.
+- Tests and implementation are for the same feature.
+- The changes only make sense together.
 
 **GATE: User must approve the task list before proceeding.** Adjust if they want changes.
 
