@@ -61,6 +61,21 @@ var rootCmd = &cobra.Command{
 		baseBranch, _ := cmd.Flags().GetString("base-branch")
 		repoPath, _ := cmd.Flags().GetString("repo")
 		pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
+		workerPromptPath, _ := cmd.Flags().GetString("worker-prompt")
+		reviewerPromptPath, _ := cmd.Flags().GetString("reviewer-prompt")
+
+		if workerPromptPath == "" || reviewerPromptPath == "" {
+			return fmt.Errorf("--worker-prompt and --reviewer-prompt are required")
+		}
+
+		workerPrompt, err := os.ReadFile(workerPromptPath)
+		if err != nil {
+			return fmt.Errorf("read worker prompt: %w", err)
+		}
+		reviewerPrompt, err := os.ReadFile(reviewerPromptPath)
+		if err != nil {
+			return fmt.Errorf("read reviewer prompt: %w", err)
+		}
 
 		database, err := db.Open(dbPath)
 		if err != nil {
@@ -80,8 +95,8 @@ var rootCmd = &cobra.Command{
 
 		spawner := &daemon.ClaudeSpawner{
 			ClaudeBin:      "claude",
-			WorkerPrompt:   "", // TODO: load in Task 5
-			ReviewerPrompt: "", // TODO: load in Task 5
+			WorkerPrompt:   string(workerPrompt),
+			ReviewerPrompt: string(reviewerPrompt),
 			OutputLines:    100,
 			SessionDir:     filepath.Join(home, ".dispatch", "sessions"),
 		}
@@ -109,6 +124,8 @@ func init() {
 	rootCmd.Flags().String("base-branch", envOrDefault("DISPATCH_BASE_BRANCH", ""), "base branch for worktrees (default: auto-detect)")
 	rootCmd.Flags().String("repo", envOrDefault("DISPATCH_REPO", "."), "path to git repository")
 	rootCmd.Flags().Duration("poll-interval", envDurationOrDefault("DISPATCH_POLL_INTERVAL", 5*time.Second), "poll interval")
+	rootCmd.Flags().String("worker-prompt", envOrDefault("DISPATCH_WORKER_PROMPT", ""), "path to worker.md prompt file (required)")
+	rootCmd.Flags().String("reviewer-prompt", envOrDefault("DISPATCH_REVIEWER_PROMPT", ""), "path to reviewer.md prompt file (required)")
 }
 
 func main() {
