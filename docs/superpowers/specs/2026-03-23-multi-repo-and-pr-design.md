@@ -131,16 +131,18 @@ Added to ~/.dispatch/config.toml:
 
 Parent auto-completion currently happens inside `db.DoneTask()` — when the last child completes, the parent silently transitions to done. The daemon has no hook for this.
 
-**Change:** `DoneTask()` returns an `*AutoComplete` struct (nil if no parent auto-completed):
+**Change:** `DoneTask()` gains an additional return value. New full signature:
 
 ```go
+func (d *DB) DoneTask(id string) (*Task, *AutoComplete, error)
+
 type AutoComplete struct {
     ParentID string
     Repo     *string
 }
 ```
 
-The daemon checks the return value in `handleReviewApproval`. If non-nil, it triggers PR creation for the parent.
+Returns `(*Task, nil, nil)` when no parent auto-completed; `(*Task, &AutoComplete{...}, nil)` when a parent did. All existing callers (`dt done` CLI command, `handleReviewApproval` in the daemon) must be updated to accept the new return value. The CLI ignores `*AutoComplete`; the daemon checks it to trigger PR creation.
 
 ### PR Creation Flow
 
@@ -157,7 +159,7 @@ Workers add a completion note to their parent task before calling `dt done`:
 dt note <parent-id> "Implemented X: added foo.go, updated bar.go, added tests"
 ```
 
-Workers discover their parent ID via `$PARENT_ID`, a new prompt variable injected by the spawner alongside `$TASK_ID`. Workers without a parent (standalone tasks) get `$PARENT_ID` set to empty string and skip the note step.
+Workers discover their parent ID via `$PARENT_ID`, a new prompt variable injected by the spawner alongside `$TASK_ID`. The spawner substitutes it via `strings.ReplaceAll` on the system prompt, same as `$TASK_ID`. When `task.ParentID` is nil (standalone tasks), `$PARENT_ID` is replaced with empty string and workers skip the note step.
 
 At PR time, the daemon:
 
@@ -199,6 +201,10 @@ gh pr create \
 
 The daemon shells out to `gh` with `cmd.Dir` set to the repo path — no `--repo` flag needed. `gh` must be installed and authenticated.
 
+### After Successful PR Creation
+
+The local plan branch (`dispatch/plan-<parent-id>`) is kept — it's now tracked by the remote and the PR. The remote copy is the source of truth. The local branch can be cleaned up manually or by a future garbage collection pass, but there's no urgency since it's just a ref.
+
 ### Failure Handling
 
 If `git push` or `gh pr create` fails for any reason (not installed, not authenticated, network error, branch already has a PR):
@@ -207,7 +213,20 @@ If `git push` or `gh pr create` fails for any reason (not installed, not authent
 2. The plan branch is preserved locally.
 3. The user can create the PR manually, or fix the issue and run `dt reopen <parent-id>`.
 
-**Re-trigger mechanism:** The daemon's main loop checks for parent tasks that are blocked with a PR-related block reason and whose plan branch still exists. When the user reopens such a parent, the daemon detects it is a completed plan (all children done, has a plan branch) and retries PR creation. This is a separate check from `ReadyTasks()`, which correctly excludes parent tasks.
+**Re-trigger mechanism:** The daemon gains a new method `checkPendingPRs()`, called each poll cycle alongside `spawnReady()` and `monitorWorkers()`. It queries for parent tasks that are `open`, have children, and all children are `done` — i.e., plans that were reopened after a PR failure. (This is distinct from `ReadyTasks()`, which excludes tasks with children.)
+
+```go
+func (d *Daemon) checkPendingPRs() {
+    // Query: SELECT * FROM tasks WHERE status='open' AND id IN (
+    //   SELECT DISTINCT parent_id FROM tasks WHERE parent_id IS NOT NULL
+    // ) AND NOT EXISTS (
+    //   SELECT 1 FROM tasks child WHERE child.parent_id = tasks.id AND child.status != 'done'
+    // )
+    // For each result: attempt PR creation, block on failure.
+}
+```
+
+Block reasons for PR failures are prefixed with `"pr: "` (e.g., `"pr: gh not found"`) so the user can identify them. The prefix is not used programmatically for re-trigger — the query above is sufficient.
 
 ### Worker Prompt Change
 
@@ -271,13 +290,15 @@ Workers need to know which repo they're in. The worktree directory is already se
 
 ### LogSuffix thread safety
 
-Currently `ClaudeSpawner.LogSuffix` is mutated on the shared struct before each `Spawn()` call — a latent race condition exacerbated by multi-repo. Fix: pass `logSuffix` as a parameter to `Spawn()` instead. Update the `WorkerSpawner` interface:
+Currently `ClaudeSpawner.LogSuffix` is mutated on the shared struct before each `Spawn()` call — a latent race condition exacerbated by multi-repo. Fix: remove the `LogSuffix` field from `ClaudeSpawner` and pass `logSuffix` as a parameter to `Spawn()` instead. Update the `WorkerSpawner` interface:
 
 ```go
 type WorkerSpawner interface {
     Spawn(ctx context.Context, task db.Task, workDir string, role SpawnRole, logSuffix string) (WorkerHandle, error)
 }
 ```
+
+Both spawn sites — `spawnReady()` (initial worker) and `handleWorkerComplete()` (reviewer spawn) — pass the suffix as an argument. `MockSpawner` gains the parameter as well.
 
 ---
 
