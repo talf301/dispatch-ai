@@ -35,30 +35,57 @@ func NewBatchCmd() *cobra.Command {
 			executed := 0
 			var refs []string
 
+			var pending strings.Builder
+			pendingStart := 0
+
 			for scanner.Scan() {
 				lineNum++
-				line := strings.TrimSpace(scanner.Text())
+				text := scanner.Text()
 
-				// Skip blank lines and comments.
-				if line == "" || strings.HasPrefix(line, "#") {
-					continue
+				if pending.Len() > 0 {
+					// Continuation of a multiline string.
+					pending.WriteByte('\n')
+					pending.WriteString(text)
+					if !quotesBalanced(pending.String()) {
+						continue
+					}
+					text = pending.String()
+					pending.Reset()
+				} else {
+					text = strings.TrimSpace(text)
+					// Skip blank lines and comments.
+					if text == "" || strings.HasPrefix(text, "#") {
+						continue
+					}
+					if !quotesBalanced(text) {
+						pendingStart = lineNum
+						pending.WriteString(text)
+						continue
+					}
 				}
 
-				resolved, err := substituteRefs(line, refs)
+				_ = pendingStart // available for error reporting if needed
+
+				resolved, err := substituteRefs(text, refs)
 				if err != nil {
 					tx.Rollback()
-					exitError(cmd, fmt.Errorf("line %d: %s: %w", lineNum, line, err))
+					exitError(cmd, fmt.Errorf("line %d: %s: %w", lineNum, text, err))
 				}
 
 				id, err := executeLine(tx, resolved)
 				if err != nil {
 					tx.Rollback()
-					exitError(cmd, fmt.Errorf("line %d: %s: %w", lineNum, line, err))
+					exitError(cmd, fmt.Errorf("line %d: %s: %w", lineNum, text, err))
 				}
 				if id != "" {
 					refs = append(refs, id)
 				}
 				executed++
+			}
+
+			if pending.Len() > 0 {
+				tx.Rollback()
+				exitError(cmd, fmt.Errorf("line %d: unclosed quote", pendingStart))
 			}
 
 			if err := scanner.Err(); err != nil {
@@ -92,14 +119,18 @@ func executeLine(database *db.DB, line string) (string, error) {
 		return "", batchEdit(database, parts[1:])
 	case "dep":
 		if len(parts) != 3 {
-			return "", fmt.Errorf("dep requires 2 arguments: <blocker> <blocked>")
+			return "", fmt.Errorf("dep requires 2 arguments: <task> <depends-on>")
 		}
-		return "", database.AddDep(parts[1], parts[2])
+		// CLI order: dep <dependent> <blocker>
+		// DB order: AddDep(blocker, blocked)
+		return "", database.AddDep(parts[2], parts[1])
 	case "undep":
 		if len(parts) != 3 {
-			return "", fmt.Errorf("undep requires 2 arguments: <blocker> <blocked>")
+			return "", fmt.Errorf("undep requires 2 arguments: <task> <depends-on>")
 		}
-		return "", database.RemoveDep(parts[1], parts[2])
+		// CLI order: undep <dependent> <blocker>
+		// DB order: RemoveDep(blocker, blocked)
+		return "", database.RemoveDep(parts[2], parts[1])
 	case "claim":
 		if len(parts) != 3 {
 			return "", fmt.Errorf("claim requires 2 arguments: <id> <assignee>")
@@ -267,6 +298,25 @@ func splitArgs(line string) []string {
 	}
 
 	return args
+}
+
+// quotesBalanced returns true if all single and double quotes in s are paired.
+func quotesBalanced(s string) bool {
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\'' :
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+		}
+	}
+	return !inSingle && !inDouble
 }
 
 // substituteRefs replaces $1, $2, etc. in line with the corresponding IDs from refs.

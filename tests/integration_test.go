@@ -85,17 +85,17 @@ func TestExitCriteria_ReadyOrder(t *testing.T) {
 		ids[i] = getID(t, out)
 	}
 
-	// Task 0 blocks tasks 1, 2, 3 (unblocks 3 tasks).
-	runDT(t, bin, dbPath, "dep", ids[0], ids[1])
-	runDT(t, bin, dbPath, "dep", ids[0], ids[2])
-	runDT(t, bin, dbPath, "dep", ids[0], ids[3])
+	// Tasks 1, 2, 3 depend on task 0 (task 0 unblocks 3 tasks).
+	runDT(t, bin, dbPath, "dep", ids[1], ids[0])
+	runDT(t, bin, dbPath, "dep", ids[2], ids[0])
+	runDT(t, bin, dbPath, "dep", ids[3], ids[0])
 
-	// Task 4 blocks tasks 5, 6 (unblocks 2 tasks).
-	runDT(t, bin, dbPath, "dep", ids[4], ids[5])
-	runDT(t, bin, dbPath, "dep", ids[4], ids[6])
+	// Tasks 5, 6 depend on task 4 (task 4 unblocks 2 tasks).
+	runDT(t, bin, dbPath, "dep", ids[5], ids[4])
+	runDT(t, bin, dbPath, "dep", ids[6], ids[4])
 
-	// Task 7 blocks task 8 (unblocks 1 task).
-	runDT(t, bin, dbPath, "dep", ids[7], ids[8])
+	// Task 8 depends on task 7 (task 7 unblocks 1 task).
+	runDT(t, bin, dbPath, "dep", ids[8], ids[7])
 
 	// Task 9 is independent (unblocks 0).
 

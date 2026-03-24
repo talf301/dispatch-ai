@@ -44,7 +44,13 @@ func CreateWorktree(repoDir, wtDir, branchName, baseBranch string) error {
 		}
 	}
 
-	cmd := exec.Command("git", "worktree", "add", wtDir, "-b", branchName, baseBranch)
+	var cmd *exec.Cmd
+	if BranchExists(repoDir, branchName) {
+		// Branch already exists (e.g. from a prior failed attempt) — reuse it.
+		cmd = exec.Command("git", "worktree", "add", wtDir, branchName)
+	} else {
+		cmd = exec.Command("git", "worktree", "add", wtDir, "-b", branchName, baseBranch)
+	}
 	cmd.Dir = repoDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("create worktree: %w\n%s", err, out)

@@ -24,11 +24,11 @@ func TestBatchBackReferences(t *testing.T) {
 	// Simulate batch input:
 	//   add "Parent" -d "parent task"
 	//   add "Child" -d "child" -p $1
-	//   dep $1 $2
+	//   dep $2 $1   (child depends on parent)
 	lines := []string{
 		`add "Parent" -d "parent task"`,
 		`add "Child" -d "child" -p $1`,
-		`dep $1 $2`,
+		`dep $2 $1`,
 	}
 
 	refs := []string{}
@@ -98,6 +98,49 @@ func TestBatchBackReference_InvalidIndex(t *testing.T) {
 	_, err = substituteRefs(`add "x" -p $0`, []string{"abc123"})
 	if err == nil {
 		t.Fatal("expected error for $0 (1-indexed)")
+	}
+}
+
+func TestBatchMultilineDescription(t *testing.T) {
+	d := openTestDB(t)
+
+	// Use executeLine directly with a pre-joined multiline arg.
+	multiline := "add \"Parent\" -d \"line one\nline two\nline three\""
+	id, err := executeLine(d, multiline)
+	if err != nil {
+		t.Fatalf("executeLine multiline: %v", err)
+	}
+	if id == "" {
+		t.Fatal("expected non-empty id")
+	}
+
+	task, err := d.GetTask(id)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	want := "line one\nline two\nline three"
+	if task.Description != want {
+		t.Errorf("description = %q, want %q", task.Description, want)
+	}
+}
+
+func TestQuotesBalanced(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{`add "complete"`, true},
+		{`add "incomplete`, false},
+		{`add "one" -d "two"`, true},
+		{`add 'single'`, true},
+		{`add 'open`, false},
+		{`add "has 'inner' quotes"`, true},
+	}
+	for _, tt := range tests {
+		got := quotesBalanced(tt.input)
+		if got != tt.want {
+			t.Errorf("quotesBalanced(%q) = %v, want %v", tt.input, got, tt.want)
+		}
 	}
 }
 

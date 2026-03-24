@@ -9,10 +9,15 @@ description: Decompose an approved spec into parallel dt tasks with dependency w
 
 **Type:** Rigid — follow this process exactly.
 
+## Flags
+
+- `--auto` — Skip user approval gates (phases 2 and 3). Use best judgement for parallelism and task structure. The review loop (phase 4) still runs.
+
 ## Preconditions
 
 - A spec document exists. If the path isn't clear from conversation context, ask for it.
 - `dt` is on PATH. Verify with `dt --help`.
+- **Do NOT use TaskCreate/TaskUpdate for dispatch tasks.** All task creation and dependency wiring must go through `dt batch`. The built-in task tools are for conversation-scoped tracking only.
 
 ## Process
 
@@ -33,7 +38,7 @@ Present to the user:
 - **Sequential work** — which areas must be ordered and why (schema before code that uses it, interface before implementation, etc.)
 - **Merge risks** — any areas where parallel work might produce merge conflicts when branches are combined
 
-**GATE: User must approve the parallelism structure before proceeding.** Adjust if they disagree.
+**GATE: User must approve the parallelism structure before proceeding.** Adjust if they disagree. *(Skipped with `--auto`.)*
 
 ### Phase 3: Task List
 
@@ -64,7 +69,7 @@ Don't split when:
 - Tests and implementation are for the same feature.
 - The changes only make sense together.
 
-**GATE: User must approve the task list before proceeding.** Adjust if they want changes.
+**GATE: User must approve the task list before proceeding.** Adjust if they want changes. *(Skipped with `--auto`.)*
 
 ### Phase 4: Review Loop
 
@@ -95,16 +100,21 @@ If the reviewer finds issues, fix them and re-dispatch. Max 3 iterations, then s
 
 Generate `dt batch` input and execute it. Use back-references (`$1`, `$2`, etc.) to wire parent/child relationships and dependencies atomically.
 
+Descriptions can span multiple lines inside quotes — the batch parser accumulates lines until the closing quote is found.
+
 Format:
 ```
 add "Plan: <spec title>" -d "<plan-level description>"
 add "<task 1 title>" -d "<task 1 description>" -p $1
-add "<task 2 title>" -d "<task 2 description>" -p $1
+add "<task 2 title>" -d "<task 2 description
+that spans multiple lines>" -p $1
 add "<task 3 title>" -d "<task 3 description>" -p $1
-dep $2 $4
+dep $4 $2
 ```
 
-`$1` refers to the ID returned by the first `add` (the parent). `$2` is the second `add`, etc. Dependencies use `dep <blocker> <blocked>`.
+`$1` refers to the ID returned by the first `add` (the parent). `$2` is the second `add`, etc.
+
+**Dependency argument order:** `dep A B` means "A depends on B" (B must finish before A can start). If task 4 depends on task 2, write `dep $4 $2`.
 
 **Important:** Avoid literal `$N` patterns in task descriptions — they will be treated as back-references by the batch parser.
 

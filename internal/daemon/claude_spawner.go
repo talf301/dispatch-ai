@@ -45,8 +45,9 @@ func (s *ClaudeSpawner) Spawn(ctx context.Context, task db.Task, workDir string,
 
 	args := []string{
 		"--print",
+		"--dangerously-skip-permissions",
 		"--system-prompt", systemPrompt,
-		"--prompt", prompt,
+		prompt,
 	}
 
 	cmd := exec.CommandContext(ctx, bin, args...)

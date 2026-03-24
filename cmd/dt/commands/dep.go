@@ -7,14 +7,16 @@ import (
 // NewDepCmd returns the cobra command for adding a dependency.
 func NewDepCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "dep <blocker> <blocked>",
-		Short: "Add a dependency (blocker blocks blocked)",
+		Use:   "dep <task> <depends-on>",
+		Short: "Add a dependency (task depends on depends-on)",
 		Args:  cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			d := openDB(cmd)
 			defer d.Close()
 
-			if err := d.AddDep(args[0], args[1]); err != nil {
+			// CLI order: dep <dependent> <blocker>
+			// DB order: AddDep(blocker, blocked)
+			if err := d.AddDep(args[1], args[0]); err != nil {
 				exitError(cmd, err)
 			}
 
@@ -30,14 +32,16 @@ func NewDepCmd() *cobra.Command {
 // NewUndepCmd returns the cobra command for removing a dependency.
 func NewUndepCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "undep <blocker> <blocked>",
+		Use:   "undep <task> <depends-on>",
 		Short: "Remove a dependency",
 		Args:  cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			d := openDB(cmd)
 			defer d.Close()
 
-			if err := d.RemoveDep(args[0], args[1]); err != nil {
+			// CLI order: undep <dependent> <blocker>
+			// DB order: RemoveDep(blocker, blocked)
+			if err := d.RemoveDep(args[1], args[0]); err != nil {
 				exitError(cmd, err)
 			}
 

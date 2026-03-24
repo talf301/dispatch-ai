@@ -1,6 +1,8 @@
 package commands
 
 import (
+	"fmt"
+
 	"github.com/dispatch-ai/dispatch/internal/db"
 	"github.com/spf13/cobra"
 )
@@ -112,12 +114,31 @@ func NewListCmd() *cobra.Command {
 				exitError(cmd, err)
 			}
 
+			// Count hidden done tasks when not showing all.
+			var doneCount int
+			if !all && status == "" {
+				doneTasks, err := d.ListTasks("done", false)
+				if err == nil {
+					doneCount = len(doneTasks)
+				}
+			}
+
 			if jsonFlag(cmd) {
-				printJSON(tasks)
+				result := map[string]any{"tasks": tasks}
+				if doneCount > 0 {
+					result["done_hidden"] = doneCount
+				}
+				printJSON(result)
 			} else if tree {
 				printTaskTree(tasks)
+				if doneCount > 0 {
+					fmt.Printf("\n(%d done tasks hidden, use --all to show)\n", doneCount)
+				}
 			} else {
 				printTaskList(tasks)
+				if doneCount > 0 {
+					fmt.Printf("\n(%d done tasks hidden, use --all to show)\n", doneCount)
+				}
 			}
 		},
 	}
