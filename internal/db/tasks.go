@@ -145,26 +145,36 @@ func (d *DB) ReleaseTask(id string) (*Task, error) {
 	return d.GetTask(id)
 }
 
+// AutoComplete is returned by DoneTask when a parent task was automatically
+// completed because all its children are now done.
+type AutoComplete struct {
+	ParentID string
+	Repo     *string
+}
+
 // DoneTask marks a task as done and clears the assignee.
-func (d *DB) DoneTask(id string) (*Task, error) {
+// Returns the completed task, an optional AutoComplete (non-nil when a parent
+// was auto-completed), and an error.
+func (d *DB) DoneTask(id string) (*Task, *AutoComplete, error) {
 	task, err := d.GetTask(id)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	oldStatus := task.Status
 	_, err = d.q.Exec("UPDATE tasks SET status = 'done', assignee = NULL WHERE id = ?", id)
 	if err != nil {
-		return nil, fmt.Errorf("done task: %w", err)
+		return nil, nil, fmt.Errorf("done task: %w", err)
 	}
 
 	if err := d.addSystemNote(id, oldStatus, "done"); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Auto-complete parent if all children are done.
 	// Note: the count query runs after the UPDATE above, so this task's status
 	// is already 'done' in the DB and correctly excluded from the count.
+	var ac *AutoComplete
 	if task.ParentID != nil {
 		var notDone int
 		err := d.q.QueryRow(
@@ -172,13 +182,26 @@ func (d *DB) DoneTask(id string) (*Task, error) {
 			*task.ParentID,
 		).Scan(&notDone)
 		if err == nil && notDone == 0 {
-			if _, err := d.DoneTask(*task.ParentID); err != nil {
-				return nil, fmt.Errorf("auto-complete parent %s: %w", *task.ParentID, err)
+			// Fetch parent to get its Repo before auto-completing.
+			parent, err := d.GetTask(*task.ParentID)
+			if err != nil {
+				return nil, nil, fmt.Errorf("auto-complete parent %s: fetch: %w", *task.ParentID, err)
+			}
+			ac = &AutoComplete{
+				ParentID: parent.ID,
+				Repo:     parent.Repo,
+			}
+			if _, _, err := d.DoneTask(*task.ParentID); err != nil {
+				return nil, nil, fmt.Errorf("auto-complete parent %s: %w", *task.ParentID, err)
 			}
 		}
 	}
 
-	return d.GetTask(id)
+	t, err := d.GetTask(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	return t, ac, nil
 }
 
 // BlockTask marks a task as blocked with a reason and clears the assignee.
@@ -318,4 +341,29 @@ func (d *DB) EditTask(id string, title, description, repo *string) (*Task, error
 	}
 
 	return d.GetTask(id)
+}
+
+// PendingPRParents returns done parent tasks where all children are also done
+// and the parent has a repo set. These are candidates for automatic PR creation.
+func (d *DB) PendingPRParents() ([]Task, error) {
+	rows, err := d.q.Query(`
+		SELECT t.id, t.title, t.description, t.status, t.block_reason,
+		       t.assignee, t.parent_id, t.repo, t.created_at, t.updated_at
+		FROM tasks t
+		WHERE t.status = 'done'
+		  AND EXISTS (
+		    SELECT 1 FROM tasks child WHERE child.parent_id = t.id
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM tasks child
+		    WHERE child.parent_id = t.id AND child.status != 'done'
+		  )
+		  AND t.repo IS NOT NULL
+		ORDER BY t.updated_at ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("pending PR parents: %w", err)
+	}
+	defer rows.Close()
+	return scanTasks(rows)
 }

@@ -457,7 +457,7 @@ func TestDoneTask(t *testing.T) {
 	defer d.Close()
 
 	task, _ := d.AddTask("finish me", "", "", "", nil)
-	done, err := d.DoneTask(task.ID)
+	done, _, err := d.DoneTask(task.ID)
 	if err != nil {
 		t.Fatalf("DoneTask: %v", err)
 	}
@@ -708,7 +708,7 @@ func TestReadyTasks_BlockerDoneUnblocks(t *testing.T) {
 	}
 
 	// Mark A as done
-	d.DoneTask(a.ID)
+	d.DoneTask(a.ID) //nolint: errcheck
 
 	// Now B should be ready
 	ready, err = d.ReadyTasks()
@@ -735,7 +735,7 @@ func TestListTasks(t *testing.T) {
 
 	a, _ := d.AddTask("open task", "", "", "", nil)
 	b, _ := d.AddTask("done task", "", "", "", nil)
-	d.DoneTask(b.ID)
+	d.DoneTask(b.ID) //nolint: errcheck
 
 	// Default (no --all) excludes done
 	tasks, err := d.ListTasks("", false)
@@ -871,7 +871,7 @@ func TestDoneTask_AutoCompletesParent(t *testing.T) {
 	}
 
 	// Done child1 — parent should NOT be done yet (child2 still open)
-	if _, err := d.DoneTask(child1.ID); err != nil {
+	if _, _, err := d.DoneTask(child1.ID); err != nil {
 		t.Fatalf("DoneTask child1: %v", err)
 	}
 
@@ -884,8 +884,15 @@ func TestDoneTask_AutoCompletesParent(t *testing.T) {
 	}
 
 	// Done child2 — parent SHOULD now be done (all children done)
-	if _, err := d.DoneTask(child2.ID); err != nil {
+	_, ac, err := d.DoneTask(child2.ID)
+	if err != nil {
 		t.Fatalf("DoneTask child2: %v", err)
+	}
+	if ac == nil {
+		t.Fatal("expected AutoComplete to be non-nil when parent auto-completes")
+	}
+	if ac.ParentID != parent.ID {
+		t.Errorf("expected AutoComplete.ParentID %q, got %q", parent.ID, ac.ParentID)
 	}
 
 	p, err = d.GetTask(parent.ID)
@@ -925,8 +932,12 @@ func TestDoneTask_ParentNotCompletedWithOpenChildren(t *testing.T) {
 	}
 
 	// Done child1 — parent should NOT be done (child2 and child3 still open)
-	if _, err := d.DoneTask(child1.ID); err != nil {
+	_, ac, err := d.DoneTask(child1.ID)
+	if err != nil {
 		t.Fatalf("DoneTask child1: %v", err)
+	}
+	if ac != nil {
+		t.Errorf("expected AutoComplete to be nil when siblings are still open, got %+v", ac)
 	}
 
 	p, err := d.GetTask(parent.ID)
@@ -983,5 +994,102 @@ func TestGetChildren(t *testing.T) {
 	}
 	if len(noChildren) != 0 {
 		t.Errorf("expected 0 children for leaf task, got %d", len(noChildren))
+	}
+}
+
+func TestDoneTask_AutoCompleteIncludesRepo(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	repo := "/home/user/my-repo"
+	parent, err := d.AddTask("parent", "", "", "", &repo)
+	if err != nil {
+		t.Fatalf("AddTask parent: %v", err)
+	}
+
+	child, err := d.AddTask("child", "", parent.ID, "", nil)
+	if err != nil {
+		t.Fatalf("AddTask child: %v", err)
+	}
+
+	_, ac, err := d.DoneTask(child.ID)
+	if err != nil {
+		t.Fatalf("DoneTask child: %v", err)
+	}
+	if ac == nil {
+		t.Fatal("expected AutoComplete to be non-nil")
+	}
+	if ac.ParentID != parent.ID {
+		t.Errorf("expected ParentID %q, got %q", parent.ID, ac.ParentID)
+	}
+	if ac.Repo == nil || *ac.Repo != repo {
+		t.Errorf("expected Repo %q, got %v", repo, ac.Repo)
+	}
+}
+
+func TestDoneTask_NoAutoCompleteReturnsNil(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	// Task with no parent — no auto-complete
+	task, _ := d.AddTask("standalone", "", "", "", nil)
+	_, ac, err := d.DoneTask(task.ID)
+	if err != nil {
+		t.Fatalf("DoneTask: %v", err)
+	}
+	if ac != nil {
+		t.Errorf("expected nil AutoComplete for task without parent, got %+v", ac)
+	}
+}
+
+func TestPendingPRParents(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	repo := "/home/user/my-repo"
+
+	// Parent with repo, all children done → should appear
+	parent1, _ := d.AddTask("parent with repo", "", "", "", &repo)
+	c1, _ := d.AddTask("child 1", "", parent1.ID, "", nil)
+	d.DoneTask(c1.ID) // auto-completes parent1
+
+	// Parent without repo, all children done → should NOT appear
+	parent2, _ := d.AddTask("parent no repo", "", "", "", nil)
+	c2, _ := d.AddTask("child 2", "", parent2.ID, "", nil)
+	d.DoneTask(c2.ID)
+
+	// Parent with repo, but still has open child → should NOT appear
+	parent3, _ := d.AddTask("parent incomplete", "", "", "", &repo)
+	c3, _ := d.AddTask("child 3a", "", parent3.ID, "", nil)
+	d.AddTask("child 3b", "", parent3.ID, "", nil) // open child
+	d.DoneTask(c3.ID)
+
+	pending, err := d.PendingPRParents()
+	if err != nil {
+		t.Fatalf("PendingPRParents: %v", err)
+	}
+
+	ids := make(map[string]bool)
+	for _, task := range pending {
+		ids[task.ID] = true
+	}
+
+	if !ids[parent1.ID] {
+		t.Errorf("expected parent1 (repo, all done) in PendingPRParents")
+	}
+	if ids[parent2.ID] {
+		t.Errorf("expected parent2 (no repo) NOT in PendingPRParents")
+	}
+	if ids[parent3.ID] {
+		t.Errorf("expected parent3 (incomplete children) NOT in PendingPRParents")
 	}
 }
