@@ -429,8 +429,12 @@ func (d *Daemon) handleReviewApproval(taskID string) {
 			return
 		}
 		if task.Status != "done" {
-			if _, _, err := d.db.DoneTask(taskID); err != nil {
+			_, ac, err := d.db.DoneTask(taskID)
+			if err != nil {
 				d.logger.Printf("review-done: done task %s: %v", taskID, err)
+			}
+			if ac != nil {
+				d.triggerPR(ac)
 			}
 		}
 		if err := RemoveWorktree(repoPath, wtDir, branchName, true); err != nil {
@@ -542,6 +546,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-ticker.C:
 			d.spawnReady()
 			d.monitorWorkers()
+			d.checkPendingPRs()
 			d.cleanOrphanedWorktrees()
 			d.logSummary()
 		}
