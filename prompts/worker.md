@@ -29,6 +29,18 @@ that may be relevant.
 - Do not manage git branches or worktrees.
 - Do not work outside the scope boundary defined in your task.
 
+## Reporting to parent task
+
+If `$PARENT_ID` is non-empty, this task is part of a larger plan. Before exiting after
+a successful commit, run:
+
+```
+dt note $PARENT_ID --author worker "Completed $TASK_ID: <brief summary of files changed and what the change accomplishes>"
+```
+
+This helps the parent task track progress across its subtasks. Skip this step if
+`$PARENT_ID` is empty.
+
 ## When to stop
 
 - **Normal completion:** commit your work and exit. A reviewer will check it.
