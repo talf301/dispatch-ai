@@ -24,7 +24,7 @@ func TestClaudeSpawner_BuildsCommand(t *testing.T) {
 	}
 
 	task := db.Task{ID: "abc1", Title: "Test task", Description: "Do the thing"}
-	handle, err := spawner.Spawn(context.Background(), task, tmpDir, RoleWorker)
+	handle, err := spawner.Spawn(context.Background(), task, tmpDir, RoleWorker, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestClaudeSpawner_NonZeroExit(t *testing.T) {
 	}
 
 	task := db.Task{ID: "abc2", Title: "Failing task"}
-	handle, err := spawner.Spawn(context.Background(), task, tmpDir, RoleWorker)
+	handle, err := spawner.Spawn(context.Background(), task, tmpDir, RoleWorker, "")
 	if err != nil {
 		t.Fatal(err)
 	}

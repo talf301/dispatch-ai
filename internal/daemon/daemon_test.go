@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dispatch-ai/dispatch/internal/config"
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
 
@@ -27,10 +28,16 @@ func openTestDB(t *testing.T) *db.DB {
 	return d
 }
 
+func testRepos(repoDir string) map[string]config.RepoConfig {
+	return map[string]config.RepoConfig{
+		repoDir: {Path: repoDir, MaxWorkers: 4},
+	}
+}
+
 func TestDaemonConfig_Defaults(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.MaxWorkers != 4 {
-		t.Errorf("MaxWorkers = %d, want 4", cfg.MaxWorkers)
+	if cfg.Repos == nil {
+		t.Error("Repos map should not be nil")
 	}
 	if cfg.PollInterval != 5*time.Second {
 		t.Errorf("PollInterval = %v, want 5s", cfg.PollInterval)
@@ -42,7 +49,7 @@ func TestDaemon_RecoverActive_DeadProcess(t *testing.T) {
 	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
 	os.MkdirAll(worktreeBase, 0o755)
 
-	task, _ := d.AddTask("recover test", "", "", "")
+	task, _ := d.AddTask("recover test", "", "", "", nil)
 	d.ClaimTask(task.ID, "old-session")
 
 	wtDir := filepath.Join(worktreeBase, task.ID)
@@ -51,8 +58,10 @@ func TestDaemon_RecoverActive_DeadProcess(t *testing.T) {
 
 	daemon := &Daemon{
 		db:           d,
+		repos:        make(map[string]config.RepoConfig),
 		worktreeBase: worktreeBase,
 		workers:      make(map[string]WorkerHandle),
+		workerRepo:   make(map[string]string),
 		logger:       log.New(io.Discard, "", 0),
 	}
 
@@ -69,13 +78,15 @@ func TestDaemon_RecoverActive_NoWorktree(t *testing.T) {
 	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
 	os.MkdirAll(worktreeBase, 0o755)
 
-	task, _ := d.AddTask("no worktree test", "", "", "")
+	task, _ := d.AddTask("no worktree test", "", "", "", nil)
 	d.ClaimTask(task.ID, "old-session")
 
 	daemon := &Daemon{
 		db:           d,
+		repos:        make(map[string]config.RepoConfig),
 		worktreeBase: worktreeBase,
 		workers:      make(map[string]WorkerHandle),
+		workerRepo:   make(map[string]string),
 		logger:       log.New(io.Discard, "", 0),
 	}
 
@@ -92,7 +103,7 @@ func TestDaemon_RecoverActive_LiveProcess(t *testing.T) {
 	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
 	os.MkdirAll(worktreeBase, 0o755)
 
-	task, _ := d.AddTask("live process test", "", "", "")
+	task, _ := d.AddTask("live process test", "", "", "", nil)
 	d.ClaimTask(task.ID, "old-session")
 
 	wtDir := filepath.Join(worktreeBase, task.ID)
@@ -101,8 +112,10 @@ func TestDaemon_RecoverActive_LiveProcess(t *testing.T) {
 
 	daemon := &Daemon{
 		db:           d,
+		repos:        make(map[string]config.RepoConfig),
 		worktreeBase: worktreeBase,
 		workers:      make(map[string]WorkerHandle),
+		workerRepo:   make(map[string]string),
 		logger:       log.New(io.Discard, "", 0),
 	}
 
@@ -119,12 +132,11 @@ func TestDaemon_SpawnWorker(t *testing.T) {
 	repoDir := initTestRepo(t)
 	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
 
-	task, _ := d.AddTask("spawn test", "", "", "")
+	task, _ := d.AddTask("spawn test", "", "", "", nil)
 
 	spawner := &MockSpawner{ExitCode: 0}
 	daemon := New(d, Config{
-		MaxWorkers:   4,
-		RepoPath:     repoDir,
+		Repos:        testRepos(repoDir),
 		WorktreeBase: worktreeBase,
 	}, spawner)
 
@@ -149,13 +161,14 @@ func TestDaemon_MaxWorkers(t *testing.T) {
 	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
 
 	for i := 0; i < 5; i++ {
-		d.AddTask(fmt.Sprintf("task %d", i), "", "", "")
+		d.AddTask(fmt.Sprintf("task %d", i), "", "", "", nil)
 	}
 
 	spawner := &MockSpawner{ExitCode: 0}
 	daemon := New(d, Config{
-		MaxWorkers:   2,
-		RepoPath:     repoDir,
+		Repos: map[string]config.RepoConfig{
+			repoDir: {Path: repoDir, MaxWorkers: 2},
+		},
 		WorktreeBase: worktreeBase,
 	}, spawner)
 
@@ -173,9 +186,8 @@ func TestDaemon_RunAndShutdown(t *testing.T) {
 
 	spawner := &MockSpawner{ExitCode: 0}
 	daemon := New(d, Config{
-		MaxWorkers:   4,
+		Repos:        testRepos(repoDir),
 		PollInterval: 50 * time.Millisecond,
-		RepoPath:     repoDir,
 		WorktreeBase: worktreeBase,
 	}, spawner)
 
@@ -205,13 +217,12 @@ func TestDaemon_SpawnChildUsesParentBranch(t *testing.T) {
 	repoDir := initTestRepo(t)
 	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
 
-	parent, _ := d.AddTask("parent plan", "meta", "", "")
-	child, _ := d.AddTask("child task", "do work", parent.ID, "")
+	parent, _ := d.AddTask("parent plan", "meta", "", "", nil)
+	child, _ := d.AddTask("child task", "do work", parent.ID, "", nil)
 
 	spawner := &MockSpawner{ExitCode: 0}
 	daemon := New(d, Config{
-		MaxWorkers:   4,
-		RepoPath:     repoDir,
+		Repos:        testRepos(repoDir),
 		WorktreeBase: worktreeBase,
 	}, spawner)
 
@@ -238,12 +249,11 @@ func TestDaemon_MonitorCleanExit(t *testing.T) {
 	repoDir := initTestRepo(t)
 	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
 
-	task, _ := d.AddTask("monitor test", "", "", "")
+	task, _ := d.AddTask("monitor test", "", "", "", nil)
 
 	spawner := &MockSpawner{ExitCode: 0}
 	daemon := New(d, Config{
-		MaxWorkers:   4,
-		RepoPath:     repoDir,
+		Repos:        testRepos(repoDir),
 		WorktreeBase: worktreeBase,
 	}, spawner)
 
@@ -275,13 +285,12 @@ func TestDaemon_MergeChildOnCompletion(t *testing.T) {
 	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
 
 	// Create parent + child tasks.
-	parent, _ := d.AddTask("parent plan", "meta", "", "")
-	child, _ := d.AddTask("child task", "do work", parent.ID, "")
+	parent, _ := d.AddTask("parent plan", "meta", "", "", nil)
+	child, _ := d.AddTask("child task", "do work", parent.ID, "", nil)
 
 	spawner := &MockSpawner{ExitCode: 0}
 	daemon := New(d, Config{
-		MaxWorkers:   4,
-		RepoPath:     repoDir,
+		Repos:        testRepos(repoDir),
 		WorktreeBase: worktreeBase,
 	}, spawner)
 
@@ -345,4 +354,3 @@ func TestDaemon_MergeChildOnCompletion(t *testing.T) {
 		t.Error("child branch should be deleted after clean merge")
 	}
 }
-

@@ -16,7 +16,7 @@ const (
 
 // WorkerSpawner starts worker processes for tasks.
 type WorkerSpawner interface {
-	Spawn(ctx context.Context, task db.Task, workDir string, role SpawnRole) (WorkerHandle, error)
+	Spawn(ctx context.Context, task db.Task, workDir string, role SpawnRole, logSuffix string) (WorkerHandle, error)
 }
 
 // WorkerHandle monitors a running worker process.

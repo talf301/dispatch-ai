@@ -12,15 +12,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dispatch-ai/dispatch/internal/config"
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
 
 // Config holds daemon configuration.
 type Config struct {
 	DBPath       string
-	MaxWorkers   int
-	BaseBranch   string // empty = auto-detect
-	RepoPath     string
+	Repos        map[string]config.RepoConfig // repoPath -> RepoConfig
+	BaseBranch   string                       // empty = auto-detect
 	PollInterval time.Duration
 	WorktreeBase string // default ~/.dispatch/worktrees
 	SessionDir   string // path to ~/.dispatch/sessions/
@@ -31,8 +31,7 @@ func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
 		DBPath:       filepath.Join(home, ".dispatch", "dispatch.db"),
-		MaxWorkers:   4,
-		RepoPath:     ".",
+		Repos:        make(map[string]config.RepoConfig),
 		PollInterval: 5 * time.Second,
 		WorktreeBase: filepath.Join(home, ".dispatch", "worktrees"),
 	}
@@ -44,9 +43,10 @@ type Daemon struct {
 	cfg                    Config
 	spawner                WorkerSpawner
 	worktreeBase           string
-	repoPath               string
+	repos                  map[string]config.RepoConfig // repoPath -> RepoConfig
 	baseBranch             string
 	workers                map[string]WorkerHandle // taskID -> handle
+	workerRepo             map[string]string        // taskID -> repoPath
 	taskRoles              map[string]SpawnRole     // taskID -> current role
 	reviewRound            map[string]int           // taskID -> review round count
 	noteCountAtReviewStart map[string]int           // taskID -> note count when reviewer was spawned
@@ -55,14 +55,19 @@ type Daemon struct {
 
 // New creates a Daemon from the given config and spawner.
 func New(database *db.DB, cfg Config, spawner WorkerSpawner) *Daemon {
+	repos := cfg.Repos
+	if repos == nil {
+		repos = make(map[string]config.RepoConfig)
+	}
 	return &Daemon{
 		db:                     database,
 		cfg:                    cfg,
 		spawner:                spawner,
 		worktreeBase:           cfg.WorktreeBase,
-		repoPath:               cfg.RepoPath,
+		repos:                  repos,
 		baseBranch:             cfg.BaseBranch,
 		workers:                make(map[string]WorkerHandle),
+		workerRepo:             make(map[string]string),
 		taskRoles:              make(map[string]SpawnRole),
 		reviewRound:            make(map[string]int),
 		noteCountAtReviewStart: make(map[string]int),
@@ -109,9 +114,13 @@ func (d *Daemon) recoverActive() {
 			continue
 		}
 
+		// Record repo mapping for recovered tasks.
+		repoPath := d.taskRepoPath(&task)
+
 		if isProcessAlive(pid) {
 			d.logger.Printf("recovery: task %s has live worker (pid %d), re-adopting", task.ID, pid)
 			d.workers[task.ID] = newAdoptedHandle(pid)
+			d.workerRepo[task.ID] = repoPath
 		} else {
 			d.logger.Printf("recovery: task %s worker (pid %d) is dead, blocking", task.ID, pid)
 			if _, err := d.db.BlockTask(task.ID, "worker died while daemon was down"); err != nil {
@@ -157,23 +166,44 @@ func (h *adoptedHandle) Err() error           { <-h.done; return h.exitErr }
 func (h *adoptedHandle) Wait() error          { return h.Err() }
 func (h *adoptedHandle) Output() string       { return h.output }
 
-// spawnReady polls for ready tasks and spawns workers up to MaxWorkers.
-func (d *Daemon) spawnReady() {
-	activeCount := len(d.workers)
-	available := d.cfg.MaxWorkers - activeCount
-	if available <= 0 {
-		return
+// taskRepoPath returns the repo path for a task, falling back to the first
+// configured repo if the task has no repo field set.
+func (d *Daemon) taskRepoPath(task *db.Task) string {
+	if task.Repo != nil {
+		return *task.Repo
 	}
+	// Fallback: use the first (only) repo if there's exactly one.
+	for path := range d.repos {
+		return path
+	}
+	return "."
+}
 
+// spawnReady polls for ready tasks and spawns workers, enforcing per-repo max_workers.
+func (d *Daemon) spawnReady() {
 	tasks, err := d.db.ReadyTasks()
 	if err != nil {
 		d.logger.Printf("poll: ready tasks: %v", err)
 		return
 	}
 
+	// Count active workers per repo.
+	activePerRepo := make(map[string]int)
+	for _, repoPath := range d.workerRepo {
+		activePerRepo[repoPath]++
+	}
+
 	for _, task := range tasks {
-		if available <= 0 {
-			break
+		repoPath := d.taskRepoPath(&task)
+
+		// Check per-repo capacity.
+		repoCfg, ok := d.repos[repoPath]
+		if !ok {
+			d.logger.Printf("spawn: task %s references unknown repo %q, skipping", task.ID, repoPath)
+			continue
+		}
+		if activePerRepo[repoPath] >= repoCfg.MaxWorkers {
+			continue
 		}
 
 		// Claim first to prevent double-spawn.
@@ -193,13 +223,13 @@ func (d *Daemon) spawnReady() {
 			baseBranch := d.baseBranch
 			if task.ParentID != nil {
 				parentBranch := fmt.Sprintf("dispatch/plan-%s", *task.ParentID)
-				if !BranchExists(d.repoPath, parentBranch) {
+				if !BranchExists(repoPath, parentBranch) {
 					base := d.baseBranch
 					if base == "" {
-						base, _ = DetectDefaultBranch(d.repoPath)
+						base, _ = DetectDefaultBranch(repoPath)
 					}
 					cmd := exec.Command("git", "branch", parentBranch, base)
-					cmd.Dir = d.repoPath
+					cmd.Dir = repoPath
 					if out, err := cmd.CombinedOutput(); err != nil {
 						d.logger.Printf("spawn: create parent branch %s: %v\n%s", parentBranch, err, out)
 						d.db.ReleaseTask(task.ID)
@@ -209,7 +239,7 @@ func (d *Daemon) spawnReady() {
 				baseBranch = parentBranch
 			}
 
-			if err := CreateWorktree(d.repoPath, wtDir, branchName, baseBranch); err != nil {
+			if err := CreateWorktree(repoPath, wtDir, branchName, baseBranch); err != nil {
 				d.logger.Printf("spawn: worktree %s: %v", task.ID, err)
 				if _, err := d.db.ReleaseTask(task.ID); err != nil {
 					d.logger.Printf("spawn: release task %s: %v", task.ID, err)
@@ -223,22 +253,19 @@ func (d *Daemon) spawnReady() {
 			d.reviewRound[task.ID] = recoverReviewRound(d.cfg.SessionDir, task.ID)
 		}
 
-		// Set log suffix for session logging.
+		// Compute log suffix for session logging.
 		round := d.reviewRound[task.ID]
-		if cs, ok := d.spawner.(*ClaudeSpawner); ok {
-			if round == 0 {
-				cs.LogSuffix = ""
-			} else {
-				cs.LogSuffix = fmt.Sprintf("-%d", round+1)
-			}
+		logSuffix := ""
+		if round > 0 {
+			logSuffix = fmt.Sprintf("-%d", round+1)
 		}
 
 		// Spawn worker.
 		ctx := context.Background()
-		handle, err := d.spawner.Spawn(ctx, task, wtDir, RoleWorker)
+		handle, err := d.spawner.Spawn(ctx, task, wtDir, RoleWorker, logSuffix)
 		if err != nil {
 			d.logger.Printf("spawn: worker %s: %v", task.ID, err)
-			RemoveWorktree(d.repoPath, wtDir, branchName, true)
+			RemoveWorktree(repoPath, wtDir, branchName, true)
 			if _, err := d.db.ReleaseTask(task.ID); err != nil {
 				d.logger.Printf("spawn: release task %s: %v", task.ID, err)
 			}
@@ -252,9 +279,10 @@ func (d *Daemon) spawnReady() {
 		}
 
 		d.workers[task.ID] = handle
+		d.workerRepo[task.ID] = repoPath
 		d.taskRoles[task.ID] = RoleWorker
-		d.logger.Printf("spawned worker for task %s (pid %d)", task.ID, handle.PID())
-		available--
+		d.logger.Printf("spawned worker for task %s in repo %s (pid %d)", task.ID, repoPath, handle.PID())
+		activePerRepo[repoPath]++
 	}
 }
 
@@ -296,6 +324,7 @@ func (d *Daemon) monitorWorkers() {
 		role := d.taskRoles[f.taskID]
 		delete(d.workers, f.taskID)
 		delete(d.taskRoles, f.taskID)
+		// Note: workerRepo is NOT deleted here — it's needed by handleReviewApproval etc.
 
 		// Preserve adopted-process check.
 		waitErr := f.err
@@ -352,14 +381,12 @@ func (d *Daemon) handleWorkerComplete(taskID string) {
 	}
 	d.noteCountAtReviewStart[taskID] = len(notes)
 
-	// Set log suffix for session logging.
+	// Compute log suffix for session logging.
 	round := d.reviewRound[taskID] + 1
-	if cs, ok := d.spawner.(*ClaudeSpawner); ok {
-		cs.LogSuffix = fmt.Sprintf("-review-%d", round)
-	}
+	logSuffix := fmt.Sprintf("-review-%d", round)
 
 	ctx := context.Background()
-	handle, err := d.spawner.Spawn(ctx, *task, wtDir, RoleReviewer)
+	handle, err := d.spawner.Spawn(ctx, *task, wtDir, RoleReviewer, logSuffix)
 	if err != nil {
 		d.logger.Printf("review: spawn reviewer %s: %v", taskID, err)
 		if _, err := d.db.BlockTask(taskID, fmt.Sprintf("failed to spawn reviewer: %v", err)); err != nil {
@@ -387,12 +414,13 @@ func (d *Daemon) handleReviewApproval(taskID string) {
 		return
 	}
 
+	repoPath := d.workerRepo[taskID]
 	wtDir := filepath.Join(d.worktreeBase, taskID)
 	branchName := fmt.Sprintf("dispatch/%s", taskID)
 
 	if task.ParentID != nil {
 		parentBranch := fmt.Sprintf("dispatch/plan-%s", *task.ParentID)
-		if err := MergeBranch(d.repoPath, branchName, parentBranch); err != nil {
+		if err := MergeBranch(repoPath, branchName, parentBranch); err != nil {
 			d.logger.Printf("review-done: merge %s into %s failed: %v", branchName, parentBranch, err)
 			reason := fmt.Sprintf("Merge conflict merging into plan branch:\n%v", err)
 			if _, err := d.db.BlockTask(taskID, reason); err != nil {
@@ -401,25 +429,26 @@ func (d *Daemon) handleReviewApproval(taskID string) {
 			return
 		}
 		if task.Status != "done" {
-			if _, err := d.db.DoneTask(taskID); err != nil {
+			if _, _, err := d.db.DoneTask(taskID); err != nil {
 				d.logger.Printf("review-done: done task %s: %v", taskID, err)
 			}
 		}
-		if err := RemoveWorktree(d.repoPath, wtDir, branchName, true); err != nil {
+		if err := RemoveWorktree(repoPath, wtDir, branchName, true); err != nil {
 			d.logger.Printf("review-done: cleanup worktree %s: %v", taskID, err)
 		}
 	} else {
 		if task.Status != "done" {
-			if _, err := d.db.DoneTask(taskID); err != nil {
+			if _, _, err := d.db.DoneTask(taskID); err != nil {
 				d.logger.Printf("review-done: done task %s: %v", taskID, err)
 			}
 		}
-		if err := RemoveWorktree(d.repoPath, wtDir, branchName, true); err != nil {
+		if err := RemoveWorktree(repoPath, wtDir, branchName, true); err != nil {
 			d.logger.Printf("review-done: cleanup worktree %s: %v", taskID, err)
 		}
 	}
 	delete(d.reviewRound, taskID)
 	delete(d.noteCountAtReviewStart, taskID)
+	delete(d.workerRepo, taskID)
 	d.logger.Printf("task %s completed (review approved)", taskID)
 }
 
@@ -445,6 +474,7 @@ func (d *Daemon) handleReviewerExit(taskID string, handle WorkerHandle) {
 		d.logger.Printf("task %s review rejected (round %d), reopening", taskID, d.reviewRound[taskID])
 	} else {
 		// Reviewer crashed — block.
+		repoPath := d.workerRepo[taskID]
 		wtDir := filepath.Join(d.worktreeBase, taskID)
 		branchName := fmt.Sprintf("dispatch/%s", taskID)
 		output := handle.Output()
@@ -455,17 +485,19 @@ func (d *Daemon) handleReviewerExit(taskID string, handle WorkerHandle) {
 		if _, err := d.db.BlockTask(taskID, reason); err != nil {
 			d.logger.Printf("review-crash: block task %s: %v", taskID, err)
 		}
-		if err := RemoveWorktree(d.repoPath, wtDir, branchName, false); err != nil {
+		if err := RemoveWorktree(repoPath, wtDir, branchName, false); err != nil {
 			d.logger.Printf("review-crash: cleanup worktree %s: %v", taskID, err)
 		}
 		delete(d.reviewRound, taskID)
 		delete(d.noteCountAtReviewStart, taskID)
+		delete(d.workerRepo, taskID)
 		d.logger.Printf("task %s blocked: reviewer crashed", taskID)
 	}
 }
 
 // handleWorkerCrash blocks a crashed worker with log context.
 func (d *Daemon) handleWorkerCrash(taskID string, exitErr error, handle WorkerHandle) {
+	repoPath := d.workerRepo[taskID]
 	wtDir := filepath.Join(d.worktreeBase, taskID)
 	branchName := fmt.Sprintf("dispatch/%s", taskID)
 	output := handle.Output()
@@ -476,11 +508,12 @@ func (d *Daemon) handleWorkerCrash(taskID string, exitErr error, handle WorkerHa
 	if _, err := d.db.BlockTask(taskID, reason); err != nil {
 		d.logger.Printf("monitor: block task %s: %v", taskID, err)
 	}
-	if err := RemoveWorktree(d.repoPath, wtDir, branchName, false); err != nil {
+	if err := RemoveWorktree(repoPath, wtDir, branchName, false); err != nil {
 		d.logger.Printf("monitor: cleanup worktree %s: %v", taskID, err)
 	}
 	delete(d.reviewRound, taskID)
 	delete(d.noteCountAtReviewStart, taskID)
+	delete(d.workerRepo, taskID)
 	d.logger.Printf("task %s blocked: %v", taskID, exitErr)
 }
 
@@ -603,8 +636,22 @@ func (d *Daemon) cleanOrphanedWorktrees() {
 		if !keepIDs[entry.Name()] {
 			wtDir := filepath.Join(d.worktreeBase, entry.Name())
 			branchName := fmt.Sprintf("dispatch/%s", entry.Name())
+			// Determine repo for this orphaned worktree.
+			repoPath := d.workerRepo[entry.Name()]
+			if repoPath == "" {
+				// Look up from DB if not tracked.
+				if task, err := d.db.GetTask(entry.Name()); err == nil {
+					repoPath = d.taskRepoPath(task)
+				} else {
+					// Fallback to first repo.
+					for p := range d.repos {
+						repoPath = p
+						break
+					}
+				}
+			}
 			d.logger.Printf("cleanup: removing orphaned worktree %s", entry.Name())
-			RemoveWorktree(d.repoPath, wtDir, branchName, true)
+			RemoveWorktree(repoPath, wtDir, branchName, true)
 		}
 	}
 }

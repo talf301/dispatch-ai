@@ -18,13 +18,12 @@ type ClaudeSpawner struct {
 	ReviewerPrompt string // contents of reviewer.md (with $TASK_ID placeholder)
 	OutputLines    int    // ring buffer size, default 100
 	SessionDir     string // path to ~/.dispatch/sessions/
-	LogSuffix      string // suffix for log file, set by daemon per-spawn (e.g., "", "-2", "-review-1")
 }
 
 // Compile-time check that ClaudeSpawner implements WorkerSpawner.
 var _ WorkerSpawner = (*ClaudeSpawner)(nil)
 
-func (s *ClaudeSpawner) Spawn(ctx context.Context, task db.Task, workDir string, role SpawnRole) (WorkerHandle, error) {
+func (s *ClaudeSpawner) Spawn(ctx context.Context, task db.Task, workDir string, role SpawnRole, logSuffix string) (WorkerHandle, error) {
 	bin := s.ClaudeBin
 	if bin == "" {
 		bin = "claude"
@@ -43,6 +42,13 @@ func (s *ClaudeSpawner) Spawn(ctx context.Context, task db.Task, workDir string,
 	// Substitute $TASK_ID in the system prompt.
 	systemPrompt = strings.ReplaceAll(systemPrompt, "$TASK_ID", task.ID)
 
+	// Substitute $PARENT_ID in the system prompt.
+	parentID := ""
+	if task.ParentID != nil {
+		parentID = *task.ParentID
+	}
+	systemPrompt = strings.ReplaceAll(systemPrompt, "$PARENT_ID", parentID)
+
 	args := []string{
 		"--print",
 		"--dangerously-skip-permissions",
@@ -57,7 +63,7 @@ func (s *ClaudeSpawner) Spawn(ctx context.Context, task db.Task, workDir string,
 
 	var logFile *os.File
 	if s.SessionDir != "" {
-		logPath := filepath.Join(s.SessionDir, task.ID+s.LogSuffix+".log")
+		logPath := filepath.Join(s.SessionDir, task.ID+logSuffix+".log")
 		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
 			return nil, fmt.Errorf("open log file: %w", err)

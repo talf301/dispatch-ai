@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dispatch-ai/dispatch/internal/config"
 	"github.com/dispatch-ai/dispatch/internal/daemon"
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
@@ -32,6 +33,12 @@ func initGitRepo(t *testing.T) string {
 	return dir
 }
 
+func integrationRepos(repoDir string, maxWorkers int) map[string]config.RepoConfig {
+	return map[string]config.RepoConfig{
+		repoDir: {Path: repoDir, MaxWorkers: maxWorkers},
+	}
+}
+
 func TestDaemonIntegration_SpawnAndComplete(t *testing.T) {
 	repoDir := initGitRepo(t)
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -43,7 +50,7 @@ func TestDaemonIntegration_SpawnAndComplete(t *testing.T) {
 	}
 	defer database.Close()
 
-	task, err := database.AddTask("integration test task", "do something", "", "")
+	task, err := database.AddTask("integration test task", "do something", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,9 +58,8 @@ func TestDaemonIntegration_SpawnAndComplete(t *testing.T) {
 	spawner := &doneCallingSpawner{db: database}
 
 	d := daemon.New(database, daemon.Config{
-		MaxWorkers:   4,
+		Repos:        integrationRepos(repoDir, 4),
 		PollInterval: 100 * time.Millisecond,
-		RepoPath:     repoDir,
 		WorktreeBase: worktreeBase,
 	}, spawner)
 
@@ -94,7 +100,7 @@ func TestDaemonIntegration_WorkerCrash(t *testing.T) {
 	}
 	defer database.Close()
 
-	task, err := database.AddTask("crash test task", "this will fail", "", "")
+	task, err := database.AddTask("crash test task", "this will fail", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,9 +108,8 @@ func TestDaemonIntegration_WorkerCrash(t *testing.T) {
 	spawner := &daemon.MockSpawner{ExitCode: 1, OutputText: "something broke"}
 
 	d := daemon.New(database, daemon.Config{
-		MaxWorkers:   4,
+		Repos:        integrationRepos(repoDir, 4),
 		PollInterval: 100 * time.Millisecond,
-		RepoPath:     repoDir,
 		WorktreeBase: worktreeBase,
 	}, spawner)
 
@@ -149,15 +154,14 @@ func TestDaemonIntegration_MaxWorkers(t *testing.T) {
 	defer database.Close()
 
 	for i := 0; i < 5; i++ {
-		database.AddTask("max worker task", "", "", "")
+		database.AddTask("max worker task", "", "", "", nil)
 	}
 
 	spawner := &hangingSpawner{}
 
 	d := daemon.New(database, daemon.Config{
-		MaxWorkers:   2,
+		Repos:        integrationRepos(repoDir, 2),
 		PollInterval: 100 * time.Millisecond,
-		RepoPath:     repoDir,
 		WorktreeBase: worktreeBase,
 	}, spawner)
 
@@ -182,7 +186,7 @@ type doneCallingSpawner struct {
 	db *db.DB
 }
 
-func (s *doneCallingSpawner) Spawn(_ context.Context, task db.Task, _ string, _ daemon.SpawnRole) (daemon.WorkerHandle, error) {
+func (s *doneCallingSpawner) Spawn(_ context.Context, task db.Task, _ string, _ daemon.SpawnRole, _ string) (daemon.WorkerHandle, error) {
 	s.db.DoneTask(task.ID)
 	done := make(chan struct{})
 	close(done) // immediately done
@@ -202,7 +206,7 @@ func (h *immediateHandle) Output() string       { return "" }
 // hangingSpawner creates workers that never exit.
 type hangingSpawner struct{}
 
-func (s *hangingSpawner) Spawn(_ context.Context, task db.Task, _ string, _ daemon.SpawnRole) (daemon.WorkerHandle, error) {
+func (s *hangingSpawner) Spawn(_ context.Context, task db.Task, _ string, _ daemon.SpawnRole, _ string) (daemon.WorkerHandle, error) {
 	return &hangingHandle{done: make(chan struct{})}, nil // never closed
 }
 
@@ -223,7 +227,7 @@ type fileCommittingSpawner struct {
 	db *db.DB
 }
 
-func (s *fileCommittingSpawner) Spawn(_ context.Context, task db.Task, workDir string, _ daemon.SpawnRole) (daemon.WorkerHandle, error) {
+func (s *fileCommittingSpawner) Spawn(_ context.Context, task db.Task, workDir string, _ daemon.SpawnRole, _ string) (daemon.WorkerHandle, error) {
 	// Create a file unique to this task.
 	filePath := filepath.Join(workDir, task.ID+".txt")
 	if err := os.WriteFile(filePath, []byte("work from "+task.ID), 0o644); err != nil {
@@ -258,7 +262,7 @@ type conflictingSpawner struct {
 	content map[string]string // taskID -> content to write
 }
 
-func (s *conflictingSpawner) Spawn(_ context.Context, task db.Task, workDir string, _ daemon.SpawnRole) (daemon.WorkerHandle, error) {
+func (s *conflictingSpawner) Spawn(_ context.Context, task db.Task, workDir string, _ daemon.SpawnRole, _ string) (daemon.WorkerHandle, error) {
 	content, ok := s.content[task.ID]
 	if !ok {
 		content = "default content from " + task.ID
@@ -315,22 +319,22 @@ func TestDaemonIntegration_PlanLifecycle(t *testing.T) {
 	defer database.Close()
 
 	// Create parent task.
-	parent, err := database.AddTask("plan parent", "the parent plan", "", "")
+	parent, err := database.AddTask("plan parent", "the parent plan", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Create 3 children: child1 and child2 are parallel, child3 depends on child1.
-	child1, err := database.AddTask("child 1", "parallel task 1", parent.ID, "")
+	child1, err := database.AddTask("child 1", "parallel task 1", parent.ID, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	child2, err := database.AddTask("child 2", "parallel task 2", parent.ID, "")
+	child2, err := database.AddTask("child 2", "parallel task 2", parent.ID, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// child3 depends on child1 (afterID = child1.ID).
-	child3, err := database.AddTask("child 3", "depends on child1", parent.ID, child1.ID)
+	child3, err := database.AddTask("child 3", "depends on child1", parent.ID, child1.ID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,9 +342,8 @@ func TestDaemonIntegration_PlanLifecycle(t *testing.T) {
 	spawner := &fileCommittingSpawner{db: database}
 
 	d := daemon.New(database, daemon.Config{
-		MaxWorkers:   4,
+		Repos:        integrationRepos(repoDir, 4),
 		PollInterval: 100 * time.Millisecond,
-		RepoPath:     repoDir,
 		WorktreeBase: worktreeBase,
 	}, spawner)
 
@@ -419,16 +422,16 @@ func TestDaemonIntegration_MergeConflict(t *testing.T) {
 	defer database.Close()
 
 	// Create parent + 2 parallel children.
-	parent, err := database.AddTask("conflict parent", "parent with conflicting children", "", "")
+	parent, err := database.AddTask("conflict parent", "parent with conflicting children", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	child1, err := database.AddTask("conflict child 1", "first child", parent.ID, "")
+	child1, err := database.AddTask("conflict child 1", "first child", parent.ID, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	child2, err := database.AddTask("conflict child 2", "second child", parent.ID, "")
+	child2, err := database.AddTask("conflict child 2", "second child", parent.ID, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,9 +448,8 @@ func TestDaemonIntegration_MergeConflict(t *testing.T) {
 	// before either is merged. This ensures their worktrees branch from
 	// the same parent commit, creating a real merge conflict.
 	d := daemon.New(database, daemon.Config{
-		MaxWorkers:   2,
+		Repos:        integrationRepos(repoDir, 2),
 		PollInterval: 100 * time.Millisecond,
-		RepoPath:     repoDir,
 		WorktreeBase: worktreeBase,
 	}, spawner)
 

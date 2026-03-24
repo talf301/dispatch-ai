@@ -22,7 +22,7 @@ func newReviewSpawner(database *db.DB) *reviewSpawner {
 	return &reviewSpawner{db: database, spawnCount: make(map[string]int)}
 }
 
-func (s *reviewSpawner) Spawn(_ context.Context, task db.Task, _ string, role daemon.SpawnRole) (daemon.WorkerHandle, error) {
+func (s *reviewSpawner) Spawn(_ context.Context, task db.Task, _ string, role daemon.SpawnRole, _ string) (daemon.WorkerHandle, error) {
 	s.spawnCount[task.ID]++
 	done := make(chan struct{})
 	close(done)
@@ -40,7 +40,7 @@ func TestDaemonIntegration_ReviewGateApproval(t *testing.T) {
 	}
 	defer database.Close()
 
-	task, err := database.AddTask("review test", "test review gate", "", "")
+	task, err := database.AddTask("review test", "test review gate", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,9 +48,8 @@ func TestDaemonIntegration_ReviewGateApproval(t *testing.T) {
 	spawner := newReviewSpawner(database)
 
 	d := daemon.New(database, daemon.Config{
-		MaxWorkers:   4,
+		Repos:        integrationRepos(repoDir, 4),
 		PollInterval: 100 * time.Millisecond,
-		RepoPath:     repoDir,
 		WorktreeBase: worktreeBase,
 	}, spawner)
 
@@ -87,7 +86,7 @@ func newRejectingReviewSpawner(database *db.DB) *rejectingReviewSpawner {
 	return &rejectingReviewSpawner{db: database, spawnCount: make(map[string]int)}
 }
 
-func (s *rejectingReviewSpawner) Spawn(_ context.Context, task db.Task, _ string, role daemon.SpawnRole) (daemon.WorkerHandle, error) {
+func (s *rejectingReviewSpawner) Spawn(_ context.Context, task db.Task, _ string, role daemon.SpawnRole, _ string) (daemon.WorkerHandle, error) {
 	s.spawnCount[task.ID]++
 	count := s.spawnCount[task.ID]
 	done := make(chan struct{})
@@ -125,7 +124,7 @@ func TestDaemonIntegration_ReviewGateRejectionAndRetry(t *testing.T) {
 	}
 	defer database.Close()
 
-	task, err := database.AddTask("rejection test", "test review rejection", "", "")
+	task, err := database.AddTask("rejection test", "test review rejection", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,9 +132,8 @@ func TestDaemonIntegration_ReviewGateRejectionAndRetry(t *testing.T) {
 	spawner := newRejectingReviewSpawner(database)
 
 	d := daemon.New(database, daemon.Config{
-		MaxWorkers:   4,
+		Repos:        integrationRepos(repoDir, 4),
 		PollInterval: 100 * time.Millisecond,
-		RepoPath:     repoDir,
 		WorktreeBase: worktreeBase,
 	}, spawner)
 
@@ -184,7 +182,7 @@ func newCrashingReviewerSpawner() *crashingReviewerSpawner {
 	return &crashingReviewerSpawner{spawnCount: make(map[string]int)}
 }
 
-func (s *crashingReviewerSpawner) Spawn(_ context.Context, task db.Task, _ string, role daemon.SpawnRole) (daemon.WorkerHandle, error) {
+func (s *crashingReviewerSpawner) Spawn(_ context.Context, task db.Task, _ string, role daemon.SpawnRole, _ string) (daemon.WorkerHandle, error) {
 	s.spawnCount[task.ID]++
 	done := make(chan struct{})
 
@@ -208,7 +206,7 @@ func TestDaemonIntegration_ReviewerCrashBlocksTask(t *testing.T) {
 	}
 	defer database.Close()
 
-	task, err := database.AddTask("reviewer crash test", "test reviewer crash", "", "")
+	task, err := database.AddTask("reviewer crash test", "test reviewer crash", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,9 +214,8 @@ func TestDaemonIntegration_ReviewerCrashBlocksTask(t *testing.T) {
 	spawner := newCrashingReviewerSpawner()
 
 	d := daemon.New(database, daemon.Config{
-		MaxWorkers:   4,
+		Repos:        integrationRepos(repoDir, 4),
 		PollInterval: 100 * time.Millisecond,
-		RepoPath:     repoDir,
 		WorktreeBase: worktreeBase,
 	}, spawner)
 

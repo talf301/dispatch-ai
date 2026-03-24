@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dispatch-ai/dispatch/internal/config"
 	"github.com/dispatch-ai/dispatch/internal/daemon"
 	"github.com/dispatch-ai/dispatch/internal/db"
 	"github.com/spf13/cobra"
@@ -33,16 +34,6 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
-func envIntOrDefault(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		var n int
-		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
-			return n
-		}
-	}
-	return def
-}
-
 func envDurationOrDefault(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
@@ -57,7 +48,6 @@ var rootCmd = &cobra.Command{
 	Short: "dispatch orchestration daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dbPath, _ := cmd.Flags().GetString("db")
-		maxWorkers, _ := cmd.Flags().GetInt("max-workers")
 		baseBranch, _ := cmd.Flags().GetString("base-branch")
 		repoPath, _ := cmd.Flags().GetString("repo")
 		pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
@@ -84,13 +74,35 @@ var rootCmd = &cobra.Command{
 		defer database.Close()
 
 		home, _ := os.UserHomeDir()
+
+		// Build repos map: load config.toml if present, fall back to --repo.
+		repos := make(map[string]config.RepoConfig)
+		configPath := config.DefaultConfigPath()
+		if cfg, err := config.LoadConfig(configPath); err == nil && len(cfg.Repos) > 0 {
+			for _, r := range cfg.Repos {
+				repos[r.Path] = r
+			}
+		} else if repoPath != "" {
+			// Single-repo mode via --repo flag.
+			absRepo, err := filepath.Abs(repoPath)
+			if err != nil {
+				absRepo = repoPath
+			}
+			repos[absRepo] = config.RepoConfig{
+				Path:       absRepo,
+				MaxWorkers: config.DefaultMaxWorkers,
+			}
+		} else {
+			return fmt.Errorf("no repos configured: create %s or pass --repo", configPath)
+		}
+
 		cfg := daemon.Config{
 			DBPath:       dbPath,
-			MaxWorkers:   maxWorkers,
+			Repos:        repos,
 			BaseBranch:   baseBranch,
-			RepoPath:     repoPath,
 			PollInterval: pollInterval,
 			WorktreeBase: filepath.Join(home, ".dispatch", "worktrees"),
+			SessionDir:   filepath.Join(home, ".dispatch", "sessions"),
 		}
 
 		spawner := &daemon.ClaudeSpawner{
@@ -120,9 +132,8 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.Flags().String("db", defaultDBPath(), "path to SQLite database")
-	rootCmd.Flags().Int("max-workers", envIntOrDefault("DISPATCH_MAX_WORKERS", 4), "max concurrent workers")
 	rootCmd.Flags().String("base-branch", envOrDefault("DISPATCH_BASE_BRANCH", ""), "base branch for worktrees (default: auto-detect)")
-	rootCmd.Flags().String("repo", envOrDefault("DISPATCH_REPO", "."), "path to git repository")
+	rootCmd.Flags().String("repo", envOrDefault("DISPATCH_REPO", ""), "path to git repository (single-repo mode)")
 	rootCmd.Flags().Duration("poll-interval", envDurationOrDefault("DISPATCH_POLL_INTERVAL", 5*time.Second), "poll interval")
 	rootCmd.Flags().String("worker-prompt", envOrDefault("DISPATCH_WORKER_PROMPT", ""), "path to worker.md prompt file (required)")
 	rootCmd.Flags().String("reviewer-prompt", envOrDefault("DISPATCH_REVIEWER_PROMPT", ""), "path to reviewer.md prompt file (required)")
