@@ -19,7 +19,13 @@ func NewAddCmd() *cobra.Command {
 			parent, _ := cmd.Flags().GetString("parent")
 			after, _ := cmd.Flags().GetString("after")
 
-			task, err := d.AddTask(title, desc, parent, after)
+			var repo *string
+			if cmd.Flags().Changed("repo") {
+				v, _ := cmd.Flags().GetString("repo")
+				repo = &v
+			}
+
+			task, err := d.AddTask(title, desc, parent, after, repo)
 			if err != nil {
 				exitError(cmd, err)
 			}
@@ -35,6 +41,7 @@ func NewAddCmd() *cobra.Command {
 	cmd.Flags().StringP("desc", "d", "", "task description")
 	cmd.Flags().StringP("parent", "p", "", "parent task ID")
 	cmd.Flags().String("after", "", "blocker task ID (new task is blocked by this)")
+	cmd.Flags().StringP("repo", "r", "", "repository path for the task")
 
 	return cmd
 }

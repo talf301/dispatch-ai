@@ -14,7 +14,7 @@ func NewDoneCmd() *cobra.Command {
 			d := openDB(cmd)
 			defer d.Close()
 
-			task, err := d.DoneTask(args[0])
+			task, _, err := d.DoneTask(args[0])
 			if err != nil {
 				exitError(cmd, err)
 			}

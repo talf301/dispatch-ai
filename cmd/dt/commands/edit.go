@@ -16,7 +16,7 @@ func NewEditCmd() *cobra.Command {
 
 			id := args[0]
 
-			var titlePtr, descPtr *string
+			var titlePtr, descPtr, repoPtr *string
 			if cmd.Flags().Changed("title") {
 				v, _ := cmd.Flags().GetString("title")
 				titlePtr = &v
@@ -25,8 +25,12 @@ func NewEditCmd() *cobra.Command {
 				v, _ := cmd.Flags().GetString("desc")
 				descPtr = &v
 			}
+			if cmd.Flags().Changed("repo") {
+				v, _ := cmd.Flags().GetString("repo")
+				repoPtr = &v
+			}
 
-			task, err := d.EditTask(id, titlePtr, descPtr)
+			task, err := d.EditTask(id, titlePtr, descPtr, repoPtr)
 			if err != nil {
 				exitError(cmd, err)
 			}
@@ -41,6 +45,7 @@ func NewEditCmd() *cobra.Command {
 
 	cmd.Flags().StringP("title", "t", "", "new title")
 	cmd.Flags().StringP("desc", "d", "", "new description")
+	cmd.Flags().StringP("repo", "r", "", "repository path")
 
 	return cmd
 }

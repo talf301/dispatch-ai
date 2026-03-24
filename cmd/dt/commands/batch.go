@@ -147,7 +147,7 @@ func executeLine(database *db.DB, line string) (string, error) {
 		if len(parts) != 2 {
 			return "", fmt.Errorf("done requires 1 argument: <id>")
 		}
-		_, err := database.DoneTask(parts[1])
+		_, _, err := database.DoneTask(parts[1])
 		return "", err
 	case "block":
 		if len(parts) != 3 {
@@ -182,6 +182,7 @@ func batchAdd(database *db.DB, args []string) (string, error) {
 	desc := ""
 	parent := ""
 	after := ""
+	var repo *string
 
 	// First non-flag argument is the title.
 	i := 0
@@ -198,6 +199,13 @@ func batchAdd(database *db.DB, args []string) (string, error) {
 				return "", fmt.Errorf("flag -p requires a value")
 			}
 			parent = args[i+1]
+			i += 2
+		case "-r":
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("flag -r requires a value")
+			}
+			v := args[i+1]
+			repo = &v
 			i += 2
 		case "--after":
 			if i+1 >= len(args) {
@@ -219,7 +227,7 @@ func batchAdd(database *db.DB, args []string) (string, error) {
 		return "", fmt.Errorf("add requires a title")
 	}
 
-	task, err := database.AddTask(title, desc, parent, after)
+	task, err := database.AddTask(title, desc, parent, after, repo)
 	if err != nil {
 		return "", err
 	}
@@ -232,7 +240,7 @@ func batchEdit(database *db.DB, args []string) error {
 	}
 
 	id := ""
-	var titlePtr, descPtr *string
+	var titlePtr, descPtr, repoPtr *string
 
 	i := 0
 	for i < len(args) {
@@ -251,6 +259,13 @@ func batchEdit(database *db.DB, args []string) error {
 			v := args[i+1]
 			descPtr = &v
 			i += 2
+		case "-r":
+			if i+1 >= len(args) {
+				return fmt.Errorf("flag -r requires a value")
+			}
+			v := args[i+1]
+			repoPtr = &v
+			i += 2
 		default:
 			if id == "" {
 				id = args[i]
@@ -265,7 +280,7 @@ func batchEdit(database *db.DB, args []string) error {
 		return fmt.Errorf("edit requires an id")
 	}
 
-	_, err := database.EditTask(id, titlePtr, descPtr)
+	_, err := database.EditTask(id, titlePtr, descPtr, repoPtr)
 	return err
 }
 

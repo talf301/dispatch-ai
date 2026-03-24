@@ -85,6 +85,11 @@ func NewReadyCmd() *cobra.Command {
 				exitError(cmd, err)
 			}
 
+			if cmd.Flags().Changed("repo") {
+				repoFilter, _ := cmd.Flags().GetString("repo")
+				tasks = filterByRepo(tasks, repoFilter)
+			}
+
 			if jsonFlag(cmd) {
 				printJSON(tasks)
 			} else {
@@ -92,6 +97,7 @@ func NewReadyCmd() *cobra.Command {
 			}
 		},
 	}
+	cmd.Flags().StringP("repo", "r", "", "filter by repository path")
 	return cmd
 }
 
@@ -112,6 +118,11 @@ func NewListCmd() *cobra.Command {
 			tasks, err := d.ListTasks(status, all)
 			if err != nil {
 				exitError(cmd, err)
+			}
+
+			if cmd.Flags().Changed("repo") {
+				repoFilter, _ := cmd.Flags().GetString("repo")
+				tasks = filterByRepo(tasks, repoFilter)
 			}
 
 			// Count hidden done tasks when not showing all.
@@ -146,6 +157,18 @@ func NewListCmd() *cobra.Command {
 	cmd.Flags().BoolP("all", "a", false, "include done tasks")
 	cmd.Flags().Bool("tree", false, "display as tree grouped by parent")
 	cmd.Flags().StringP("status", "s", "", "filter by status")
+	cmd.Flags().StringP("repo", "r", "", "filter by repository path")
 
 	return cmd
+}
+
+// filterByRepo returns only tasks whose Repo matches the given filter value.
+func filterByRepo(tasks []db.Task, repo string) []db.Task {
+	var filtered []db.Task
+	for _, t := range tasks {
+		if t.Repo != nil && *t.Repo == repo {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
 }
