@@ -157,9 +157,13 @@ add "Batch task 4"
 	// Verify list returns exactly 4 tasks.
 	out := runDT(t, bin, dbPath, "list")
 
-	var tasks []map[string]interface{}
-	if err := json.Unmarshal([]byte(out), &tasks); err != nil {
+	var listResult map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &listResult); err != nil {
 		t.Fatalf("failed to parse list output: %v\noutput: %s", err, out)
+	}
+	tasks, ok := listResult["tasks"].([]interface{})
+	if !ok {
+		t.Fatalf("list output missing 'tasks' field: %s", out)
 	}
 
 	if len(tasks) != 4 {
@@ -201,11 +205,14 @@ func TestExitCriteria_JSONOutput(t *testing.T) {
 		t.Errorf("show task id mismatch: expected %s, got %v", id, taskMap["id"])
 	}
 
-	// dt list returns a JSON array.
+	// dt list returns a JSON object with "tasks" array.
 	listOut := runDT(t, bin, dbPath, "list")
-	var listResult []interface{}
-	if err := json.Unmarshal([]byte(listOut), &listResult); err != nil {
-		t.Fatalf("list output is not a JSON array: %v\noutput: %s", err, listOut)
+	var listObj map[string]interface{}
+	if err := json.Unmarshal([]byte(listOut), &listObj); err != nil {
+		t.Fatalf("list output is not valid JSON: %v\noutput: %s", err, listOut)
+	}
+	if _, ok := listObj["tasks"]; !ok {
+		t.Fatalf("list output missing 'tasks' field: %s", listOut)
 	}
 
 	// dt ready returns a JSON array.
