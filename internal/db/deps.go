@@ -36,7 +36,7 @@ func (d *DB) AddDep(blockerID, blockedID string) error {
 // GetBlockers returns the tasks that block the given task.
 func (d *DB) GetBlockers(taskID string) ([]Task, error) {
 	rows, err := d.q.Query(
-		`SELECT t.id, t.title, t.description, t.status, t.block_reason, t.assignee, t.parent_id, t.created_at, t.updated_at
+		`SELECT t.id, t.title, t.description, t.status, t.block_reason, t.assignee, t.parent_id, t.repo, t.created_at, t.updated_at
 		 FROM tasks t
 		 JOIN deps d ON d.blocker_id = t.id
 		 WHERE d.blocked_id = ?`, taskID,
@@ -67,7 +67,7 @@ func (d *DB) RemoveDep(blockerID, blockedID string) error {
 // GetBlocking returns the tasks that this task blocks.
 func (d *DB) GetBlocking(taskID string) ([]Task, error) {
 	rows, err := d.q.Query(
-		`SELECT t.id, t.title, t.description, t.status, t.block_reason, t.assignee, t.parent_id, t.created_at, t.updated_at
+		`SELECT t.id, t.title, t.description, t.status, t.block_reason, t.assignee, t.parent_id, t.repo, t.created_at, t.updated_at
 		 FROM tasks t
 		 JOIN deps d ON d.blocked_id = t.id
 		 WHERE d.blocker_id = ?`, taskID,
@@ -122,7 +122,7 @@ func scanTasks(rows *sql.Rows) ([]Task, error) {
 	tasks := []Task{}
 	for rows.Next() {
 		var t Task
-		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.BlockReason, &t.Assignee, &t.ParentID, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.BlockReason, &t.Assignee, &t.ParentID, &t.Repo, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
 		tasks = append(tasks, t)

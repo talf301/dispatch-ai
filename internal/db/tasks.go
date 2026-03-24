@@ -17,6 +17,7 @@ type Task struct {
 	BlockReason *string `json:"block_reason"`
 	Assignee    *string `json:"assignee"`
 	ParentID    *string `json:"parent_id"`
+	Repo        *string `json:"repo"`
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
 }
@@ -24,7 +25,8 @@ type Task struct {
 // AddTask creates a new task with a unique 4-char hex ID.
 // If parentID is non-empty, verifies the parent exists.
 // If afterID is non-empty, creates a dependency (afterID blocks the new task).
-func (d *DB) AddTask(title, description, parentID, afterID string) (*Task, error) {
+// repo is an optional repository path associated with the task.
+func (d *DB) AddTask(title, description, parentID, afterID string, repo *string) (*Task, error) {
 	// Generate unique ID with collision check.
 	var taskID string
 	for i := 0; i < 100; i++ {
@@ -60,9 +62,9 @@ func (d *DB) AddTask(title, description, parentID, afterID string) (*Task, error
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
 	_, err := d.q.Exec(
-		`INSERT INTO tasks (id, title, description, parent_id, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		taskID, title, description, parentPtr, now, now,
+		`INSERT INTO tasks (id, title, description, parent_id, repo, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		taskID, title, description, parentPtr, repo, now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert task: %w", err)
@@ -82,9 +84,9 @@ func (d *DB) AddTask(title, description, parentID, afterID string) (*Task, error
 func (d *DB) GetTask(id string) (*Task, error) {
 	t := &Task{}
 	err := d.q.QueryRow(
-		`SELECT id, title, description, status, block_reason, assignee, parent_id, created_at, updated_at
+		`SELECT id, title, description, status, block_reason, assignee, parent_id, repo, created_at, updated_at
 		 FROM tasks WHERE id = ?`, id,
-	).Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.BlockReason, &t.Assignee, &t.ParentID, &t.CreatedAt, &t.UpdatedAt)
+	).Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.BlockReason, &t.Assignee, &t.ParentID, &t.Repo, &t.CreatedAt, &t.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("task %q not found", id)
 	}
@@ -220,7 +222,7 @@ func (d *DB) ReopenTask(id string) (*Task, error) {
 // GetChildren returns tasks whose parent_id matches the given ID, ordered by created_at ASC.
 func (d *DB) GetChildren(parentID string) ([]Task, error) {
 	rows, err := d.q.Query(
-		`SELECT id, title, description, status, block_reason, assignee, parent_id, created_at, updated_at
+		`SELECT id, title, description, status, block_reason, assignee, parent_id, repo, created_at, updated_at
 		 FROM tasks WHERE parent_id = ? ORDER BY created_at ASC`, parentID,
 	)
 	if err != nil {
@@ -235,7 +237,7 @@ func (d *DB) GetChildren(parentID string) ([]Task, error) {
 func (d *DB) ReadyTasks() ([]Task, error) {
 	rows, err := d.q.Query(`
 		SELECT t.id, t.title, t.description, t.status, t.block_reason,
-		       t.assignee, t.parent_id, t.created_at, t.updated_at
+		       t.assignee, t.parent_id, t.repo, t.created_at, t.updated_at
 		FROM tasks t
 		WHERE t.status = 'open'
 		  AND t.assignee IS NULL
@@ -269,14 +271,14 @@ func (d *DB) ListTasks(status string, all bool) ([]Task, error) {
 	var args []any
 
 	if status != "" {
-		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, created_at, updated_at
+		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, created_at, updated_at
 		         FROM tasks WHERE status = ? ORDER BY created_at ASC`
 		args = append(args, status)
 	} else if !all {
-		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, created_at, updated_at
+		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, created_at, updated_at
 		         FROM tasks WHERE status != 'done' ORDER BY created_at ASC`
 	} else {
-		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, created_at, updated_at
+		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, created_at, updated_at
 		         FROM tasks ORDER BY created_at ASC`
 	}
 
@@ -288,9 +290,9 @@ func (d *DB) ListTasks(status string, all bool) ([]Task, error) {
 	return scanTasks(rows)
 }
 
-// EditTask updates a task's title and/or description. Fields that are nil are left unchanged.
-func (d *DB) EditTask(id string, title, description *string) (*Task, error) {
-	if title == nil && description == nil {
+// EditTask updates a task's title, description, and/or repo. Fields that are nil are left unchanged.
+func (d *DB) EditTask(id string, title, description, repo *string) (*Task, error) {
+	if title == nil && description == nil && repo == nil {
 		return d.GetTask(id)
 	}
 
@@ -307,6 +309,11 @@ func (d *DB) EditTask(id string, title, description *string) (*Task, error) {
 	if description != nil {
 		if _, err := d.q.Exec("UPDATE tasks SET description = ? WHERE id = ?", *description, id); err != nil {
 			return nil, fmt.Errorf("update description: %w", err)
+		}
+	}
+	if repo != nil {
+		if _, err := d.q.Exec("UPDATE tasks SET repo = ? WHERE id = ?", *repo, id); err != nil {
+			return nil, fmt.Errorf("update repo: %w", err)
 		}
 	}
 

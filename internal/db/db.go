@@ -127,5 +127,34 @@ func (d *DB) migrate() error {
 			return fmt.Errorf("exec migration: %w\nSQL: %s", err, s)
 		}
 	}
+
+	// Add repo column if it doesn't exist yet.
+	// SQLite lacks IF NOT EXISTS for ALTER TABLE, so we check pragmatically.
+	rows, err := d.q.Query("PRAGMA table_info(tasks)")
+	if err != nil {
+		return fmt.Errorf("pragma table_info: %w", err)
+	}
+	hasRepo := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var dflt *string
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan table_info: %w", err)
+		}
+		if name == "repo" {
+			hasRepo = true
+		}
+	}
+	rows.Close()
+	if !hasRepo {
+		if _, err := d.q.Exec("ALTER TABLE tasks ADD COLUMN repo TEXT"); err != nil {
+			return fmt.Errorf("add repo column: %w", err)
+		}
+	}
+
 	return nil
 }

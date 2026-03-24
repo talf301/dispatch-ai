@@ -88,7 +88,7 @@ func TestBeginTxCommit(t *testing.T) {
 		t.Fatalf("BeginTx failed: %v", err)
 	}
 
-	task, err := tx.AddTask("tx task", "tx desc", "", "")
+	task, err := tx.AddTask("tx task", "tx desc", "", "", nil)
 	if err != nil {
 		t.Fatalf("AddTask in tx: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestBeginTxRollback(t *testing.T) {
 		t.Fatalf("BeginTx failed: %v", err)
 	}
 
-	task, err := tx.AddTask("rollback task", "", "", "")
+	task, err := tx.AddTask("rollback task", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("AddTask in tx: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestAddTask(t *testing.T) {
 	}
 	defer d.Close()
 
-	task, err := d.AddTask("my task", "some desc", "", "")
+	task, err := d.AddTask("my task", "some desc", "", "", nil)
 	if err != nil {
 		t.Fatalf("AddTask failed: %v", err)
 	}
@@ -168,12 +168,12 @@ func TestAddTask_WithParent(t *testing.T) {
 	}
 	defer d.Close()
 
-	parent, err := d.AddTask("parent", "", "", "")
+	parent, err := d.AddTask("parent", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("AddTask parent failed: %v", err)
 	}
 
-	child, err := d.AddTask("child", "", parent.ID, "")
+	child, err := d.AddTask("child", "", parent.ID, "", nil)
 	if err != nil {
 		t.Fatalf("AddTask child failed: %v", err)
 	}
@@ -193,12 +193,12 @@ func TestAddTask_WithAfter(t *testing.T) {
 	}
 	defer d.Close()
 
-	blocker, err := d.AddTask("blocker", "", "", "")
+	blocker, err := d.AddTask("blocker", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("AddTask blocker failed: %v", err)
 	}
 
-	blocked, err := d.AddTask("blocked", "", "", blocker.ID)
+	blocked, err := d.AddTask("blocked", "", "", blocker.ID, nil)
 	if err != nil {
 		t.Fatalf("AddTask blocked failed: %v", err)
 	}
@@ -235,11 +235,11 @@ func TestAddDep(t *testing.T) {
 	}
 	defer d.Close()
 
-	a, err := d.AddTask("task A", "", "", "")
+	a, err := d.AddTask("task A", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("AddTask A: %v", err)
 	}
-	b, err := d.AddTask("task B", "", "", "")
+	b, err := d.AddTask("task B", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("AddTask B: %v", err)
 	}
@@ -267,9 +267,9 @@ func TestAddDep_CycleDetection(t *testing.T) {
 	}
 	defer d.Close()
 
-	a, _ := d.AddTask("A", "", "", "")
-	b, _ := d.AddTask("B", "", "", "")
-	c, _ := d.AddTask("C", "", "", "")
+	a, _ := d.AddTask("A", "", "", "", nil)
+	b, _ := d.AddTask("B", "", "", "", nil)
+	c, _ := d.AddTask("C", "", "", "", nil)
 
 	if err := d.AddDep(a.ID, b.ID); err != nil {
 		t.Fatalf("A->B: %v", err)
@@ -291,7 +291,7 @@ func TestAddDep_SelfCycle(t *testing.T) {
 	}
 	defer d.Close()
 
-	a, _ := d.AddTask("A", "", "", "")
+	a, _ := d.AddTask("A", "", "", "", nil)
 
 	if err := d.AddDep(a.ID, a.ID); err == nil {
 		t.Fatal("expected self-cycle error, got nil")
@@ -305,8 +305,8 @@ func TestRemoveDep(t *testing.T) {
 	}
 	defer d.Close()
 
-	a, _ := d.AddTask("A", "", "", "")
-	b, _ := d.AddTask("B", "", "", "")
+	a, _ := d.AddTask("A", "", "", "", nil)
+	b, _ := d.AddTask("B", "", "", "", nil)
 
 	if err := d.AddDep(a.ID, b.ID); err != nil {
 		t.Fatalf("AddDep: %v", err)
@@ -344,9 +344,9 @@ func TestGetBlocking(t *testing.T) {
 	}
 	defer d.Close()
 
-	a, _ := d.AddTask("A", "", "", "")
-	b, _ := d.AddTask("B", "", "", "")
-	c, _ := d.AddTask("C", "", "", "")
+	a, _ := d.AddTask("A", "", "", "", nil)
+	b, _ := d.AddTask("B", "", "", "", nil)
+	c, _ := d.AddTask("C", "", "", "", nil)
 
 	// A blocks B and C
 	d.AddDep(a.ID, b.ID)
@@ -368,13 +368,13 @@ func TestEditTask(t *testing.T) {
 	}
 	defer d.Close()
 
-	task, err := d.AddTask("original", "original desc", "", "")
+	task, err := d.AddTask("original", "original desc", "", "", nil)
 	if err != nil {
 		t.Fatalf("AddTask failed: %v", err)
 	}
 
 	newTitle := "updated"
-	updated, err := d.EditTask(task.ID, &newTitle, nil)
+	updated, err := d.EditTask(task.ID, &newTitle, nil, nil)
 	if err != nil {
 		t.Fatalf("EditTask failed: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestClaimTask(t *testing.T) {
 	}
 	defer d.Close()
 
-	task, err := d.AddTask("claim me", "", "", "")
+	task, err := d.AddTask("claim me", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("AddTask: %v", err)
 	}
@@ -418,7 +418,7 @@ func TestClaimTask_AlreadyClaimed(t *testing.T) {
 	}
 	defer d.Close()
 
-	task, _ := d.AddTask("claim me", "", "", "")
+	task, _ := d.AddTask("claim me", "", "", "", nil)
 	d.ClaimTask(task.ID, "alice")
 
 	_, err = d.ClaimTask(task.ID, "bob")
@@ -434,7 +434,7 @@ func TestReleaseTask(t *testing.T) {
 	}
 	defer d.Close()
 
-	task, _ := d.AddTask("release me", "", "", "")
+	task, _ := d.AddTask("release me", "", "", "", nil)
 	d.ClaimTask(task.ID, "alice")
 
 	released, err := d.ReleaseTask(task.ID)
@@ -456,7 +456,7 @@ func TestDoneTask(t *testing.T) {
 	}
 	defer d.Close()
 
-	task, _ := d.AddTask("finish me", "", "", "")
+	task, _ := d.AddTask("finish me", "", "", "", nil)
 	done, err := d.DoneTask(task.ID)
 	if err != nil {
 		t.Fatalf("DoneTask: %v", err)
@@ -473,7 +473,7 @@ func TestBlockTask(t *testing.T) {
 	}
 	defer d.Close()
 
-	task, _ := d.AddTask("block me", "", "", "")
+	task, _ := d.AddTask("block me", "", "", "", nil)
 	blocked, err := d.BlockTask(task.ID, "waiting on API")
 	if err != nil {
 		t.Fatalf("BlockTask: %v", err)
@@ -493,7 +493,7 @@ func TestReopenTask(t *testing.T) {
 	}
 	defer d.Close()
 
-	task, _ := d.AddTask("reopen me", "", "", "")
+	task, _ := d.AddTask("reopen me", "", "", "", nil)
 	d.BlockTask(task.ID, "reason")
 
 	reopened, err := d.ReopenTask(task.ID)
@@ -518,7 +518,7 @@ func TestStatusTransition_CreatesNote(t *testing.T) {
 	}
 	defer d.Close()
 
-	task, _ := d.AddTask("noted", "", "", "")
+	task, _ := d.AddTask("noted", "", "", "", nil)
 
 	// Claim creates a note
 	d.ClaimTask(task.ID, "alice")
@@ -552,7 +552,7 @@ func TestAddNote(t *testing.T) {
 	}
 	defer d.Close()
 
-	task, err := d.AddTask("noted task", "", "", "")
+	task, err := d.AddTask("noted task", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("AddTask: %v", err)
 	}
@@ -594,9 +594,9 @@ func TestReadyTasks(t *testing.T) {
 	defer d.Close()
 
 	// A blocks B, C is independent
-	a, _ := d.AddTask("task A", "", "", "")
-	b, _ := d.AddTask("task B", "", "", "")
-	c, _ := d.AddTask("task C", "", "", "")
+	a, _ := d.AddTask("task A", "", "", "", nil)
+	b, _ := d.AddTask("task B", "", "", "", nil)
+	c, _ := d.AddTask("task C", "", "", "", nil)
 	d.AddDep(a.ID, b.ID)
 
 	ready, err := d.ReadyTasks()
@@ -628,12 +628,12 @@ func TestReadyTasks_OrderByUnblockCount(t *testing.T) {
 	defer d.Close()
 
 	// A blocks B, C, E (3 dependents) — created first
-	a, _ := d.AddTask("task A", "", "", "")
-	b, _ := d.AddTask("task B", "", "", "")
-	c, _ := d.AddTask("task C", "", "", "")
+	a, _ := d.AddTask("task A", "", "", "", nil)
+	b, _ := d.AddTask("task B", "", "", "", nil)
+	c, _ := d.AddTask("task C", "", "", "", nil)
 	// D blocks E only (1 dependent) — created after A
-	dd, _ := d.AddTask("task D", "", "", "")
-	e, _ := d.AddTask("task E", "", "", "")
+	dd, _ := d.AddTask("task D", "", "", "", nil)
+	e, _ := d.AddTask("task E", "", "", "", nil)
 
 	d.AddDep(a.ID, b.ID)
 	d.AddDep(a.ID, c.ID)
@@ -673,7 +673,7 @@ func TestReadyTasks_ExcludesClaimed(t *testing.T) {
 	}
 	defer d.Close()
 
-	a, _ := d.AddTask("task A", "", "", "")
+	a, _ := d.AddTask("task A", "", "", "", nil)
 	d.ClaimTask(a.ID, "alice")
 
 	ready, err := d.ReadyTasks()
@@ -695,8 +695,8 @@ func TestReadyTasks_BlockerDoneUnblocks(t *testing.T) {
 	}
 	defer d.Close()
 
-	a, _ := d.AddTask("task A", "", "", "")
-	b, _ := d.AddTask("task B", "", "", "")
+	a, _ := d.AddTask("task A", "", "", "", nil)
+	b, _ := d.AddTask("task B", "", "", "", nil)
 	d.AddDep(a.ID, b.ID)
 
 	// B should not be ready initially
@@ -733,8 +733,8 @@ func TestListTasks(t *testing.T) {
 	}
 	defer d.Close()
 
-	a, _ := d.AddTask("open task", "", "", "")
-	b, _ := d.AddTask("done task", "", "", "")
+	a, _ := d.AddTask("open task", "", "", "", nil)
+	b, _ := d.AddTask("done task", "", "", "", nil)
 	d.DoneTask(b.ID)
 
 	// Default (no --all) excludes done
@@ -777,8 +777,8 @@ func TestListTasks_StatusFilter(t *testing.T) {
 	}
 	defer d.Close()
 
-	a, _ := d.AddTask("open task", "", "", "")
-	b, _ := d.AddTask("blocked task", "", "", "")
+	a, _ := d.AddTask("open task", "", "", "", nil)
+	b, _ := d.AddTask("blocked task", "", "", "", nil)
 	d.BlockTask(b.ID, "reason")
 
 	tasks, err := d.ListTasks("blocked", false)
@@ -809,17 +809,17 @@ func TestReadyTasks_ExcludesParentTasks(t *testing.T) {
 	defer d.Close()
 
 	// Create a parent task with 2 children
-	parent, err := d.AddTask("parent task", "", "", "")
+	parent, err := d.AddTask("parent task", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("AddTask parent: %v", err)
 	}
 
-	child1, err := d.AddTask("child 1", "", parent.ID, "")
+	child1, err := d.AddTask("child 1", "", parent.ID, "", nil)
 	if err != nil {
 		t.Fatalf("AddTask child1: %v", err)
 	}
 
-	child2, err := d.AddTask("child 2", "", parent.ID, "")
+	child2, err := d.AddTask("child 2", "", parent.ID, "", nil)
 	if err != nil {
 		t.Fatalf("AddTask child2: %v", err)
 	}
@@ -855,17 +855,17 @@ func TestDoneTask_AutoCompletesParent(t *testing.T) {
 	}
 	defer d.Close()
 
-	parent, err := d.AddTask("parent task", "", "", "")
+	parent, err := d.AddTask("parent task", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("AddTask parent: %v", err)
 	}
 
-	child1, err := d.AddTask("child 1", "", parent.ID, "")
+	child1, err := d.AddTask("child 1", "", parent.ID, "", nil)
 	if err != nil {
 		t.Fatalf("AddTask child1: %v", err)
 	}
 
-	child2, err := d.AddTask("child 2", "", parent.ID, "")
+	child2, err := d.AddTask("child 2", "", parent.ID, "", nil)
 	if err != nil {
 		t.Fatalf("AddTask child2: %v", err)
 	}
@@ -904,22 +904,22 @@ func TestDoneTask_ParentNotCompletedWithOpenChildren(t *testing.T) {
 	}
 	defer d.Close()
 
-	parent, err := d.AddTask("parent task", "", "", "")
+	parent, err := d.AddTask("parent task", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("AddTask parent: %v", err)
 	}
 
-	child1, err := d.AddTask("child 1", "", parent.ID, "")
+	child1, err := d.AddTask("child 1", "", parent.ID, "", nil)
 	if err != nil {
 		t.Fatalf("AddTask child1: %v", err)
 	}
 
-	_, err = d.AddTask("child 2", "", parent.ID, "")
+	_, err = d.AddTask("child 2", "", parent.ID, "", nil)
 	if err != nil {
 		t.Fatalf("AddTask child2: %v", err)
 	}
 
-	_, err = d.AddTask("child 3", "", parent.ID, "")
+	_, err = d.AddTask("child 3", "", parent.ID, "", nil)
 	if err != nil {
 		t.Fatalf("AddTask child3: %v", err)
 	}
@@ -945,17 +945,17 @@ func TestGetChildren(t *testing.T) {
 	}
 	defer d.Close()
 
-	parent, err := d.AddTask("parent task", "", "", "")
+	parent, err := d.AddTask("parent task", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("AddTask parent: %v", err)
 	}
 
-	child1, err := d.AddTask("child 1", "", parent.ID, "")
+	child1, err := d.AddTask("child 1", "", parent.ID, "", nil)
 	if err != nil {
 		t.Fatalf("AddTask child1: %v", err)
 	}
 
-	child2, err := d.AddTask("child 2", "", parent.ID, "")
+	child2, err := d.AddTask("child 2", "", parent.ID, "", nil)
 	if err != nil {
 		t.Fatalf("AddTask child2: %v", err)
 	}
