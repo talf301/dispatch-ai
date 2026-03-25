@@ -144,6 +144,121 @@ func TestQuotesBalanced(t *testing.T) {
 	}
 }
 
+func TestFindPlanParent(t *testing.T) {
+	t.Run("parent first", func(t *testing.T) {
+		d := openTestDB(t)
+
+		parent, err := d.AddTask("Parent", "", "", "", nil)
+		if err != nil {
+			t.Fatalf("add parent: %v", err)
+		}
+		child1, err := d.AddTask("Child1", "", parent.ID, "", nil)
+		if err != nil {
+			t.Fatalf("add child1: %v", err)
+		}
+		child2, err := d.AddTask("Child2", "", parent.ID, "", nil)
+		if err != nil {
+			t.Fatalf("add child2: %v", err)
+		}
+
+		refs := []string{parent.ID, child1.ID, child2.ID}
+		got := findPlanParent(d, refs)
+		if got != parent.ID {
+			t.Errorf("findPlanParent (parent first) = %q, want %q", got, parent.ID)
+		}
+	})
+
+	t.Run("parent last", func(t *testing.T) {
+		d := openTestDB(t)
+
+		parent, err := d.AddTask("Parent", "", "", "", nil)
+		if err != nil {
+			t.Fatalf("add parent: %v", err)
+		}
+		child1, err := d.AddTask("Child1", "", parent.ID, "", nil)
+		if err != nil {
+			t.Fatalf("add child1: %v", err)
+		}
+		child2, err := d.AddTask("Child2", "", parent.ID, "", nil)
+		if err != nil {
+			t.Fatalf("add child2: %v", err)
+		}
+
+		refs := []string{child1.ID, child2.ID, parent.ID}
+		got := findPlanParent(d, refs)
+		if got != parent.ID {
+			t.Errorf("findPlanParent (parent last) = %q, want %q", got, parent.ID)
+		}
+	})
+
+	t.Run("parent middle", func(t *testing.T) {
+		d := openTestDB(t)
+
+		parent, err := d.AddTask("Parent", "", "", "", nil)
+		if err != nil {
+			t.Fatalf("add parent: %v", err)
+		}
+		child1, err := d.AddTask("Child1", "", parent.ID, "", nil)
+		if err != nil {
+			t.Fatalf("add child1: %v", err)
+		}
+		child2, err := d.AddTask("Child2", "", parent.ID, "", nil)
+		if err != nil {
+			t.Fatalf("add child2: %v", err)
+		}
+
+		refs := []string{child1.ID, parent.ID, child2.ID}
+		got := findPlanParent(d, refs)
+		if got != parent.ID {
+			t.Errorf("findPlanParent (parent middle) = %q, want %q", got, parent.ID)
+		}
+	})
+
+	t.Run("empty refs", func(t *testing.T) {
+		d := openTestDB(t)
+
+		got := findPlanParent(d, []string{})
+		if got != "" {
+			t.Errorf("findPlanParent (empty refs) = %q, want \"\"", got)
+		}
+	})
+
+	t.Run("orphan tasks only", func(t *testing.T) {
+		d := openTestDB(t)
+
+		// Two unrelated tasks with no parent-child relationship.
+		t1, err := d.AddTask("Task1", "", "", "", nil)
+		if err != nil {
+			t.Fatalf("add task1: %v", err)
+		}
+		t2, err := d.AddTask("Task2", "", "", "", nil)
+		if err != nil {
+			t.Fatalf("add task2: %v", err)
+		}
+
+		refs := []string{t1.ID, t2.ID}
+		got := findPlanParent(d, refs)
+		if got != "" {
+			t.Errorf("findPlanParent (orphan tasks) = %q, want \"\"", got)
+		}
+	})
+
+	t.Run("single task", func(t *testing.T) {
+		d := openTestDB(t)
+
+		task, err := d.AddTask("Lone", "", "", "", nil)
+		if err != nil {
+			t.Fatalf("add task: %v", err)
+		}
+
+		refs := []string{task.ID}
+		got := findPlanParent(d, refs)
+		if got != "" {
+			t.Errorf("findPlanParent (single task) = %q, want \"\"", got)
+		}
+	})
+}
+
 func TestSubstituteRefs(t *testing.T) {
 	refs := []string{"id-aaa", "id-bbb", "id-ccc"}
 
