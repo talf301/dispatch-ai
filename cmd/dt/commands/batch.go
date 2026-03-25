@@ -3,6 +3,7 @@ package commands
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -102,24 +103,7 @@ func NewBatchCmd() *cobra.Command {
 			// GRAPHPILOT_NODE is the GP node ID of the calling node — set by GP
 			// when it spawns a dispatch-planner. This tells GP that the node's
 			// work has been decomposed into dispatch tasks.
-			if gpNode := os.Getenv("GRAPHPILOT_NODE"); gpNode != "" && len(refs) > 0 {
-				parentID := findPlanParent(d, refs)
-				if parentID == "" {
-					fmt.Fprintf(os.Stderr, "warning: GRAPHPILOT_NODE set but no plan parent found among batch refs; skipping GP wiring\n")
-				} else {
-					gpBin, err := exec.LookPath("gp")
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "warning: GRAPHPILOT_NODE set but gp not in PATH; skipping GP wiring\n")
-					} else {
-						gpCmd := exec.Command(gpBin, "dispatch", gpNode, "--plan", parentID)
-						if out, err := gpCmd.CombinedOutput(); err != nil {
-							fmt.Fprintf(os.Stderr, "warning: gp dispatch failed: %v\n%s\n", err, string(out))
-						} else {
-							fmt.Fprintf(os.Stderr, "GP: wired %s to dispatch plan %s\n", gpNode, parentID)
-						}
-					}
-				}
-			}
+			maybeWireGP(d, refs, os.Getenv("GRAPHPILOT_NODE"), os.Stderr)
 
 			if jsonFlag(cmd) {
 				printJSON(map[string]any{"status": "ok", "lines": executed})
@@ -127,6 +111,31 @@ func NewBatchCmd() *cobra.Command {
 				fmt.Printf("ok: %d lines executed\n", executed)
 			}
 		},
+	}
+}
+
+// maybeWireGP fires the GP wiring handshake when GRAPHPILOT_NODE is set.
+// It is extracted from the batch Run closure so it can be tested directly.
+// stderr receives any warning/info messages (normally os.Stderr).
+func maybeWireGP(database *db.DB, refs []string, gpNode string, stderr io.Writer) {
+	if gpNode == "" || len(refs) == 0 {
+		return
+	}
+	parentID := findPlanParent(database, refs)
+	if parentID == "" {
+		fmt.Fprintf(stderr, "warning: GRAPHPILOT_NODE set but no plan parent found among batch refs; skipping GP wiring\n")
+		return
+	}
+	gpBin, err := exec.LookPath("gp")
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: GRAPHPILOT_NODE set but gp not in PATH; skipping GP wiring\n")
+		return
+	}
+	gpCmd := exec.Command(gpBin, "dispatch", gpNode, "--plan", parentID)
+	if out, err := gpCmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(stderr, "warning: gp dispatch failed: %v\n%s\n", err, string(out))
+	} else {
+		fmt.Fprintf(stderr, "GP: wired %s to dispatch plan %s\n", gpNode, parentID)
 	}
 }
 

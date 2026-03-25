@@ -1,7 +1,10 @@
 package commands
 
 import (
+	"bytes"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
@@ -257,6 +260,93 @@ func TestFindPlanParent(t *testing.T) {
 			t.Errorf("findPlanParent (single task) = %q, want \"\"", got)
 		}
 	})
+}
+
+func TestMaybeWireGP_NoEnvVar(t *testing.T) {
+	// When GRAPHPILOT_NODE is not set (empty string), maybeWireGP must not
+	// attempt any GP command — verified by the absence of any output on stderr.
+	d := openTestDB(t)
+
+	parent, err := d.AddTask("Parent", "", "", "", nil)
+	if err != nil {
+		t.Fatalf("add parent: %v", err)
+	}
+	child, err := d.AddTask("Child", "", parent.ID, "", nil)
+	if err != nil {
+		t.Fatalf("add child: %v", err)
+	}
+
+	var buf bytes.Buffer
+	maybeWireGP(d, []string{parent.ID, child.ID}, "" /* gpNode not set */, &buf)
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no stderr output when GRAPHPILOT_NODE is empty, got: %q", buf.String())
+	}
+}
+
+func TestMaybeWireGP_NoParentInRefs(t *testing.T) {
+	// When GRAPHPILOT_NODE is set but no parent-child relationship exists among
+	// the batch refs, the warning "no plan parent found" must appear on stderr.
+	d := openTestDB(t)
+
+	t1, err := d.AddTask("Task1", "", "", "", nil)
+	if err != nil {
+		t.Fatalf("add task1: %v", err)
+	}
+	t2, err := d.AddTask("Task2", "", "", "", nil)
+	if err != nil {
+		t.Fatalf("add task2: %v", err)
+	}
+
+	var buf bytes.Buffer
+	maybeWireGP(d, []string{t1.ID, t2.ID}, "gp-node-abc", &buf)
+
+	got := buf.String()
+	if !strings.Contains(got, "no plan parent found") {
+		t.Errorf("expected warning about no plan parent, got: %q", got)
+	}
+}
+
+func TestMaybeWireGP_EmptyRefs(t *testing.T) {
+	// When GRAPHPILOT_NODE is set but refs is empty, no output is expected
+	// (there's nothing to wire and no misleading warning needed).
+	d := openTestDB(t)
+
+	var buf bytes.Buffer
+	maybeWireGP(d, []string{}, "gp-node-abc", &buf)
+
+	if buf.Len() != 0 {
+		t.Errorf("expected no stderr output for empty refs, got: %q", buf.String())
+	}
+}
+
+func TestMaybeWireGP_GPNotInPath(t *testing.T) {
+	// When GRAPHPILOT_NODE is set and a plan parent exists but `gp` is not in
+	// PATH, the "gp not in PATH" warning must appear on stderr.
+	// This test relies on the test environment not having a `gp` binary.
+	// If `gp` is present, the test is skipped to avoid side effects.
+	if _, err := exec.LookPath("gp"); err == nil {
+		t.Skip("gp binary is present in PATH; skipping test that expects its absence")
+	}
+
+	d := openTestDB(t)
+
+	parent, err := d.AddTask("Parent", "", "", "", nil)
+	if err != nil {
+		t.Fatalf("add parent: %v", err)
+	}
+	child, err := d.AddTask("Child", "", parent.ID, "", nil)
+	if err != nil {
+		t.Fatalf("add child: %v", err)
+	}
+
+	var buf bytes.Buffer
+	maybeWireGP(d, []string{parent.ID, child.ID}, "gp-node-xyz", &buf)
+
+	got := buf.String()
+	if !strings.Contains(got, "gp not in PATH") {
+		t.Errorf("expected warning about gp not in PATH, got: %q", got)
+	}
 }
 
 func TestSubstituteRefs(t *testing.T) {
