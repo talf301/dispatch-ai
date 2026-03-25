@@ -354,3 +354,118 @@ func TestDaemon_MergeChildOnCompletion(t *testing.T) {
 		t.Error("child branch should be deleted after clean merge")
 	}
 }
+
+// TestGP_DisabledNoGpBin verifies that when GPEnabled is false, gpBin stays empty.
+func TestGP_DisabledNoGpBin(t *testing.T) {
+	d := openTestDB(t)
+	spawner := &MockSpawner{}
+	daemon := New(d, Config{
+		Repos:     make(map[string]config.RepoConfig),
+		GPEnabled: false,
+	}, spawner)
+
+	if daemon.gpBin != "" {
+		t.Errorf("gpBin = %q, want empty when GPEnabled is false", daemon.gpBin)
+	}
+}
+
+// TestGP_EnabledBinaryMissingGpBinEmpty verifies that when GPEnabled is true but gp is not
+// in PATH, the daemon starts without error and gpBin remains empty.
+func TestGP_EnabledBinaryMissingGpBinEmpty(t *testing.T) {
+	// Restrict PATH to a temp dir with no gp binary.
+	emptyDir := t.TempDir()
+	t.Setenv("PATH", emptyDir)
+
+	d := openTestDB(t)
+	spawner := &MockSpawner{}
+	daemon := New(d, Config{
+		Repos:     make(map[string]config.RepoConfig),
+		GPEnabled: true,
+	}, spawner)
+
+	if daemon.gpBin != "" {
+		t.Errorf("gpBin = %q, want empty when gp is not in PATH", daemon.gpBin)
+	}
+}
+
+// TestGP_EnabledBinaryFoundGpBinSet verifies that when GPEnabled is true and a gp binary
+// exists in PATH, gpBin is set to the resolved path.
+func TestGP_EnabledBinaryFoundGpBinSet(t *testing.T) {
+	// Create a fake gp binary in a temp dir.
+	binDir := t.TempDir()
+	gpScript := filepath.Join(binDir, "gp")
+	if err := os.WriteFile(gpScript, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	d := openTestDB(t)
+	spawner := &MockSpawner{}
+	daemon := New(d, Config{
+		Repos:     make(map[string]config.RepoConfig),
+		GPEnabled: true,
+	}, spawner)
+
+	if daemon.gpBin == "" {
+		t.Error("gpBin should be set when gp is in PATH")
+	}
+}
+
+// TestGP_SyncChildCallsGpBinary verifies that gpSyncChild executes the gp binary with
+// "sync-child <taskID>" arguments when gpBin is set.
+func TestGP_SyncChildCallsGpBinary(t *testing.T) {
+	// Create a mock gp binary that records its arguments to a file.
+	binDir := t.TempDir()
+	argsFile := filepath.Join(t.TempDir(), "gp-args.txt")
+	gpScript := filepath.Join(binDir, "gp")
+	scriptContent := fmt.Sprintf("#!/bin/sh\nprintf '%%s' \"$*\" > %s\n", argsFile)
+	if err := os.WriteFile(gpScript, []byte(scriptContent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	d := openTestDB(t)
+	spawner := &MockSpawner{}
+	daemon := New(d, Config{
+		Repos:     make(map[string]config.RepoConfig),
+		GPEnabled: true,
+	}, spawner)
+
+	if daemon.gpBin == "" {
+		t.Fatal("gpBin not set — mock gp binary not found in PATH")
+	}
+
+	daemon.gpSyncChild("test-task-id")
+
+	// Wait briefly for the goroutine to complete.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(argsFile); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("args file not written: %v", err)
+	}
+	got := string(data)
+	want := "sync-child test-task-id"
+	if got != want {
+		t.Errorf("gp called with args %q, want %q", got, want)
+	}
+}
+
+// TestGP_SyncChildNoopWhenDisabled verifies that gpSyncChild is a no-op when gpBin is empty.
+func TestGP_SyncChildNoopWhenDisabled(t *testing.T) {
+	d := openTestDB(t)
+	spawner := &MockSpawner{}
+	daemon := New(d, Config{
+		Repos:     make(map[string]config.RepoConfig),
+		GPEnabled: false,
+	}, spawner)
+
+	// Should not panic and should not call any binary.
+	daemon.gpSyncChild("test-task-id")
+}
