@@ -24,6 +24,7 @@ type Config struct {
 	PollInterval time.Duration
 	WorktreeBase string // default ~/.dispatch/worktrees
 	SessionDir   string // path to ~/.dispatch/sessions/
+	GPEnabled    bool   // Enable GraphPilot integration (gp sync-child on task completion)
 }
 
 // DefaultConfig returns configuration with defaults.

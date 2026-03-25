@@ -53,6 +53,7 @@ var rootCmd = &cobra.Command{
 		pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
 		workerPromptPath, _ := cmd.Flags().GetString("worker-prompt")
 		reviewerPromptPath, _ := cmd.Flags().GetString("reviewer-prompt")
+		gpEnabled, _ := cmd.Flags().GetBool("gp")
 
 		if workerPromptPath == "" || reviewerPromptPath == "" {
 			return fmt.Errorf("--worker-prompt and --reviewer-prompt are required")
@@ -103,6 +104,7 @@ var rootCmd = &cobra.Command{
 			PollInterval: pollInterval,
 			WorktreeBase: filepath.Join(home, ".dispatch", "worktrees"),
 			SessionDir:   filepath.Join(home, ".dispatch", "sessions"),
+			GPEnabled:    gpEnabled,
 		}
 
 		spawner := &daemon.ClaudeSpawner{
@@ -137,6 +139,7 @@ func init() {
 	rootCmd.Flags().Duration("poll-interval", envDurationOrDefault("DISPATCH_POLL_INTERVAL", 5*time.Second), "poll interval")
 	rootCmd.Flags().String("worker-prompt", envOrDefault("DISPATCH_WORKER_PROMPT", ""), "path to worker.md prompt file (required)")
 	rootCmd.Flags().String("reviewer-prompt", envOrDefault("DISPATCH_REVIEWER_PROMPT", ""), "path to reviewer.md prompt file (required)")
+	rootCmd.Flags().Bool("gp", os.Getenv("DISPATCH_GP") == "1", "enable GraphPilot integration (env: DISPATCH_GP=1)")
 }
 
 func main() {
