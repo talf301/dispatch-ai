@@ -115,7 +115,7 @@ func NewBatchCmd() *cobra.Command {
 						if out, err := gpCmd.CombinedOutput(); err != nil {
 							fmt.Fprintf(os.Stderr, "warning: gp dispatch failed: %v\n%s\n", err, string(out))
 						} else {
-							fmt.Printf("GP: wired %s to dispatch plan %s\n", gpNode, parentID)
+							fmt.Fprintf(os.Stderr, "GP: wired %s to dispatch plan %s\n", gpNode, parentID)
 						}
 					}
 				}
@@ -133,10 +133,6 @@ func NewBatchCmd() *cobra.Command {
 // findPlanParent returns the ID of the task in refs that has children (is a
 // parent). Returns "" if no parent is found among the refs.
 func findPlanParent(database *db.DB, refs []string) string {
-	refSet := make(map[string]bool, len(refs))
-	for _, id := range refs {
-		refSet[id] = true
-	}
 	for _, id := range refs {
 		task, err := database.GetTask(id)
 		if err != nil {
