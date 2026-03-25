@@ -446,6 +446,8 @@ func (d *Daemon) handleReviewApproval(taskID string) {
 			_, ac, err := d.db.DoneTask(taskID)
 			if err != nil {
 				d.logger.Printf("review-done: done task %s: %v", taskID, err)
+			} else {
+				d.gpSyncChild(taskID)
 			}
 			if ac != nil {
 				d.triggerPR(ac)
@@ -458,6 +460,8 @@ func (d *Daemon) handleReviewApproval(taskID string) {
 		if task.Status != "done" {
 			if _, _, err := d.db.DoneTask(taskID); err != nil {
 				d.logger.Printf("review-done: done task %s: %v", taskID, err)
+			} else {
+				d.gpSyncChild(taskID)
 			}
 		}
 		if err := RemoveWorktree(repoPath, wtDir, branchName, true); err != nil {
@@ -468,6 +472,22 @@ func (d *Daemon) handleReviewApproval(taskID string) {
 	delete(d.noteCountAtReviewStart, taskID)
 	delete(d.workerRepo, taskID)
 	d.logger.Printf("task %s completed (review approved)", taskID)
+}
+
+// gpSyncChild notifies GraphPilot that a dispatch task completed.
+// Fire-and-forget: never blocks or fails dispatch operations.
+// Safe to call after handleReviewApproval deletes daemon maps — taskID is
+// captured by value, and no other daemon state is accessed in the goroutine.
+func (d *Daemon) gpSyncChild(taskID string) {
+	if d.gpBin == "" {
+		return
+	}
+	go func() {
+		cmd := exec.Command(d.gpBin, "sync-child", taskID)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			d.logger.Printf("gp sync-child %s failed: %v (output: %s)", taskID, err, strings.TrimSpace(string(out)))
+		}
+	}()
 }
 
 // handleReviewerExit handles a reviewer that exited non-zero.
