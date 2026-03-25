@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -97,6 +98,29 @@ func NewBatchCmd() *cobra.Command {
 				exitError(cmd, fmt.Errorf("commit: %w", err))
 			}
 
+			// GraphPilot integration: wire GP graph if GRAPHPILOT_NODE is set.
+			// GRAPHPILOT_NODE is the GP node ID of the calling node — set by GP
+			// when it spawns a dispatch-planner. This tells GP that the node's
+			// work has been decomposed into dispatch tasks.
+			if gpNode := os.Getenv("GRAPHPILOT_NODE"); gpNode != "" && len(refs) > 0 {
+				parentID := findPlanParent(d, refs)
+				if parentID == "" {
+					fmt.Fprintf(os.Stderr, "warning: GRAPHPILOT_NODE set but no plan parent found among batch refs; skipping GP wiring\n")
+				} else {
+					gpBin, err := exec.LookPath("gp")
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "warning: GRAPHPILOT_NODE set but gp not in PATH; skipping GP wiring\n")
+					} else {
+						gpCmd := exec.Command(gpBin, "dispatch", gpNode, "--plan", parentID)
+						if out, err := gpCmd.CombinedOutput(); err != nil {
+							fmt.Fprintf(os.Stderr, "warning: gp dispatch failed: %v\n%s\n", err, string(out))
+						} else {
+							fmt.Printf("GP: wired %s to dispatch plan %s\n", gpNode, parentID)
+						}
+					}
+				}
+			}
+
 			if jsonFlag(cmd) {
 				printJSON(map[string]any{"status": "ok", "lines": executed})
 			} else {
@@ -104,6 +128,38 @@ func NewBatchCmd() *cobra.Command {
 			}
 		},
 	}
+}
+
+// findPlanParent returns the ID of the task in refs that has children (is a
+// parent). Returns "" if no parent is found among the refs.
+func findPlanParent(database *db.DB, refs []string) string {
+	refSet := make(map[string]bool, len(refs))
+	for _, id := range refs {
+		refSet[id] = true
+	}
+	for _, id := range refs {
+		task, err := database.GetTask(id)
+		if err != nil {
+			continue
+		}
+		if task.ParentID == nil && len(refs) > 1 {
+			// A top-level task created alongside others — likely the parent.
+			// Confirm by checking if any other ref has this as parent.
+			for _, otherID := range refs {
+				if otherID == id {
+					continue
+				}
+				other, err := database.GetTask(otherID)
+				if err != nil {
+					continue
+				}
+				if other.ParentID != nil && *other.ParentID == id {
+					return id
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func executeLine(database *db.DB, line string) (string, error) {
