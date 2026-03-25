@@ -46,6 +46,7 @@ type Daemon struct {
 	worktreeBase           string
 	repos                  map[string]config.RepoConfig // repoPath -> RepoConfig
 	baseBranch             string
+	gpBin                  string              // path to gp binary, empty if GP integration disabled
 	workers                map[string]WorkerHandle // taskID -> handle
 	workerRepo             map[string]string        // taskID -> repoPath
 	taskRoles              map[string]SpawnRole     // taskID -> current role
@@ -60,7 +61,7 @@ func New(database *db.DB, cfg Config, spawner WorkerSpawner) *Daemon {
 	if repos == nil {
 		repos = make(map[string]config.RepoConfig)
 	}
-	return &Daemon{
+	d := &Daemon{
 		db:                     database,
 		cfg:                    cfg,
 		spawner:                spawner,
@@ -74,6 +75,18 @@ func New(database *db.DB, cfg Config, spawner WorkerSpawner) *Daemon {
 		noteCountAtReviewStart: make(map[string]int),
 		logger:                 log.New(os.Stderr, "[dispatchd] ", log.LstdFlags),
 	}
+
+	if cfg.GPEnabled {
+		gpPath, err := exec.LookPath("gp")
+		if err != nil {
+			d.logger.Printf("WARNING: --gp enabled but gp binary not found in PATH; disabling GP integration")
+		} else {
+			d.gpBin = gpPath
+			d.logger.Printf("GraphPilot integration enabled (gp at %s)", gpPath)
+		}
+	}
+
+	return d
 }
 
 // recoverActive checks all active tasks in the DB and reconciles with
