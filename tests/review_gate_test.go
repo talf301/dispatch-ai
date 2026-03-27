@@ -22,8 +22,11 @@ func newReviewSpawner(database *db.DB) *reviewSpawner {
 	return &reviewSpawner{db: database, spawnCount: make(map[string]int)}
 }
 
-func (s *reviewSpawner) Spawn(_ context.Context, task db.Task, _ string, role daemon.SpawnRole, _ string) (daemon.WorkerHandle, error) {
+func (s *reviewSpawner) Spawn(_ context.Context, task db.Task, workDir string, role daemon.SpawnRole, _ string) (daemon.WorkerHandle, error) {
 	s.spawnCount[task.ID]++
+	if role == daemon.RoleWorker {
+		commitInWorktree(workDir)
+	}
 	done := make(chan struct{})
 	close(done)
 	return &immediateHandle{done: done}, nil
@@ -86,10 +89,14 @@ func newRejectingReviewSpawner(database *db.DB) *rejectingReviewSpawner {
 	return &rejectingReviewSpawner{db: database, spawnCount: make(map[string]int)}
 }
 
-func (s *rejectingReviewSpawner) Spawn(_ context.Context, task db.Task, _ string, role daemon.SpawnRole, _ string) (daemon.WorkerHandle, error) {
+func (s *rejectingReviewSpawner) Spawn(_ context.Context, task db.Task, workDir string, role daemon.SpawnRole, _ string) (daemon.WorkerHandle, error) {
 	s.spawnCount[task.ID]++
 	count := s.spawnCount[task.ID]
 	done := make(chan struct{})
+
+	if role == daemon.RoleWorker {
+		commitInWorktree(workDir)
+	}
 
 	if role == daemon.RoleReviewer && count == 2 {
 		// First review — reject with feedback note.
@@ -182,9 +189,13 @@ func newCrashingReviewerSpawner() *crashingReviewerSpawner {
 	return &crashingReviewerSpawner{spawnCount: make(map[string]int)}
 }
 
-func (s *crashingReviewerSpawner) Spawn(_ context.Context, task db.Task, _ string, role daemon.SpawnRole, _ string) (daemon.WorkerHandle, error) {
+func (s *crashingReviewerSpawner) Spawn(_ context.Context, task db.Task, workDir string, role daemon.SpawnRole, _ string) (daemon.WorkerHandle, error) {
 	s.spawnCount[task.ID]++
 	done := make(chan struct{})
+
+	if role == daemon.RoleWorker {
+		commitInWorktree(workDir)
+	}
 
 	if role == daemon.RoleReviewer {
 		close(done)

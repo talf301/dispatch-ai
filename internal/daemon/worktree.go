@@ -90,6 +90,23 @@ func MergeBranch(repoDir, sourceBranch, targetBranch string) error {
 	return nil
 }
 
+// worktreeBranchHasCommits checks whether the current branch in wtDir has any
+// commits beyond its fork point. Returns false if the worker never committed
+// to the worktree branch (e.g. it escaped to the main repo directory).
+func worktreeBranchHasCommits(wtDir, branchName string) bool {
+	// The reflog for the branch records every commit. Entry 0 is HEAD,
+	// and the last entry is the branch creation. If there's more than
+	// one entry, the worker made at least one commit.
+	cmd := exec.Command("git", "reflog", "show", "--oneline", branchName)
+	cmd.Dir = wtDir
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	return len(lines) > 1
+}
+
 func RemoveWorktree(repoDir, wtDir, branchName string, deleteBranch bool) error {
 	cmd := exec.Command("git", "worktree", "remove", wtDir, "--force")
 	cmd.Dir = repoDir

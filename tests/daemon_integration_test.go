@@ -181,6 +181,19 @@ func TestDaemonIntegration_MaxWorkers(t *testing.T) {
 	}
 }
 
+// commitInWorktree creates a dummy commit on the current branch in the worktree,
+// simulating a worker that committed its work to the correct branch.
+func commitInWorktree(wtDir string) {
+	// Create a dummy file and commit it.
+	os.WriteFile(filepath.Join(wtDir, "worker-output.txt"), []byte("done"), 0o644)
+	cmd := exec.Command("git", "add", "worker-output.txt")
+	cmd.Dir = wtDir
+	cmd.Run()
+	cmd = exec.Command("git", "commit", "-m", "worker output")
+	cmd.Dir = wtDir
+	cmd.Run()
+}
+
 // doneCallingSpawner simulates a worker that calls dt done then exits.
 type doneCallingSpawner struct {
 	db *db.DB

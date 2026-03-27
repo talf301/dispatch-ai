@@ -7,6 +7,12 @@ Run `dt show $TASK_ID` to read your task description, notes, and dependencies.
 If this task has blockers, read their notes — they contain context from previous work
 that may be relevant.
 
+## Your working directory
+
+You are running inside an isolated git worktree. Your current directory IS the
+repository — all project files are here. Never `cd` to another directory. All file
+paths in the task description are relative to your current directory.
+
 ## How to work
 
 1. Read the task description carefully. Understand the scope boundary — what is in

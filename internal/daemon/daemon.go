@@ -381,10 +381,24 @@ func recoverReviewRound(sessionDir, taskID string) int {
 func (d *Daemon) handleWorkerComplete(taskID string) {
 	wtDir := filepath.Join(d.worktreeBase, taskID)
 
+	// Skip branch validation if the task is already done (worker called dt done).
 	task, err := d.db.GetTask(taskID)
 	if err != nil {
 		d.logger.Printf("review: get task %s: %v", taskID, err)
 		return
+	}
+
+	// Verify the worker committed to the worktree branch, not the main repo.
+	// Skip if the task is already done (legacy dt done path).
+	if task.Status != "done" {
+		branchName := fmt.Sprintf("dispatch/%s", taskID)
+		if !worktreeBranchHasCommits(wtDir, branchName) {
+			d.logger.Printf("review: task %s has no commits on branch %s — worker may have committed to the wrong branch", taskID, branchName)
+			if _, err := d.db.BlockTask(taskID, fmt.Sprintf("Worker committed to wrong branch. Expected commits on %s but found none. Check if worker escaped the worktree directory.", branchName)); err != nil {
+				d.logger.Printf("review: block task %s: %v", taskID, err)
+			}
+			return
+		}
 	}
 
 	// Record note count before reviewer spawns.
