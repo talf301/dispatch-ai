@@ -55,7 +55,7 @@ func TestDaemonIntegration_SpawnAndComplete(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	spawner := &doneCallingSpawner{db: database}
+	spawner := newReviewSpawner(database)
 
 	d := daemon.New(database, daemon.Config{
 		Repos:        integrationRepos(repoDir, 4),
@@ -192,18 +192,6 @@ func commitInWorktree(wtDir string) {
 	cmd = exec.Command("git", "commit", "-m", "worker output")
 	cmd.Dir = wtDir
 	cmd.Run()
-}
-
-// doneCallingSpawner simulates a worker that calls dt done then exits.
-type doneCallingSpawner struct {
-	db *db.DB
-}
-
-func (s *doneCallingSpawner) Spawn(_ context.Context, task db.Task, _ string, _ daemon.SpawnRole, _ string) (daemon.WorkerHandle, error) {
-	s.db.DoneTask(task.ID)
-	done := make(chan struct{})
-	close(done) // immediately done
-	return &immediateHandle{done: done}, nil
 }
 
 type immediateHandle struct {

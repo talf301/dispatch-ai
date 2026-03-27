@@ -259,10 +259,7 @@ func TestDaemon_MonitorCleanExit(t *testing.T) {
 
 	daemon.spawnReady()
 
-	// Manually mark task done (simulating worker calling dt done).
-	d.DoneTask(task.ID)
-
-	// First monitorWorkers detects worker exit and spawns reviewer.
+	// First monitorWorkers detects worker exit (clean, with commits) and spawns reviewer.
 	daemon.monitorWorkers()
 
 	// Reviewer should now be in the map (MockSpawner exits 0 immediately).

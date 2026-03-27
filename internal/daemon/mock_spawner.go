@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
@@ -17,11 +19,16 @@ type MockSpawner struct {
 	Spawned    []db.Task
 }
 
-func (m *MockSpawner) Spawn(_ context.Context, task db.Task, _ string, _ SpawnRole, _ string) (WorkerHandle, error) {
+func (m *MockSpawner) Spawn(_ context.Context, task db.Task, workDir string, role SpawnRole, _ string) (WorkerHandle, error) {
 	if m.SpawnErr != nil {
 		return nil, m.SpawnErr
 	}
 	m.Spawned = append(m.Spawned, task)
+
+	// Workers with clean exit should commit to the worktree branch.
+	if m.ExitCode == 0 && role == RoleWorker {
+		mockCommitInWorktree(workDir, task.ID)
+	}
 	h := &mockHandle{
 		pid:      os.Getpid(),
 		exitCode: m.ExitCode,
@@ -51,4 +58,15 @@ func (h *mockHandle) Output() string       { return h.output }
 func (h *mockHandle) Wait() error {
 	<-h.done
 	return h.exitErr
+}
+
+// mockCommitInWorktree creates a dummy file and commits it in the worktree.
+func mockCommitInWorktree(wtDir, taskID string) {
+	os.WriteFile(filepath.Join(wtDir, "mock-output.txt"), []byte("work from "+taskID), 0o644)
+	cmd := exec.Command("git", "add", "mock-output.txt")
+	cmd.Dir = wtDir
+	cmd.Run()
+	cmd = exec.Command("git", "-c", "user.email=test@test.com", "-c", "user.name=Test", "commit", "-m", "mock work for "+taskID)
+	cmd.Dir = wtDir
+	cmd.Run()
 }

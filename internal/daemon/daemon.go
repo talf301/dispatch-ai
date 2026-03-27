@@ -319,9 +319,10 @@ func (d *Daemon) monitorWorkers() {
 
 		waitErr := handle.Err()
 
-		// For adopted processes, we can't know the real exit code.
+		// For adopted worker processes, we can't know the real exit code.
 		// Check if the worker already called dt done before blocking.
-		if waitErr != nil {
+		// Only applies to workers — reviewer exit codes must never be overridden.
+		if waitErr != nil && d.taskRoles[taskID] == RoleWorker {
 			if task, err := d.db.GetTask(taskID); err == nil && task.Status == "done" {
 				waitErr = nil // Worker completed successfully before we could track it.
 			}
@@ -340,9 +341,12 @@ func (d *Daemon) monitorWorkers() {
 		delete(d.taskRoles, f.taskID)
 		// Note: workerRepo is NOT deleted here — it's needed by handleReviewApproval etc.
 
-		// Preserve adopted-process check.
+		// For workers only: if the worker already called dt done before we
+		// could track exit, treat it as a clean exit. Never override reviewer
+		// exit codes — a reviewer rejection (non-zero exit) must always be
+		// routed to handleReviewerExit regardless of task status.
 		waitErr := f.err
-		if waitErr != nil {
+		if waitErr != nil && role == RoleWorker {
 			if task, err := d.db.GetTask(f.taskID); err == nil && task.Status == "done" {
 				waitErr = nil
 			}
@@ -388,17 +392,16 @@ func (d *Daemon) handleWorkerComplete(taskID string) {
 		return
 	}
 
-	// Verify the worker committed to the worktree branch, not the main repo.
-	// Skip if the task is already done (legacy dt done path).
-	if task.Status != "done" {
-		branchName := fmt.Sprintf("dispatch/%s", taskID)
-		if !worktreeBranchHasCommits(wtDir, branchName) {
-			d.logger.Printf("review: task %s has no commits on branch %s — worker may have committed to the wrong branch", taskID, branchName)
-			if _, err := d.db.BlockTask(taskID, fmt.Sprintf("Worker committed to wrong branch. Expected commits on %s but found none. Check if worker escaped the worktree directory.", branchName)); err != nil {
-				d.logger.Printf("review: block task %s: %v", taskID, err)
-			}
-			return
+	// Always verify the worker committed to the worktree branch, not the main repo.
+	// This runs regardless of task status — even if the worker called dt done,
+	// we must validate the branch before spawning a reviewer.
+	branchName := fmt.Sprintf("dispatch/%s", taskID)
+	if !worktreeBranchHasCommits(wtDir, branchName) {
+		d.logger.Printf("review: task %s has no commits on branch %s — worker may have committed to the wrong branch", taskID, branchName)
+		if _, err := d.db.BlockTask(taskID, fmt.Sprintf("Worker committed to wrong branch. Expected commits on %s but found none. Check if worker escaped the worktree directory.", branchName)); err != nil {
+			d.logger.Printf("review: block task %s: %v", taskID, err)
 		}
+		return
 	}
 
 	// Record note count before reviewer spawns.
