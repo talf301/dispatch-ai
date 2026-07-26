@@ -133,7 +133,16 @@ func (d *Daemon) recoverActive() {
 
 		if isProcessAlive(pid) {
 			d.logger.Printf("recovery: task %s has live worker (pid %d), re-adopting", task.ID, pid)
-			d.workers[task.ID] = newAdoptedHandle(pid)
+			branchName := fmt.Sprintf("dispatch/%s", task.ID)
+			baseBranch, baseErr := d.baseBranchFor(&task)
+			committed := func() bool {
+				if baseErr != nil {
+					return true // can't tell — let the review gate judge the work
+				}
+				has, err := worktreeBranchHasCommits(wtDir, baseBranch, branchName)
+				return err != nil || has
+			}
+			d.workers[task.ID] = newAdoptedHandle(pid, committed)
 			d.workerRepo[task.ID] = repoPath
 		} else {
 			d.logger.Printf("recovery: task %s worker (pid %d) is dead, blocking", task.ID, pid)
@@ -162,13 +171,19 @@ type adoptedHandle struct {
 	exitErr error
 }
 
-func newAdoptedHandle(pid int) *adoptedHandle {
+// newAdoptedHandle watches a process the daemon did not spawn, so no exit
+// status is available. Clean exit is inferred from the completion marker the
+// worker prompt asks for — commits on the task's own branch — since workers are
+// explicitly told not to call `dt done`. committed must not touch daemon state.
+func newAdoptedHandle(pid int, committed func() bool) *adoptedHandle {
 	h := &adoptedHandle{pid: pid, done: make(chan struct{})}
 	go func() {
 		for isProcessAlive(pid) {
 			time.Sleep(1 * time.Second)
 		}
-		h.exitErr = fmt.Errorf("adopted process %d exited (status unknown)", pid)
+		if !committed() {
+			h.exitErr = fmt.Errorf("adopted process %d exited without committing to its branch", pid)
+		}
 		close(h.done)
 	}()
 	return h

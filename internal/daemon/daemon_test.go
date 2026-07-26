@@ -44,6 +44,40 @@ func TestDaemonConfig_Defaults(t *testing.T) {
 	}
 }
 
+func TestAdoptedHandle_CleanExitIsNotAFailure(t *testing.T) {
+	exitedPID := func(t *testing.T) int {
+		t.Helper()
+		cmd := exec.Command("true")
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		pid := cmd.Process.Pid
+		cmd.Wait()
+		return pid
+	}
+
+	for _, tc := range []struct {
+		name      string
+		committed bool
+		wantErr   bool
+	}{
+		{"worker committed", true, false},
+		{"worker committed nothing", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newAdoptedHandle(exitedPID(t), func() bool { return tc.committed })
+			select {
+			case <-h.Done():
+			case <-time.After(10 * time.Second):
+				t.Fatal("adopted handle never reported exit")
+			}
+			if gotErr := h.Err() != nil; gotErr != tc.wantErr {
+				t.Errorf("Err() = %v, wantErr %v", h.Err(), tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestDaemon_RecoverActive_DeadProcess(t *testing.T) {
 	d := openTestDB(t)
 	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
