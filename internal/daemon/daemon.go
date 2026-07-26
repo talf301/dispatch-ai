@@ -110,19 +110,27 @@ func (d *Daemon) recoverActive() {
 		}
 
 		pidPath := filepath.Join(wtDir, "worker.pid")
-		pidBytes, err := os.ReadFile(pidPath)
-		if err != nil {
+		pid, startedAt, err := readPIDFile(pidPath)
+		if os.IsNotExist(err) {
 			d.logger.Printf("recovery: task %s has no PID file, blocking", task.ID)
 			if _, err := d.db.BlockTask(task.ID, "unknown worker state after daemon restart"); err != nil {
 				d.logger.Printf("recovery: block task %s: %v", task.ID, err)
 			}
 			continue
 		}
-
-		pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 		if err != nil {
-			d.logger.Printf("recovery: task %s has invalid PID file, blocking", task.ID)
+			d.logger.Printf("recovery: task %s has invalid PID file: %v, blocking", task.ID, err)
 			if _, err := d.db.BlockTask(task.ID, "invalid PID file after daemon restart"); err != nil {
+				d.logger.Printf("recovery: block task %s: %v", task.ID, err)
+			}
+			continue
+		}
+
+		// A pid on its own proves nothing: the number may have been recycled
+		// while the daemon was down.
+		if isProcessAlive(pid) && processStartTime(pid) != startedAt {
+			d.logger.Printf("recovery: task %s pid %d belongs to a different process now, blocking", task.ID, pid)
+			if _, err := d.db.BlockTask(task.ID, "worker died while daemon was down (PID reused)"); err != nil {
 				d.logger.Printf("recovery: block task %s: %v", task.ID, err)
 			}
 			continue
@@ -159,12 +167,41 @@ func (d *Daemon) recoverActive() {
 
 // isProcessAlive checks if a process with the given PID exists.
 func isProcessAlive(pid int) bool {
-	process, err := os.FindProcess(pid)
+	process, _ := os.FindProcess(pid) // never fails on Unix
+	return process.Signal(syscall.Signal(0)) == nil
+}
+
+// processStartTime returns the OS-reported start time of a pid, which is what
+// distinguishes the process the daemon spawned from a later reuse of its
+// number. Empty when the process is gone or unreadable.
+//
+// ponytail: shells out to ps (portable across darwin/linux); read /proc or
+// pull in a process library only if this ever has to run somewhere without ps.
+func processStartTime(pid int) string {
+	out, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
-		return false
+		return ""
 	}
-	err = process.Signal(syscall.Signal(0))
-	return err == nil
+	return strings.TrimSpace(string(out))
+}
+
+// writePIDFile records a worker's pid together with its start time.
+func writePIDFile(path string, pid int) error {
+	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n%s\n", pid, processStartTime(pid))), 0o644)
+}
+
+// readPIDFile returns the pid and the start time recorded alongside it.
+func readPIDFile(path string) (int, string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, "", err
+	}
+	pidLine, startedAt, _ := strings.Cut(strings.TrimSpace(string(b)), "\n")
+	pid, err := strconv.Atoi(strings.TrimSpace(pidLine))
+	if err != nil {
+		return 0, "", fmt.Errorf("parse pid: %w", err)
+	}
+	return pid, strings.TrimSpace(startedAt), nil
 }
 
 // adoptedHandle monitors a process the daemon didn't spawn (re-adopted on restart).
@@ -329,7 +366,7 @@ func (d *Daemon) spawnReady() {
 
 		// Write PID file.
 		pidPath := filepath.Join(wtDir, "worker.pid")
-		if err := os.WriteFile(pidPath, []byte(strconv.Itoa(handle.PID())), 0o644); err != nil {
+		if err := writePIDFile(pidPath, handle.PID()); err != nil {
 			d.logger.Printf("spawn: write PID file %s: %v", task.ID, err)
 		}
 
@@ -479,7 +516,7 @@ func (d *Daemon) handleWorkerComplete(taskID string) {
 
 	// Write PID file for reviewer.
 	pidPath := filepath.Join(wtDir, "worker.pid")
-	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(handle.PID())), 0o644); err != nil {
+	if err := writePIDFile(pidPath, handle.PID()); err != nil {
 		d.logger.Printf("review: write PID file %s: %v", taskID, err)
 	}
 

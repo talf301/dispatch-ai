@@ -171,7 +171,9 @@ func TestDaemon_RecoverActive_LiveProcess(t *testing.T) {
 
 	wtDir := filepath.Join(worktreeBase, task.ID)
 	os.MkdirAll(wtDir, 0o755)
-	os.WriteFile(filepath.Join(wtDir, "worker.pid"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+	if err := writePIDFile(filepath.Join(wtDir, "worker.pid"), os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
 
 	daemon := &Daemon{
 		db:           d,
@@ -187,6 +189,40 @@ func TestDaemon_RecoverActive_LiveProcess(t *testing.T) {
 	updated, _ := d.GetTask(task.ID)
 	if updated.Status != "active" {
 		t.Errorf("status = %s, want active", updated.Status)
+	}
+}
+
+func TestDaemon_RecoverActive_ReusedPID(t *testing.T) {
+	d := openTestDB(t)
+	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
+	os.MkdirAll(worktreeBase, 0o755)
+
+	task, _ := d.AddTask("reused pid test", "", "", "", nil)
+	d.ClaimTask(task.ID, "old-session")
+
+	// Live pid, but not the process that was recorded.
+	wtDir := filepath.Join(worktreeBase, task.ID)
+	os.MkdirAll(wtDir, 0o755)
+	os.WriteFile(filepath.Join(wtDir, "worker.pid"),
+		[]byte(strconv.Itoa(os.Getpid())+"\nWed Jan  1 00:00:00 2020\n"), 0o644)
+
+	daemon := &Daemon{
+		db:           d,
+		repos:        make(map[string]config.RepoConfig),
+		worktreeBase: worktreeBase,
+		workers:      make(map[string]WorkerHandle),
+		workerRepo:   make(map[string]string),
+		logger:       log.New(io.Discard, "", 0),
+	}
+
+	daemon.recoverActive()
+
+	updated, _ := d.GetTask(task.ID)
+	if updated.Status != "blocked" {
+		t.Errorf("status = %s, want blocked (pid was recycled)", updated.Status)
+	}
+	if len(daemon.workers) != 0 {
+		t.Errorf("adopted %d unrelated processes, want 0", len(daemon.workers))
 	}
 }
 
