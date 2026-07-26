@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -126,21 +127,23 @@ func MergeBranch(repoDir, sourceBranch, targetBranch string) error {
 	return nil
 }
 
-// worktreeBranchHasCommits checks whether the current branch in wtDir has any
-// commits beyond its fork point. Returns false if the worker never committed
-// to the worktree branch (e.g. it escaped to the main repo directory).
-func worktreeBranchHasCommits(wtDir, branchName string) bool {
-	// The reflog for the branch records every commit. Entry 0 is HEAD,
-	// and the last entry is the branch creation. If there's more than
-	// one entry, the worker made at least one commit.
-	cmd := exec.Command("git", "reflog", "show", "--oneline", branchName)
+// worktreeBranchHasCommits reports whether branchName carries any commits that
+// baseBranch doesn't, i.e. whether the worker actually committed to its branch
+// rather than escaping to the main checkout. Counting commits directly is the
+// only reliable check: reflogs can be disabled (core.logAllRefUpdates=false) or
+// expired, and amend/reset write reflog entries with no net new commit.
+func worktreeBranchHasCommits(wtDir, baseBranch, branchName string) (bool, error) {
+	cmd := exec.Command("git", "rev-list", "--count", baseBranch+".."+branchName)
 	cmd.Dir = wtDir
 	out, err := cmd.Output()
 	if err != nil {
-		return false
+		return false, fmt.Errorf("count commits on %s: %w", branchName, err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	return len(lines) > 1
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return false, fmt.Errorf("parse commit count for %s: %w", branchName, err)
+	}
+	return n > 0, nil
 }
 
 func RemoveWorktree(repoDir, wtDir, branchName string, deleteBranch bool) error {

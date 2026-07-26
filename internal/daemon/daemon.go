@@ -193,6 +193,19 @@ func (d *Daemon) taskRepoPath(task *db.Task) string {
 	return "."
 }
 
+// baseBranchFor returns the branch a task's worktree branch is based on:
+// its plan branch for a child task, otherwise the configured or default branch.
+func (d *Daemon) baseBranchFor(task *db.Task) (string, error) {
+	if task.ParentID != nil {
+		return fmt.Sprintf("dispatch/plan-%s", *task.ParentID), nil
+	}
+	if d.baseBranch != "" {
+		return d.baseBranch, nil
+	}
+	repoPath := d.taskRepoPath(task)
+	return DetectDefaultBranch(repoPath)
+}
+
 // spawnReady polls for ready tasks and spawns workers, enforcing per-repo max_workers.
 func (d *Daemon) spawnReady() {
 	tasks, err := d.db.ReadyTasks()
@@ -396,12 +409,22 @@ func (d *Daemon) handleWorkerComplete(taskID string) {
 	// This runs regardless of task status — even if the worker called dt done,
 	// we must validate the branch before spawning a reviewer.
 	branchName := fmt.Sprintf("dispatch/%s", taskID)
-	if !worktreeBranchHasCommits(wtDir, branchName) {
-		d.logger.Printf("review: task %s has no commits on branch %s — worker may have committed to the wrong branch", taskID, branchName)
-		if _, err := d.db.BlockTask(taskID, fmt.Sprintf("Worker committed to wrong branch. Expected commits on %s but found none. Check if worker escaped the worktree directory.", branchName)); err != nil {
-			d.logger.Printf("review: block task %s: %v", taskID, err)
+	baseBranch, err := d.baseBranchFor(task)
+	if err != nil {
+		d.logger.Printf("review: task %s: resolve base branch: %v — skipping commit check", taskID, err)
+	} else {
+		// Only block on a definite "no commits" answer; a failed count is an
+		// infrastructure problem, not evidence the worker did nothing.
+		has, err := worktreeBranchHasCommits(wtDir, baseBranch, branchName)
+		if err != nil {
+			d.logger.Printf("review: task %s: %v — skipping commit check", taskID, err)
+		} else if !has {
+			d.logger.Printf("review: task %s has no commits on branch %s — worker may have committed to the wrong branch", taskID, branchName)
+			if _, err := d.db.BlockTask(taskID, fmt.Sprintf("Worker committed to wrong branch. Expected commits on %s but found none. Check if worker escaped the worktree directory.", branchName)); err != nil {
+				d.logger.Printf("review: block task %s: %v", taskID, err)
+			}
+			return
 		}
-		return
 	}
 
 	// Record note count before reviewer spawns.

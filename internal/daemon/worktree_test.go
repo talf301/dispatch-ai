@@ -251,6 +251,60 @@ func TestMergeBranch_Conflict(t *testing.T) {
 	}
 }
 
+func TestWorktreeBranchHasCommits(t *testing.T) {
+	repo := initTestRepo(t)
+	// Reflogs off: the old reflog-based check reported "no commits" here.
+	cmd := exec.Command("git", "config", "core.logAllRefUpdates", "false")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config: %v\n%s", err, out)
+	}
+
+	base, err := DetectDefaultBranch(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	branch := "dispatch/has-commits"
+	wtDir := filepath.Join(t.TempDir(), "wt")
+	if err := CreateWorktree(repo, wtDir, branch, base); err != nil {
+		t.Fatal(err)
+	}
+
+	has, err := worktreeBranchHasCommits(wtDir, base, branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Error("fresh worktree branch should have no commits")
+	}
+
+	os.WriteFile(filepath.Join(wtDir, "work.txt"), []byte("work"), 0o644)
+	for _, args := range [][]string{
+		{"git", "add", "work.txt"},
+		{"git", "commit", "-m", "work"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = wtDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+
+	has, err = worktreeBranchHasCommits(wtDir, base, branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Error("branch with a commit should report commits even with reflogs disabled")
+	}
+
+	// A missing base ref must surface as an error, not as "no commits".
+	if _, err := worktreeBranchHasCommits(wtDir, "no/such/branch", branch); err == nil {
+		t.Error("expected an error for a missing base branch")
+	}
+}
+
 func TestRemoveWorktree_KeepBranch(t *testing.T) {
 	repo := initTestRepo(t)
 	wtDir := filepath.Join(t.TempDir(), "wt-keep")
