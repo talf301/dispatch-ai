@@ -142,6 +142,49 @@ func TestMergeBranch_CleanMerge(t *testing.T) {
 	}
 }
 
+// The target branch is normally the default branch, which the developer's own
+// checkout usually sits on. Merging must not require checking it out.
+func TestMergeBranch_TargetCheckedOutInMainWorktree(t *testing.T) {
+	repo := initTestRepo(t)
+
+	targetBranch, err := DetectDefaultBranch(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	featureBranch := "dispatch/feature-checked-out"
+	featureWT := filepath.Join(t.TempDir(), "wt-feature")
+	if err := CreateWorktree(repo, featureWT, featureBranch, targetBranch); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(featureWT, "feature.txt"), []byte("hello"), 0o644)
+	for _, args := range [][]string{
+		{"git", "add", "feature.txt"},
+		{"git", "commit", "-m", "add feature"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = featureWT
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+	RemoveWorktree(repo, featureWT, featureBranch, false)
+
+	if err := MergeBranch(repo, featureBranch, targetBranch); err != nil {
+		t.Fatalf("MergeBranch into checked-out %s failed: %v", targetBranch, err)
+	}
+
+	cmd := exec.Command("git", "show", targetBranch+":feature.txt")
+	cmd.Dir = repo
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("feature.txt not found on %s: %v", targetBranch, err)
+	}
+	if strings.TrimSpace(string(out)) != "hello" {
+		t.Errorf("feature.txt = %q, want %q", out, "hello")
+	}
+}
+
 func TestMergeBranch_Conflict(t *testing.T) {
 	repo := initTestRepo(t)
 

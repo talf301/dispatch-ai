@@ -58,16 +58,40 @@ func CreateWorktree(repoDir, wtDir, branchName, baseBranch string) error {
 	return nil
 }
 
-// MergeBranch merges sourceBranch into targetBranch using a temporary worktree.
+// revParse resolves a revision to a commit SHA in the given directory.
+func revParse(dir, rev string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--verify", rev+"^{commit}")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("rev-parse %s: %w", rev, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// MergeBranch merges sourceBranch into targetBranch using a temporary detached
+// worktree, then moves the target ref. It never checks targetBranch out, so it
+// works when the target (usually the default branch) is checked out elsewhere.
+//
+// ponytail: moving the ref leaves any existing checkout of targetBranch with a
+// stale index — that checkout will show the merged changes as uncommitted
+// reversals until it runs `git reset --hard`/`git checkout .`. Unavoidable
+// without touching someone else's working tree.
 func MergeBranch(repoDir, sourceBranch, targetBranch string) error {
+	// The target tip is both the merge base and the compare-and-swap value
+	// used when the ref is moved, so nothing concurrent gets clobbered.
+	oldTip, err := revParse(repoDir, targetBranch)
+	if err != nil {
+		return fmt.Errorf("resolve target %s: %w", targetBranch, err)
+	}
+
 	tmpDir, err := os.MkdirTemp("", "dispatch-merge-*")
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Checkout target branch in temp worktree.
-	cmd := exec.Command("git", "worktree", "add", tmpDir, targetBranch)
+	cmd := exec.Command("git", "worktree", "add", "--detach", tmpDir, oldTip)
 	cmd.Dir = repoDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("checkout target: %w\n%s", err, out)
@@ -78,7 +102,7 @@ func MergeBranch(repoDir, sourceBranch, targetBranch string) error {
 		rmCmd.Run()
 	}()
 
-	// Merge source into target.
+	// Merge source into the detached target commit.
 	cmd = exec.Command("git", "merge", sourceBranch, "--no-edit")
 	cmd.Dir = tmpDir
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -86,6 +110,18 @@ func MergeBranch(repoDir, sourceBranch, targetBranch string) error {
 		abort.Dir = tmpDir
 		abort.Run()
 		return fmt.Errorf("merge conflict: %s into %s:\n%s", sourceBranch, targetBranch, out)
+	}
+
+	newTip, err := revParse(tmpDir, "HEAD")
+	if err != nil {
+		return fmt.Errorf("resolve merge result: %w", err)
+	}
+
+	// Only now advance the target ref, and only if it hasn't moved meanwhile.
+	cmd = exec.Command("git", "update-ref", "refs/heads/"+targetBranch, newTip, oldTip)
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("update %s to merge result: %w\n%s", targetBranch, err, out)
 	}
 	return nil
 }
