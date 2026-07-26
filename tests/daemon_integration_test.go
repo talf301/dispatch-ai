@@ -198,7 +198,7 @@ type immediateHandle struct {
 	done chan struct{}
 }
 
-func (h *immediateHandle) PID() int             { return os.Getpid() }
+func (h *immediateHandle) PID() int             { return daemon.FakePID }
 func (h *immediateHandle) Wait() error          { return nil }
 func (h *immediateHandle) Done() <-chan struct{} { return h.done }
 func (h *immediateHandle) Err() error           { return nil }
@@ -354,13 +354,17 @@ func TestDaemonIntegration_PlanLifecycle(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- d.Run(ctx) }()
 
-	// Wait for parent to auto-complete (all children done).
-	waitForCondition(t, 10*time.Second, 200*time.Millisecond, "parent auto-complete", func() bool {
+	// Wait for the parent to auto-complete AND for every worktree to be cleaned
+	// up. fileCommittingSpawner marks tasks done itself (real workers are told
+	// not to), so the parent can auto-complete while the daemon is still
+	// merging the last child branch; cancelling then loses that merge.
+	waitForCondition(t, 10*time.Second, 200*time.Millisecond, "parent auto-complete and child merges", func() bool {
 		p, err := database.GetTask(parent.ID)
-		if err != nil {
+		if err != nil || p.Status != "done" {
 			return false
 		}
-		return p.Status == "done"
+		entries, err := os.ReadDir(worktreeBase)
+		return err == nil && len(entries) == 0
 	})
 
 	cancel()

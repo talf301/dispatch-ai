@@ -10,6 +10,11 @@ import (
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
 
+// FakePID is the pid reported by test doubles. It must not be a live process:
+// the daemon SIGTERMs worker pids on shutdown, and os.Getpid() made the test
+// binary signal itself.
+const FakePID = 99999999
+
 // MockSpawner is a test double that simulates worker processes.
 // Exported so integration tests in other packages can use it.
 type MockSpawner struct {
@@ -30,7 +35,7 @@ func (m *MockSpawner) Spawn(_ context.Context, task db.Task, workDir string, rol
 		mockCommitInWorktree(workDir, task.ID)
 	}
 	h := &mockHandle{
-		pid:      os.Getpid(),
+		pid:      FakePID,
 		exitCode: m.ExitCode,
 		output:   m.OutputText,
 		done:     make(chan struct{}),

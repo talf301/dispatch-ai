@@ -3,7 +3,6 @@ package tests
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -114,7 +113,7 @@ type failHandle struct {
 	done chan struct{}
 }
 
-func (h *failHandle) PID() int             { return os.Getpid() }
+func (h *failHandle) PID() int             { return daemon.FakePID }
 func (h *failHandle) Wait() error          { <-h.done; return fmt.Errorf("exit code 1") }
 func (h *failHandle) Done() <-chan struct{} { return h.done }
 func (h *failHandle) Err() error           { return fmt.Errorf("exit code 1") }
