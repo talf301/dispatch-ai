@@ -31,16 +31,16 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("create db dir: %w", err)
 	}
 
-	sqlDB, err := sql.Open("sqlite3", path)
+	// busy_timeout and foreign_keys are per-connection and non-persistent, so
+	// they must be in the DSN — a PRAGMA exec only configures whichever pooled
+	// connection happens to run it. journal_mode=WAL is persisted in the file.
+	sqlDB, err := sql.Open("sqlite3", path+"?_busy_timeout=5000&_foreign_keys=on")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
-	// Set pragmas.
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=5000",
-		"PRAGMA foreign_keys=ON",
 	}
 	for _, p := range pragmas {
 		if _, err := sqlDB.Exec(p); err != nil {

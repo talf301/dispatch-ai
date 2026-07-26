@@ -110,14 +110,27 @@ func (d *DB) ClaimTask(id, assignee string) (*Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	if task.Assignee != nil {
-		return nil, fmt.Errorf("task %s is already claimed by %s", id, *task.Assignee)
-	}
-
 	oldStatus := task.Status
-	_, err = d.q.Exec("UPDATE tasks SET status = 'active', assignee = ? WHERE id = ?", assignee, id)
+
+	// Conditional update: the claim must be decided by the database, not by a
+	// read-then-write in the caller — two processes both see a NULL assignee.
+	res, err := d.q.Exec(
+		"UPDATE tasks SET status = 'active', assignee = ? WHERE id = ? AND assignee IS NULL",
+		assignee, id,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("claim task: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("claim task: %w", err)
+	}
+	if n == 0 {
+		holder := "another session"
+		if cur, err := d.GetTask(id); err == nil && cur.Assignee != nil {
+			holder = *cur.Assignee
+		}
+		return nil, fmt.Errorf("task %s is already claimed by %s", id, holder)
 	}
 
 	if err := d.addSystemNote(id, oldStatus, "active"); err != nil {

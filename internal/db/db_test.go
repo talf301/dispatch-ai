@@ -1,8 +1,11 @@
 package db
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -424,6 +427,56 @@ func TestClaimTask_AlreadyClaimed(t *testing.T) {
 	_, err = d.ClaimTask(task.ID, "bob")
 	if err == nil {
 		t.Fatal("expected error when claiming already-claimed task")
+	}
+}
+
+func TestClaimTask_ConcurrentClaimsExactlyOneWins(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	// Repeat: a lost claim needs the racing readers to overlap, which does not
+	// happen on every scheduling of a single task.
+	for round := 0; round < 50; round++ {
+		task, _ := d.AddTask("claim me", "", "", "", nil)
+
+		const claimants = 8
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var won int64
+		for i := 0; i < claimants; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				if _, err := d.ClaimTask(task.ID, fmt.Sprintf("session-%d", i)); err == nil {
+					atomic.AddInt64(&won, 1)
+				}
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		if won != 1 {
+			t.Fatalf("round %d: %d claimants succeeded, want exactly 1", round, won)
+		}
+
+		// Exactly one claim means exactly one "open → active" system note.
+		notes, err := d.GetNotes(task.ID)
+		if err != nil {
+			t.Fatalf("GetNotes: %v", err)
+		}
+		statusNotes := 0
+		for _, n := range notes {
+			if n.Author != nil && *n.Author == "system" {
+				statusNotes++
+			}
+		}
+		if statusNotes != 1 {
+			t.Fatalf("round %d: %d system notes, want 1", round, statusNotes)
+		}
 	}
 }
 
