@@ -38,6 +38,35 @@ func TestDetectDefaultBranch(t *testing.T) {
 	}
 }
 
+func TestDetectDefaultBranch_IgnoresCheckedOutBranch(t *testing.T) {
+	repo := initTestRepo(t)
+
+	// A feature branch checked out must not become "the default branch".
+	cmd := exec.Command("git", "checkout", "-b", "feature/wip")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("checkout: %v\n%s", err, out)
+	}
+
+	branch, err := DetectDefaultBranch(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if branch != "main" && branch != "master" {
+		t.Errorf("default branch = %q, want main or master", branch)
+	}
+
+	// With no main/master and no origin, it must fail rather than guess.
+	for _, name := range []string{"main", "master"} {
+		cmd := exec.Command("git", "branch", "-D", name)
+		cmd.Dir = repo
+		cmd.Run()
+	}
+	if got, err := DetectDefaultBranch(repo); err == nil {
+		t.Errorf("got %q, want an error when no default branch can be determined", got)
+	}
+}
+
 func TestCreateWorktree(t *testing.T) {
 	repo := initTestRepo(t)
 	wtDir := filepath.Join(t.TempDir(), "wt-test")

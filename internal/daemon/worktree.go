@@ -14,26 +14,33 @@ func BranchExists(repoDir, branchName string) bool {
 	return cmd.Run() == nil
 }
 
+// DetectDefaultBranch resolves the repository's default branch: origin/HEAD
+// first, then a well-known remote branch, then a well-known local branch.
+// It deliberately never falls back to the checked-out branch — that silently
+// based every worktree on whatever the developer happened to have out. Repos
+// that fit none of these need --base-branch (Config.BaseBranch), which every
+// caller already prefers over this function.
 func DetectDefaultBranch(repoDir string) (string, error) {
+	const originPrefix = "refs/remotes/origin/"
+
 	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
 	cmd.Dir = repoDir
 	if out, err := cmd.Output(); err == nil {
 		ref := strings.TrimSpace(string(out))
-		parts := strings.Split(ref, "/")
-		return parts[len(parts)-1], nil
+		if branch := strings.TrimPrefix(ref, originPrefix); branch != ref && branch != "" {
+			return branch, nil
+		}
 	}
 
-	cmd = exec.Command("git", "branch", "--show-current")
-	cmd.Dir = repoDir
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("detect default branch: %w", err)
+	for _, prefix := range []string{originPrefix, "refs/heads/"} {
+		for _, name := range []string{"main", "master"} {
+			if BranchExists(repoDir, prefix+name) {
+				return name, nil
+			}
+		}
 	}
-	branch := strings.TrimSpace(string(out))
-	if branch == "" {
-		return "main", nil
-	}
-	return branch, nil
+
+	return "", fmt.Errorf("detect default branch in %s: no origin/HEAD and no main/master branch — set --base-branch", repoDir)
 }
 
 func CreateWorktree(repoDir, wtDir, branchName, baseBranch string) error {
