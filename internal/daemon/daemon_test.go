@@ -44,6 +44,35 @@ func TestDaemonConfig_Defaults(t *testing.T) {
 	}
 }
 
+func TestTaskRepoPath(t *testing.T) {
+	repo := "/repo/one"
+	task := &db.Task{ID: "abcd"}
+
+	one := &Daemon{repos: map[string]config.RepoConfig{repo: {Path: repo}}}
+	got, err := one.taskRepoPath(task)
+	if err != nil || got != repo {
+		t.Errorf("single repo: got (%q, %v), want (%q, nil)", got, err, repo)
+	}
+
+	two := &Daemon{repos: map[string]config.RepoConfig{
+		repo:      {Path: repo},
+		"/repo/2": {Path: "/repo/2"},
+	}}
+	if got, err := two.taskRepoPath(task); err == nil {
+		t.Errorf("two repos: got %q, want an error rather than a guess", got)
+	}
+
+	explicit := "/repo/2"
+	if got, err := two.taskRepoPath(&db.Task{ID: "abcd", Repo: &explicit}); err != nil || got != explicit {
+		t.Errorf("explicit repo: got (%q, %v), want (%q, nil)", got, err, explicit)
+	}
+
+	none := &Daemon{repos: map[string]config.RepoConfig{}}
+	if got, err := none.taskRepoPath(task); err == nil {
+		t.Errorf("no repos: got %q, want an error rather than the daemon cwd", got)
+	}
+}
+
 func TestAdoptedHandle_CleanExitIsNotAFailure(t *testing.T) {
 	exitedPID := func(t *testing.T) int {
 		t.Helper()

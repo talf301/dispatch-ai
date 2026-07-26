@@ -128,8 +128,12 @@ func (d *Daemon) recoverActive() {
 			continue
 		}
 
-		// Record repo mapping for recovered tasks.
-		repoPath := d.taskRepoPath(&task)
+		// Record repo mapping for recovered tasks. An unresolvable repo is a
+		// bookkeeping problem — log it, but don't block a live worker over it.
+		repoPath, err := d.taskRepoPath(&task)
+		if err != nil {
+			d.logger.Printf("recovery: task %s: %v", task.ID, err)
+		}
 
 		if isProcessAlive(pid) {
 			d.logger.Printf("recovery: task %s has live worker (pid %d), re-adopting", task.ID, pid)
@@ -195,17 +199,19 @@ func (h *adoptedHandle) Err() error           { <-h.done; return h.exitErr }
 func (h *adoptedHandle) Wait() error          { return h.Err() }
 func (h *adoptedHandle) Output() string       { return h.output }
 
-// taskRepoPath returns the repo path for a task, falling back to the first
-// configured repo if the task has no repo field set.
-func (d *Daemon) taskRepoPath(task *db.Task) string {
+// taskRepoPath returns the repo path for a task. A task without a repo field
+// only resolves when exactly one repo is configured — with several, map
+// iteration order would pick a different one on every call.
+func (d *Daemon) taskRepoPath(task *db.Task) (string, error) {
 	if task.Repo != nil {
-		return *task.Repo
+		return *task.Repo, nil
 	}
-	// Fallback: use the first (only) repo if there's exactly one.
-	for path := range d.repos {
-		return path
+	if len(d.repos) == 1 {
+		for path := range d.repos {
+			return path, nil
+		}
 	}
-	return "."
+	return "", fmt.Errorf("task %s has no repo set and %d repos are configured", task.ID, len(d.repos))
 }
 
 // baseBranchFor returns the branch a task's worktree branch is based on:
@@ -217,7 +223,10 @@ func (d *Daemon) baseBranchFor(task *db.Task) (string, error) {
 	if d.baseBranch != "" {
 		return d.baseBranch, nil
 	}
-	repoPath := d.taskRepoPath(task)
+	repoPath, err := d.taskRepoPath(task)
+	if err != nil {
+		return "", err
+	}
 	return DetectDefaultBranch(repoPath)
 }
 
@@ -236,7 +245,11 @@ func (d *Daemon) spawnReady() {
 	}
 
 	for _, task := range tasks {
-		repoPath := d.taskRepoPath(&task)
+		repoPath, err := d.taskRepoPath(&task)
+		if err != nil {
+			d.logger.Printf("spawn: %v, skipping", err)
+			continue
+		}
 
 		// Check per-repo capacity.
 		repoCfg, ok := d.repos[repoPath]
@@ -733,15 +746,17 @@ func (d *Daemon) cleanOrphanedWorktrees() {
 			// Determine repo for this orphaned worktree.
 			repoPath := d.workerRepo[entry.Name()]
 			if repoPath == "" {
-				// Look up from DB if not tracked.
-				if task, err := d.db.GetTask(entry.Name()); err == nil {
-					repoPath = d.taskRepoPath(task)
-				} else {
-					// Fallback to first repo.
-					for p := range d.repos {
-						repoPath = p
-						break
-					}
+				// Look up from DB if not tracked. Guessing a repo here would
+				// run `git worktree remove` against an unrelated repository.
+				task, err := d.db.GetTask(entry.Name())
+				if err != nil {
+					d.logger.Printf("cleanup: worktree %s: %v, leaving in place", entry.Name(), err)
+					continue
+				}
+				repoPath, err = d.taskRepoPath(task)
+				if err != nil {
+					d.logger.Printf("cleanup: worktree %s: %v, leaving in place", entry.Name(), err)
+					continue
 				}
 			}
 			d.logger.Printf("cleanup: removing orphaned worktree %s", entry.Name())

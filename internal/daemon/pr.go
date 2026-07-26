@@ -85,7 +85,11 @@ func (d *Daemon) triggerPR(ac *db.AutoComplete) {
 		return
 	}
 
-	repoPath := d.taskRepoPath(parent)
+	repoPath, err := d.taskRepoPath(parent)
+	if err != nil {
+		d.logger.Printf("trigger-pr: %v", err)
+		return
+	}
 	if _, ok := d.repos[repoPath]; !ok {
 		d.logger.Printf("trigger-pr: parent %s references unknown repo %q", ac.ParentID, repoPath)
 		return
@@ -113,7 +117,11 @@ func (d *Daemon) checkPendingPRs() {
 	}
 
 	for _, parent := range parents {
-		repoPath := d.taskRepoPath(&parent)
+		repoPath, err := d.taskRepoPath(&parent)
+		if err != nil {
+			d.logger.Printf("pending-prs: %v, skipping", err)
+			continue
+		}
 		if _, ok := d.repos[repoPath]; !ok {
 			d.logger.Printf("pending-prs: parent %s references unknown repo %q, skipping", parent.ID, repoPath)
 			continue
