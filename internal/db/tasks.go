@@ -166,55 +166,75 @@ type AutoComplete struct {
 }
 
 // DoneTask marks a task as done and clears the assignee.
-// Returns the completed task, an optional AutoComplete (non-nil when a parent
-// was auto-completed), and an error.
-func (d *DB) DoneTask(id string) (*Task, *AutoComplete, error) {
+// Returns the completed task and every ancestor that auto-completed as a
+// result — the immediate parent first, then its parent, and so on.
+func (d *DB) DoneTask(id string) (*Task, []AutoComplete, error) {
+	_, acs, err := d.doneTask(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	t, err := d.GetTask(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	return t, acs, nil
+}
+
+// doneTask performs the transition and recurses into auto-completing ancestors.
+// transitioned is false when the task was already done: the UPDATE is
+// conditional, so when two children finish at once and both observe zero
+// remaining not-done siblings, only the one that actually moved the parent
+// reports its AutoComplete.
+func (d *DB) doneTask(id string) (transitioned bool, acs []AutoComplete, err error) {
 	task, err := d.GetTask(id)
 	if err != nil {
-		return nil, nil, err
+		return false, nil, err
 	}
 
-	oldStatus := task.Status
-	_, err = d.q.Exec("UPDATE tasks SET status = 'done', assignee = NULL WHERE id = ?", id)
+	res, err := d.q.Exec("UPDATE tasks SET status = 'done', assignee = NULL WHERE id = ? AND status != 'done'", id)
 	if err != nil {
-		return nil, nil, fmt.Errorf("done task: %w", err)
+		return false, nil, fmt.Errorf("done task: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, nil, fmt.Errorf("done task: %w", err)
+	}
+	if n == 0 {
+		return false, nil, nil // already done
 	}
 
-	if err := d.addSystemNote(id, oldStatus, "done"); err != nil {
-		return nil, nil, err
+	if err := d.addSystemNote(id, task.Status, "done"); err != nil {
+		return true, nil, err
+	}
+
+	if task.ParentID == nil {
+		return true, nil, nil
 	}
 
 	// Auto-complete parent if all children are done.
 	// Note: the count query runs after the UPDATE above, so this task's status
 	// is already 'done' in the DB and correctly excluded from the count.
-	var ac *AutoComplete
-	if task.ParentID != nil {
-		var notDone int
-		err := d.q.QueryRow(
-			`SELECT COUNT(*) FROM tasks WHERE parent_id = ? AND status != 'done'`,
-			*task.ParentID,
-		).Scan(&notDone)
-		if err == nil && notDone == 0 {
-			// Fetch parent to get its Repo before auto-completing.
-			parent, err := d.GetTask(*task.ParentID)
-			if err != nil {
-				return nil, nil, fmt.Errorf("auto-complete parent %s: fetch: %w", *task.ParentID, err)
-			}
-			ac = &AutoComplete{
-				ParentID: parent.ID,
-				Repo:     parent.Repo,
-			}
-			if _, _, err := d.DoneTask(*task.ParentID); err != nil {
-				return nil, nil, fmt.Errorf("auto-complete parent %s: %w", *task.ParentID, err)
-			}
-		}
+	var notDone int
+	if err := d.q.QueryRow(
+		`SELECT COUNT(*) FROM tasks WHERE parent_id = ? AND status != 'done'`,
+		*task.ParentID,
+	).Scan(&notDone); err != nil || notDone > 0 {
+		return true, nil, nil
 	}
 
-	t, err := d.GetTask(id)
+	// Fetch parent to get its Repo before auto-completing.
+	parent, err := d.GetTask(*task.ParentID)
 	if err != nil {
-		return nil, nil, err
+		return true, nil, fmt.Errorf("auto-complete parent %s: fetch: %w", *task.ParentID, err)
 	}
-	return t, ac, nil
+	parentDone, ancestors, err := d.doneTask(parent.ID)
+	if err != nil {
+		return true, nil, fmt.Errorf("auto-complete parent %s: %w", parent.ID, err)
+	}
+	if parentDone {
+		acs = append([]AutoComplete{{ParentID: parent.ID, Repo: parent.Repo}}, ancestors...)
+	}
+	return true, acs, nil
 }
 
 // BlockTask marks a task as blocked with a reason and clears the assignee.

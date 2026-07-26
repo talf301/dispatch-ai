@@ -941,11 +941,11 @@ func TestDoneTask_AutoCompletesParent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoneTask child2: %v", err)
 	}
-	if ac == nil {
-		t.Fatal("expected AutoComplete to be non-nil when parent auto-completes")
+	if len(ac) != 1 {
+		t.Fatalf("expected 1 AutoComplete when parent auto-completes, got %d", len(ac))
 	}
-	if ac.ParentID != parent.ID {
-		t.Errorf("expected AutoComplete.ParentID %q, got %q", parent.ID, ac.ParentID)
+	if ac[0].ParentID != parent.ID {
+		t.Errorf("expected AutoComplete.ParentID %q, got %q", parent.ID, ac[0].ParentID)
 	}
 
 	p, err = d.GetTask(parent.ID)
@@ -989,8 +989,8 @@ func TestDoneTask_ParentNotCompletedWithOpenChildren(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoneTask child1: %v", err)
 	}
-	if ac != nil {
-		t.Errorf("expected AutoComplete to be nil when siblings are still open, got %+v", ac)
+	if len(ac) != 0 {
+		t.Errorf("expected no AutoComplete when siblings are still open, got %+v", ac)
 	}
 
 	p, err := d.GetTask(parent.ID)
@@ -1072,14 +1072,80 @@ func TestDoneTask_AutoCompleteIncludesRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoneTask child: %v", err)
 	}
-	if ac == nil {
-		t.Fatal("expected AutoComplete to be non-nil")
+	if len(ac) != 1 {
+		t.Fatalf("expected 1 AutoComplete, got %d", len(ac))
 	}
-	if ac.ParentID != parent.ID {
-		t.Errorf("expected ParentID %q, got %q", parent.ID, ac.ParentID)
+	if ac[0].ParentID != parent.ID {
+		t.Errorf("expected ParentID %q, got %q", parent.ID, ac[0].ParentID)
 	}
-	if ac.Repo == nil || *ac.Repo != repo {
-		t.Errorf("expected Repo %q, got %v", repo, ac.Repo)
+	if ac[0].Repo == nil || *ac[0].Repo != repo {
+		t.Errorf("expected Repo %q, got %v", repo, ac[0].Repo)
+	}
+}
+
+func TestDoneTask_ReturnsAllAutoCompletedAncestors(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	grandparent, _ := d.AddTask("grandparent", "", "", "", nil)
+	parent, _ := d.AddTask("parent", "", grandparent.ID, "", nil)
+	child, _ := d.AddTask("child", "", parent.ID, "", nil)
+
+	_, acs, err := d.DoneTask(child.ID)
+	if err != nil {
+		t.Fatalf("DoneTask child: %v", err)
+	}
+	if len(acs) != 2 {
+		t.Fatalf("expected parent and grandparent AutoCompletes, got %+v", acs)
+	}
+	if acs[0].ParentID != parent.ID || acs[1].ParentID != grandparent.ID {
+		t.Errorf("expected [%s %s], got %+v", parent.ID, grandparent.ID, acs)
+	}
+	for _, id := range []string{parent.ID, grandparent.ID} {
+		task, _ := d.GetTask(id)
+		if task.Status != "done" {
+			t.Errorf("task %s status = %q, want done", id, task.Status)
+		}
+	}
+}
+
+func TestDoneTask_ConcurrentSiblingsAutoCompleteParentOnce(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer d.Close()
+
+	for round := 0; round < 50; round++ {
+		parent, _ := d.AddTask("parent", "", "", "", nil)
+		child1, _ := d.AddTask("child 1", "", parent.ID, "", nil)
+		child2, _ := d.AddTask("child 2", "", parent.ID, "", nil)
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var completions int64
+		for _, child := range []string{child1.ID, child2.ID} {
+			wg.Add(1)
+			go func(id string) {
+				defer wg.Done()
+				<-start
+				_, acs, err := d.DoneTask(id)
+				if err != nil {
+					t.Errorf("DoneTask %s: %v", id, err)
+					return
+				}
+				atomic.AddInt64(&completions, int64(len(acs)))
+			}(child)
+		}
+		close(start)
+		wg.Wait()
+
+		if completions != 1 {
+			t.Fatalf("round %d: parent auto-completed %d times, want 1", round, completions)
+		}
 	}
 }
 
@@ -1096,8 +1162,8 @@ func TestDoneTask_NoAutoCompleteReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoneTask: %v", err)
 	}
-	if ac != nil {
-		t.Errorf("expected nil AutoComplete for task without parent, got %+v", ac)
+	if len(ac) != 0 {
+		t.Errorf("expected no AutoComplete for task without parent, got %+v", ac)
 	}
 }
 

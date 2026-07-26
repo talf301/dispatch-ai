@@ -511,14 +511,16 @@ func (d *Daemon) handleReviewApproval(taskID string) {
 			return
 		}
 		if task.Status != "done" {
-			_, ac, err := d.db.DoneTask(taskID)
+			_, acs, err := d.db.DoneTask(taskID)
 			if err != nil {
 				d.logger.Printf("review-done: done task %s: %v", taskID, err)
 			} else {
 				d.gpSyncChild(taskID)
 			}
-			if ac != nil {
-				d.triggerPR(ac)
+			// Every ancestor that completed needs its own PR, not just the
+			// immediate parent.
+			for i := range acs {
+				d.triggerPR(&acs[i])
 			}
 		}
 		if err := RemoveWorktree(repoPath, wtDir, branchName, true); err != nil {
