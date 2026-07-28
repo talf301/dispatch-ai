@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/dispatch-ai/dispatch/internal/agentctx"
 	"github.com/dispatch-ai/dispatch/internal/daemon"
 	"github.com/dispatch-ai/dispatch/internal/db"
 	"github.com/dispatch-ai/dispatch/internal/dedup"
@@ -103,7 +104,7 @@ func NewGoCmd() *cobra.Command {
 			if err := d.SetRuntime(task.ID, workdir, ws, tab, pane); err != nil {
 				exitError(cmd, err)
 			}
-			if err := h.RunPane(pane, []string{"claude", thought}); err != nil {
+			if err := h.RunPane(pane, agentctx.ClaudeArgs(task.ID, thought)); err != nil {
 				fmt.Fprintln(os.Stderr, "warning: could not start claude:", err)
 			}
 			h.FocusTab(tab)
@@ -316,7 +317,7 @@ func NewResumeCmd() *cobra.Command {
 				exitError(cmd, err)
 			}
 			// Resume the conversation rather than restating the thought.
-			if err := h.RunPane(pane, []string{"claude", "--continue"}); err != nil {
+			if err := h.RunPane(pane, agentctx.ClaudeArgs(task.ID, "--continue")); err != nil {
 				fmt.Fprintln(os.Stderr, "warning: could not start claude:", err)
 			}
 			h.FocusTab(tab)

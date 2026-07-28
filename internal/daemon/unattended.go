@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dispatch-ai/dispatch/internal/agentctx"
 	"github.com/dispatch-ai/dispatch/internal/db"
 	"github.com/dispatch-ai/dispatch/internal/mux"
 )
@@ -150,8 +151,9 @@ func (d *Daemon) ensurePane(t *db.Task) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// A session already lived in this workdir; continue its conversation.
-	if err := d.mux.RunPane(pane, []string{"claude", "--continue"}); err != nil {
+	// A session already lived in this workdir; continue its conversation
+	// with the dispatch context reattached.
+	if err := d.mux.RunPane(pane, agentctx.ClaudeArgs(t.ID, "--continue")); err != nil {
 		return "", err
 	}
 	if err := d.db.SetRuntime(t.ID, *t.Workdir, ws, tab, pane); err != nil {
