@@ -7,6 +7,7 @@ package agentctx
 import (
 	_ "embed"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -19,6 +20,9 @@ func SessionPrompt(taskID string) string {
 }
 
 func WriteSessionPrompt(path, taskID string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
 	return os.WriteFile(path, []byte(SessionPrompt(taskID)), 0o600)
 }
 

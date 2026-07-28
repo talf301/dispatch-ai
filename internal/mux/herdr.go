@@ -119,8 +119,9 @@ func (h Herdr) RunPane(paneID string, argv []string) error {
 	return h.run(nil, args...)
 }
 
-func (h Herdr) StartAgent(name, kind, paneID string, argv []string) error {
-	args := []string{"agent", "start", name, "--kind", kind, "--pane", paneID, "--timeout", "30000", "--"}
+func (h Herdr) StartAgent(name, kind, paneID string, timeout time.Duration, argv []string) error {
+	args := []string{"agent", "start", name, "--kind", kind, "--pane", paneID,
+		"--timeout", fmt.Sprintf("%d", timeout.Milliseconds()), "--"}
 	return h.run(nil, append(args, argv...)...)
 }
 
