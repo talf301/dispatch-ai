@@ -9,6 +9,7 @@ import (
 
 	"github.com/dispatch-ai/dispatch/internal/daemon"
 	"github.com/dispatch-ai/dispatch/internal/db"
+	"github.com/dispatch-ai/dispatch/internal/dedup"
 	"github.com/dispatch-ai/dispatch/internal/llm"
 	"github.com/dispatch-ai/dispatch/internal/mux"
 	"github.com/spf13/cobra"
@@ -31,6 +32,7 @@ func worktreeDir(taskID string) string {
 // NewGoCmd is the capture path: one command, thought to running agent.
 func NewGoCmd() *cobra.Command {
 	var here bool
+	var noDedup bool
 	var repoFlag string
 	cmd := &cobra.Command{
 		Use:   "go <thought>",
@@ -40,6 +42,12 @@ func NewGoCmd() *cobra.Command {
 			thought := args[0]
 			d := openDB(cmd)
 			defer d.Close()
+
+			if !noDedup {
+				if err := checkDedup(d, thought); err != nil {
+					exitError(cmd, err)
+				}
+			}
 
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -113,8 +121,66 @@ func NewGoCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&here, "here", false, "run in place (dirty tree, no worktree)")
+	cmd.Flags().BoolVar(&noDedup, "no-dedup", false, "skip the similar-closed-work check")
 	cmd.Flags().StringVarP(&repoFlag, "repo", "r", "", "repo path (default: inferred from cwd)")
 	return cmd
+}
+
+// checkDedup is the two-stage capture-time dedup (M3). Stage 1 is free and
+// local; the judge only runs when retrieval finds something, so the common
+// case costs no tokens and no latency.
+func checkDedup(d *db.DB, thought string) error {
+	closed, err := d.ClosedTasks()
+	if err != nil {
+		return err
+	}
+	var pool []dedup.Candidate
+	for _, c := range closed {
+		pool = append(pool, dedup.Candidate{
+			ID: c.ID, Text: c.Text, Status: c.Status,
+			Reason: c.KillReason, Closed: c.UpdatedAt,
+		})
+	}
+	cands := dedup.TopCandidates(thought, pool, 5)
+	if len(cands) == 0 {
+		return nil
+	}
+
+	raw, err := llm.Oneshot(dedup.JudgePrompt(thought, cands))
+	if err != nil {
+		return fmt.Errorf("dedup judge failed (rerun with --no-dedup to skip): %w", err)
+	}
+	matches, err := dedup.ParseJudge(raw)
+	if err != nil {
+		return err // hard error, raw output included — no salvage parsing
+	}
+	if len(matches) == 0 {
+		return nil
+	}
+
+	byID := make(map[string]dedup.Candidate, len(cands))
+	for _, c := range cands {
+		byID[c.ID] = c
+	}
+	fmt.Fprintln(os.Stderr, "\nSimilar closed work")
+	for _, m := range matches {
+		c, ok := byID[m.ID]
+		if !ok {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "\n  %s  %q\n        %s %s: %s\n", c.ID, c.Text, c.Status, c.Closed, m.Reason)
+	}
+
+	if stat, _ := os.Stdin.Stat(); stat == nil || stat.Mode()&os.ModeCharDevice == 0 {
+		return fmt.Errorf("similar closed work found; rerun with --no-dedup to start anyway")
+	}
+	fmt.Fprint(os.Stderr, "\n  Still start? y/N ")
+	var answer string
+	fmt.Scanln(&answer)
+	if strings.ToLower(strings.TrimSpace(answer)) != "y" {
+		return fmt.Errorf("not started")
+	}
+	return nil
 }
 
 // NewAdoptCmd registers a session already running in the current herdr pane.
