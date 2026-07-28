@@ -142,9 +142,10 @@ func NewGoCmd() *cobra.Command {
 	return cmd
 }
 
-// attemptTimeout bounds a single herdr readiness wait so the outer deadline
-// below can actually retry: at 30s the two would race, and a pane that isn't
-// ready yet would consume the whole retry budget on its first attempt.
+// startAgentAttemptTimeout bounds a single herdr readiness wait so the outer
+// deadline below can actually retry: at 30s the two would race, and a pane
+// that isn't ready yet would consume the whole retry budget on its first
+// attempt.
 const startAgentAttemptTimeout = 2 * time.Second
 
 func startAgent(h mux.Herdr, pane, taskID, sessionPath string) error {
