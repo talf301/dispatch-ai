@@ -30,7 +30,7 @@ One command, thought to running agent:
 2. Checks the closed ledger for similar past work (see Dedup below); if a judge call confirms a match, you see it — with why it was killed — and confirm with `y` or walk away.
 3. Inserts a `live` task. The **thought is stored verbatim and is immutable**; a display label starts as a truncation and is replaced by a ≤3-word generated one after the pane is focused.
 4. Creates a git worktree at `~/.dispatch/wt/<id>` on branch `dispatch/<id>` (`--here` skips this and runs in your current tree).
-5. Opens a herdr tab in the repo's workspace (workspace = repo, tab = task, pane = agent), launches `claude` with your thought as the opening message, and focuses you into it.
+5. Opens a herdr tab in the repo's workspace (workspace = repo, tab = task, pane = agent) and focuses you into it, then starts `claude` there (retrying while the pane comes up) and sends your thought as the first message once the agent is ready.
 
 The session is launched with an injected dispatch contract (`internal/agentctx/session.md`), so it knows its task ID, how to file proposals, and what the unattended protocol expects — regardless of the user's global agent config.
 

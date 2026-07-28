@@ -31,6 +31,14 @@ func worktreeDir(taskID string) string {
 	return filepath.Join(home, ".dispatch", "wt", taskID)
 }
 
+// sessionFilePath is where the session's dispatch context is written. It
+// lives outside any repo working directory (including --here captures) so
+// captures never leave a dotfile in the user's real project tree.
+func sessionFilePath(taskID string) string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".dispatch", "sessions", taskID+".md")
+}
+
 // NewGoCmd is the capture path: one command, thought to running agent.
 func NewGoCmd() *cobra.Command {
 	var here bool
@@ -106,7 +114,7 @@ func NewGoCmd() *cobra.Command {
 				exitError(cmd, err)
 			}
 			h.FocusTab(tab)
-			sessionPath := filepath.Join(workdir, ".dispatch-session.md")
+			sessionPath := sessionFilePath(task.ID)
 			if err := agentctx.WriteSessionPrompt(sessionPath, task.ID); err != nil {
 				exitError(cmd, fmt.Errorf("write session context: %w", err))
 			}
@@ -134,7 +142,13 @@ func NewGoCmd() *cobra.Command {
 	return cmd
 }
 
-func startAgent(h mux.Herdr, pane, taskID, sessionPath string) error {
+// startAgentAttemptTimeout bounds a single herdr readiness wait so the outer
+// deadline below can actually retry: at 30s the two would race, and a pane
+// that isn't ready yet would consume the whole retry budget on its first
+// attempt.
+const startAgentAttemptTimeout = 2 * time.Second
+
+func startAgent(h mux.Mux, pane, taskID, sessionPath string) error {
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	deadline := time.NewTimer(30 * time.Second)
@@ -142,7 +156,7 @@ func startAgent(h mux.Herdr, pane, taskID, sessionPath string) error {
 	args := []string{"--append-system-prompt-file", sessionPath}
 	var lastErr error
 	for {
-		if err := h.StartAgent("dispatch-"+taskID, "claude", pane, args); err == nil {
+		if err := h.StartAgent("dispatch-"+taskID, "claude", pane, startAgentAttemptTimeout, args); err == nil {
 			return nil
 		} else {
 			lastErr = err
