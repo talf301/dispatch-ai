@@ -188,6 +188,38 @@ func (d *DB) BoardTasks() ([]Task, error) {
 	return out, rows.Err()
 }
 
+// ClosedTask is the slice of a closed row the dedup scorer needs.
+type ClosedTask struct {
+	ID         string
+	Text       string // thought, falling back to title for pre-v2 rows
+	Status     string
+	KillReason string
+	Acceptance string
+	UpdatedAt  string
+}
+
+// ClosedTasks returns done, killed, and parked tasks for dedup retrieval.
+func (d *DB) ClosedTasks() ([]ClosedTask, error) {
+	rows, err := d.q.Query(
+		`SELECT id,
+		        CASE WHEN thought != '' THEN thought ELSE title END,
+		        status, COALESCE(kill_reason, ''), COALESCE(acceptance, ''), updated_at
+		 FROM tasks WHERE status IN ('done','killed','parked')`)
+	if err != nil {
+		return nil, fmt.Errorf("closed tasks: %w", err)
+	}
+	defer rows.Close()
+	var out []ClosedTask
+	for rows.Next() {
+		var c ClosedTask
+		if err := rows.Scan(&c.ID, &c.Text, &c.Status, &c.KillReason, &c.Acceptance, &c.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan closed task: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // newTaskID generates a unique 4-char hex ID with collision checking.
 func (d *DB) newTaskID() (string, error) {
 	for i := 0; i < 100; i++ {
