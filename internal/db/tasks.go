@@ -30,6 +30,11 @@ type Task struct {
 	HerdrPane    *string `json:"herdr_pane,omitempty"`
 	KillReason   *string `json:"kill_reason,omitempty"`
 	LastActivity *string `json:"last_activity,omitempty"`
+
+	// M5 (walk-away) fields.
+	AcceptanceKind *string `json:"acceptance_kind,omitempty"` // report | ratchet
+	Acceptance     *string `json:"acceptance,omitempty"`
+	RejectCount    int     `json:"reject_count,omitempty"`
 }
 
 // AddTask creates an open task with a unique 4-char hex ID.

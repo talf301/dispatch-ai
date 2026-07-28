@@ -30,14 +30,15 @@ func TruncateLabel(thought string) string {
 const taskColumnsV2 = `id, title, description, status, block_reason, assignee,
 	parent_id, repo, created_at, updated_at,
 	thought, label, mode, workdir, herdr_ws, herdr_tab, herdr_pane,
-	kill_reason, last_activity`
+	kill_reason, last_activity, acceptance_kind, acceptance, reject_count`
 
 func (d *DB) scanTaskV2(row interface{ Scan(...any) error }) (*Task, error) {
 	t := &Task{}
 	err := row.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.BlockReason,
 		&t.Assignee, &t.ParentID, &t.Repo, &t.CreatedAt, &t.UpdatedAt,
 		&t.Thought, &t.Label, &t.Mode, &t.Workdir, &t.HerdrWs, &t.HerdrTab,
-		&t.HerdrPane, &t.KillReason, &t.LastActivity)
+		&t.HerdrPane, &t.KillReason, &t.LastActivity,
+		&t.AcceptanceKind, &t.Acceptance, &t.RejectCount)
 	if err != nil {
 		return nil, err
 	}
@@ -163,6 +164,75 @@ func (d *DB) transition(taskID, from, to string) (*Task, error) {
 		return nil, err
 	}
 	return d.GetTaskV2(taskID)
+}
+
+// PromoteTask moves a live task to unattended — the only gated transition on
+// the human path. The written acceptance is the entire ceremony budget:
+// without one, the daemon has nothing to gate the merge on, so this refuses.
+// In-place tasks can never be promoted (they'd auto-merge a dirty tree).
+func (d *DB) PromoteTask(taskID, kind, acceptance string) (*Task, error) {
+	if kind != "report" && kind != "ratchet" {
+		return nil, fmt.Errorf("acceptance kind must be report or ratchet, got %q", kind)
+	}
+	if strings.TrimSpace(acceptance) == "" {
+		return nil, fmt.Errorf("promote requires an acceptance condition")
+	}
+	t, err := d.GetTaskV2(taskID)
+	if err != nil {
+		return nil, err
+	}
+	if t.Status != "live" {
+		return nil, fmt.Errorf("task %s is %s; only live tasks promote", taskID, t.Status)
+	}
+	if t.Mode == nil || *t.Mode != "worktree" {
+		return nil, fmt.Errorf("task %s runs in place; in-place work cannot be promoted (no branch to merge)", taskID)
+	}
+	_, err = d.q.Exec(
+		`UPDATE tasks SET status = 'unattended', acceptance_kind = ?, acceptance = ?,
+		        reject_count = 0
+		 WHERE id = ?`, kind, acceptance, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("promote: %w", err)
+	}
+	if err := d.addSystemNote(taskID, "live", "unattended"); err != nil {
+		return nil, err
+	}
+	return d.GetTaskV2(taskID)
+}
+
+// UnattendedTasks returns tasks the daemon owns.
+func (d *DB) UnattendedTasks() ([]Task, error) {
+	rows, err := d.q.Query(
+		`SELECT ` + taskColumnsV2 + ` FROM tasks WHERE status = 'unattended'`)
+	if err != nil {
+		return nil, fmt.Errorf("unattended tasks: %w", err)
+	}
+	defer rows.Close()
+	var out []Task
+	for rows.Next() {
+		t, err := d.scanTaskV2(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan unattended: %w", err)
+		}
+		out = append(out, *t)
+	}
+	return out, rows.Err()
+}
+
+// IncrementRejectCount bumps the reviewer-rejection counter and returns the
+// new value. The daemon blocks the task at the cap rather than burning
+// tokens on an unbounded reject/redo loop overnight.
+func (d *DB) IncrementRejectCount(taskID string) (int, error) {
+	if _, err := d.q.Exec(
+		"UPDATE tasks SET reject_count = reject_count + 1 WHERE id = ?", taskID); err != nil {
+		return 0, fmt.Errorf("increment reject count: %w", err)
+	}
+	var n int
+	if err := d.q.QueryRow(
+		"SELECT reject_count FROM tasks WHERE id = ?", taskID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("read reject count: %w", err)
+	}
+	return n, nil
 }
 
 // BoardTasks returns everything the board renders: all open v2 work plus
