@@ -33,7 +33,8 @@ const (
 type lane int
 
 const (
-	laneNeedsYou lane = iota
+	laneStale lane = iota
+	laneNeedsYou
 	laneLive
 	laneUnattended
 	laneParked
@@ -41,6 +42,7 @@ const (
 )
 
 var laneLabels = map[lane]string{
+	laneStale:      "Stale · resume or kill",
 	laneNeedsYou:   "Needs you",
 	laneLive:       "Live now",
 	laneUnattended: "Unattended",
@@ -51,6 +53,7 @@ var laneLabels = map[lane]string{
 type row struct {
 	task  db.Task
 	agent string // herdr agent state for the task's pane, "" if none
+	badge string // lane-specific badge override (e.g. "idle 6d")
 }
 
 type Model struct {
@@ -68,7 +71,14 @@ type Model struct {
 	dtBin     string // path to the dt binary (os.Executable)
 	width     int
 	height    int
+
+	// Commit-time cache for staleness: workdir → HEAD commit time.
+	// Refreshed every commitCacheTTL, not every 2s tick.
+	commits   map[string]time.Time
+	commitsAt time.Time
 }
+
+const commitCacheTTL = time.Minute
 
 func New(store *db.DB, m mux.Mux, dtBin string) Model {
 	ti := textinput.New()
@@ -82,8 +92,10 @@ func New(store *db.DB, m mux.Mux, dtBin string) Model {
 
 type tickMsg time.Time
 type boardMsg struct {
-	rows map[lane][]row
-	err  error
+	rows      map[lane][]row
+	commits   map[string]time.Time
+	commitsAt time.Time
+	err       error
 }
 type dtDoneMsg struct {
 	verb string
@@ -95,6 +107,7 @@ func tick() tea.Cmd {
 }
 
 func (m Model) refresh() tea.Cmd {
+	commits, commitsAt := m.commits, m.commitsAt
 	return func() tea.Msg {
 		tasks, err := m.store.BoardTasks()
 		if err != nil {
@@ -106,16 +119,38 @@ func (m Model) refresh() tea.Cmd {
 		if err != nil {
 			states = nil // herdr down: board still renders from SQLite
 		}
+
+		now := time.Now()
+		if now.Sub(commitsAt) > commitCacheTTL {
+			commits = make(map[string]time.Time)
+			for _, t := range tasks {
+				if t.Status == "live" && t.Workdir != nil {
+					commits[*t.Workdir] = lastCommitTime(*t.Workdir)
+				}
+			}
+			commitsAt = now
+		}
+
+		threshold := staleAfter()
 		rows := make(map[lane][]row)
 		for _, t := range tasks {
 			agent := ""
 			if t.HerdrPane != nil {
 				agent = states[*t.HerdrPane]
 			}
+			var commit time.Time
+			if t.Workdir != nil {
+				commit = commits[*t.Workdir]
+			}
+			r := row{task: t, agent: agent}
 			l := classify(t, agent)
-			rows[l] = append(rows[l], row{task: t, agent: agent})
+			if l == laneLive && isStale(t, agent, commit, now, threshold) {
+				l = laneStale
+				r.badge = staleDays(t, commit, now)
+			}
+			rows[l] = append(rows[l], r)
 		}
-		return boardMsg{rows: rows}
+		return boardMsg{rows: rows, commits: commits, commitsAt: commitsAt}
 	}
 }
 
@@ -172,6 +207,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.rows = msg.rows
+		m.commits, m.commitsAt = msg.commits, msg.commitsAt
 		m.flat = m.selectable()
 		if m.cursor >= len(m.flat) {
 			m.cursor = max(0, len(m.flat)-1)
@@ -195,7 +231,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // selectable returns rows in display order. Parked and closed rows are only
 // selectable when expanded.
 func (m Model) selectable() []row {
-	lanes := []lane{laneNeedsYou, laneLive, laneUnattended}
+	lanes := []lane{laneStale, laneNeedsYou, laneLive, laneUnattended}
 	if m.showAll {
 		lanes = append(lanes, laneParked, laneClosed)
 	}
@@ -283,21 +319,24 @@ func (m Model) current() (db.Task, bool) {
 }
 
 // focusCurrent jumps to the task's herdr tab. Attach is focus, not handoff:
-// the board stays alive in its own pane.
+// the board stays alive in its own pane. A live task whose tab has vanished
+// (herdr restarted, tab closed by hand) gets a fresh one resuming the
+// conversation — this is how a stale task comes back.
 func (m Model) focusCurrent() (tea.Model, tea.Cmd) {
 	t, ok := m.current()
 	if !ok {
 		return m, nil
 	}
-	if t.HerdrTab == nil || *t.HerdrTab == "" {
-		m.status = t.ID + " has no herdr tab."
-		return m, nil
+	if t.HerdrTab != nil && *t.HerdrTab != "" {
+		if err := m.mux.FocusTab(*t.HerdrTab); err == nil {
+			m.status = "Focused " + t.ID + "."
+			return m, nil
+		}
 	}
-	if err := m.mux.FocusTab(*t.HerdrTab); err != nil {
-		m.status = "Could not focus: " + err.Error()
-	} else {
-		m.status = "Focused " + t.ID + "."
+	if t.Status == "live" && t.Workdir != nil && t.Repo != nil {
+		return m, m.runDT("resume", t.ID)
 	}
+	m.status = t.ID + " has no herdr tab."
 	return m, nil
 }
 
@@ -317,7 +356,7 @@ func (m Model) View() string {
 	var b strings.Builder
 	idx := 0
 
-	for _, l := range []lane{laneNeedsYou, laneLive, laneUnattended} {
+	for _, l := range []lane{laneStale, laneNeedsYou, laneLive, laneUnattended} {
 		rows := m.rows[l]
 		if len(rows) == 0 {
 			continue
@@ -370,6 +409,8 @@ func (m Model) writeRow(b *strings.Builder, r row, focused bool) {
 	}
 	badge := r.agent
 	switch {
+	case r.badge != "":
+		badge = alertStyle.Render(r.badge)
 	case t.Status == "proposed":
 		badge = alertStyle.Render("proposed") + dimStyle.Render(" · dt reopen to approve")
 	case t.Status == "killed":

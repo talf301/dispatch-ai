@@ -199,19 +199,29 @@ func NewParkCmd() *cobra.Command {
 	}
 }
 
-// NewResumeCmd brings a parked task back: new tab in the preserved workdir.
+// NewResumeCmd brings a task back: parked tasks transition to live; live
+// tasks whose herdr tab has vanished (stale, herdr restart) get a fresh tab
+// resuming the conversation.
 func NewResumeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "resume <id>",
-		Short: "Resume a parked task",
+		Short: "Resume a parked or stale task",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			d := openDB(cmd)
 			defer d.Close()
 
-			task, err := d.ResumeTask(args[0])
+			task, err := d.GetTaskV2(args[0])
 			if err != nil {
 				exitError(cmd, err)
+			}
+			if task.Status == "parked" {
+				task, err = d.ResumeTask(args[0])
+				if err != nil {
+					exitError(cmd, err)
+				}
+			} else if task.Status != "live" {
+				exitError(cmd, fmt.Errorf("task %s is %s; only parked or live tasks resume", task.ID, task.Status))
 			}
 			if task.Workdir == nil || task.Repo == nil {
 				fmt.Printf("%s live again (no recorded workdir; start the session yourself)\n", task.ID)
