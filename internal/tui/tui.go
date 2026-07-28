@@ -31,6 +31,7 @@ const (
 	modeCommand      // : — fuzzy instruction entry
 	modeConfirm      // reviewing a proposed dt batch
 	modeBrief        // rendered what-changed digest
+	modePromote      // u — acceptance entry
 )
 
 type lane int
@@ -63,20 +64,20 @@ type Model struct {
 	store *db.DB
 	mux   mux.Mux
 
-	mode      mode
-	rows      map[lane][]row
-	flat      []row // selectable rows in lane order
-	cursor    int
-	showAll   bool // expand parked/closed lanes
-	input     textinput.Model
-	killID    string
-	status    string
-	dtBin     string // path to the dt binary (os.Executable)
-	width     int
-	height    int
-	busy      bool     // a model call is in flight
-	proposal  []string // dt batch lines awaiting confirmation
-	brief     string   // rendered digest
+	mode     mode
+	rows     map[lane][]row
+	flat     []row // selectable rows in lane order
+	cursor   int
+	showAll  bool // expand parked/closed lanes
+	input    textinput.Model
+	targetID string
+	status   string
+	dtBin    string // path to the dt binary (os.Executable)
+	width    int
+	height   int
+	busy     bool     // a model call is in flight
+	proposal []string // dt batch lines awaiting confirmation
+	brief    string   // rendered digest
 
 	// Commit-time cache for staleness: workdir → HEAD commit time.
 	// Refreshed every commitCacheTTL, not every 2s tick.
@@ -305,7 +306,7 @@ func (m Model) selectable() []row {
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.mode {
-	case modeCapture, modeKill, modeCommand:
+	case modeCapture, modeKill, modeCommand, modePromote:
 		switch msg.String() {
 		case "esc":
 			m.mode = modeBoard
@@ -323,7 +324,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			switch was {
 			case modeKill:
-				return m, m.runDT("kill", m.killID, text)
+				return m, m.runDT("kill", m.targetID, text)
+			case modePromote:
+				kind, accept, ok := strings.Cut(text, " ")
+				if !ok || (kind != "report" && kind != "ratchet") {
+					m.status = "Promote needs: report <condition>  or  ratchet <command>"
+					return m, nil
+				}
+				return m, m.runDT("promote", m.targetID, "-k", kind, "-a", accept)
 			case modeCommand:
 				m.busy = true
 				return m, func() tea.Msg {
@@ -387,7 +395,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "x":
 		if t, ok := m.current(); ok {
 			m.mode = modeKill
-			m.killID = t.ID
+			m.targetID = t.ID
 			m.input.Placeholder = "why kill " + t.ID + "?"
 			m.input.Focus()
 			return m, textinput.Blink
@@ -395,6 +403,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "p":
 		if t, ok := m.current(); ok {
 			return m, m.runDT("park", t.ID)
+		}
+	case "u":
+		if t, ok := m.current(); ok {
+			if t.Status != "live" {
+				m.status = t.ID + " is " + t.Status + "; only live tasks promote."
+				return m, nil
+			}
+			m.mode = modePromote
+			m.targetID = t.ID
+			m.input.Placeholder = "report <when is it done?>  or  ratchet <command that must exit 0>"
+			m.input.Focus()
+			return m, textinput.Blink
 		}
 	case "r":
 		if t, ok := m.current(); ok {
@@ -497,7 +517,7 @@ func (m Model) View() string {
 		b.WriteString(dimStyle.Render("Nothing in flight. Press g and type the thought.\n"))
 	}
 
-	if m.mode == modeCapture || m.mode == modeKill || m.mode == modeCommand {
+	if m.mode == modeCapture || m.mode == modeKill || m.mode == modeCommand || m.mode == modePromote {
 		b.WriteString("\n" + m.input.View() + "\n")
 	}
 	if m.busy {
@@ -506,7 +526,7 @@ func (m Model) View() string {
 	if m.status != "" {
 		b.WriteString(statusStyle.Render(m.status) + "\n")
 	}
-	b.WriteString(dimStyle.Render("\nj/k move · ⏎ focus · g capture · : command · b brief · x kill · p park · r resume · z all · q quit"))
+	b.WriteString(dimStyle.Render("\nj/k move · ⏎ focus · g capture · : command · b brief · u promote · x kill · p park · r resume · z all · q quit"))
 	return b.String()
 }
 
