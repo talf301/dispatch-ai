@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/dispatch-ai/dispatch/internal/config"
 	"github.com/dispatch-ai/dispatch/internal/db"
+	"github.com/dispatch-ai/dispatch/internal/mux"
 )
 
 // Config holds daemon configuration.
@@ -25,6 +27,10 @@ type Config struct {
 	WorktreeBase string // default ~/.dispatch/worktrees
 	SessionDir   string // path to ~/.dispatch/sessions/
 	GPEnabled    bool   // Enable GraphPilot integration (gp sync-child on task completion)
+
+	// M5: unattended v2 dispatch. Nil Mux disables it (v1 loop unaffected).
+	Mux           mux.Mux
+	ReviewerAgent string // agent CLI for acceptance reviews, default claude
 }
 
 // DefaultConfig returns configuration with defaults.
@@ -53,6 +59,13 @@ type Daemon struct {
 	reviewRound            map[string]int           // taskID -> review round count
 	noteCountAtReviewStart map[string]int           // taskID -> note count when reviewer was spawned
 	logger                 *log.Logger
+
+	// M5: unattended v2 watchers (goroutines, unlike the tick-driven v1 path).
+	mux                mux.Mux
+	reviewerAgent      string
+	sessionDir         string
+	mu                 sync.Mutex
+	watchingUnattended map[string]bool
 }
 
 // New creates a Daemon from the given config and spawner.
@@ -74,6 +87,10 @@ func New(database *db.DB, cfg Config, spawner WorkerSpawner) *Daemon {
 		reviewRound:            make(map[string]int),
 		noteCountAtReviewStart: make(map[string]int),
 		logger:                 log.New(os.Stderr, "[dispatchd] ", log.LstdFlags),
+		mux:                    cfg.Mux,
+		reviewerAgent:          cfg.ReviewerAgent,
+		sessionDir:             cfg.SessionDir,
+		watchingUnattended:     make(map[string]bool),
 	}
 
 	if cfg.GPEnabled {
@@ -687,6 +704,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-ticker.C:
 			d.spawnReady()
 			d.monitorWorkers()
+			d.scanUnattended(ctx)
 			d.checkPendingPRs()
 			d.cleanOrphanedWorktrees()
 			d.logSummary()

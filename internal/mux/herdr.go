@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // Mux is the substrate surface dispatch depends on.
@@ -27,6 +28,14 @@ type Mux interface {
 	AgentStates() (map[string]string, error)
 	// CurrentPane returns (workspaceID, tabID, paneID, cwd) of the focused pane.
 	CurrentPane() (ws, tab, pane, cwd string, err error)
+	// WaitAgent blocks until the pane's agent reaches one of the `until`
+	// states (herdr's idle/done/blocked defaults when empty) and returns the
+	// state it landed in. Event-driven — this replaces the dispatch poll.
+	WaitAgent(paneID string, timeout time.Duration, until ...string) (string, error)
+	// PromptAgent submits text to the agent running in a pane.
+	PromptAgent(paneID, text string) error
+	// CloseTab closes a tab.
+	CloseTab(tabID string) error
 }
 
 // Herdr shells out to the herdr binary, which talks to the server socket and
@@ -129,6 +138,33 @@ func (h Herdr) AgentStates() (map[string]string, error) {
 		states[a.PaneID] = a.AgentStatus
 	}
 	return states, nil
+}
+
+func (h Herdr) WaitAgent(paneID string, timeout time.Duration, until ...string) (string, error) {
+	var res struct {
+		Agent struct {
+			AgentStatus string `json:"agent_status"`
+		} `json:"agent"`
+	}
+	args := []string{"agent", "wait", paneID}
+	for _, u := range until {
+		args = append(args, "--until", u)
+	}
+	if timeout > 0 {
+		args = append(args, "--timeout", fmt.Sprintf("%d", timeout.Milliseconds()))
+	}
+	if err := h.run(&res, args...); err != nil {
+		return "", err
+	}
+	return res.Agent.AgentStatus, nil
+}
+
+func (h Herdr) CloseTab(tabID string) error {
+	return h.run(nil, "tab", "close", tabID)
+}
+
+func (h Herdr) PromptAgent(paneID, text string) error {
+	return h.run(nil, "agent", "prompt", paneID, text)
 }
 
 func (h Herdr) CurrentPane() (string, string, string, string, error) {

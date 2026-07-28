@@ -1,6 +1,8 @@
 package db
 
 import (
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -28,14 +30,15 @@ func TruncateLabel(thought string) string {
 const taskColumnsV2 = `id, title, description, status, block_reason, assignee,
 	parent_id, repo, created_at, updated_at,
 	thought, label, mode, workdir, herdr_ws, herdr_tab, herdr_pane,
-	kill_reason, last_activity`
+	kill_reason, last_activity, acceptance_kind, acceptance, reject_count`
 
 func (d *DB) scanTaskV2(row interface{ Scan(...any) error }) (*Task, error) {
 	t := &Task{}
 	err := row.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.BlockReason,
 		&t.Assignee, &t.ParentID, &t.Repo, &t.CreatedAt, &t.UpdatedAt,
 		&t.Thought, &t.Label, &t.Mode, &t.Workdir, &t.HerdrWs, &t.HerdrTab,
-		&t.HerdrPane, &t.KillReason, &t.LastActivity)
+		&t.HerdrPane, &t.KillReason, &t.LastActivity,
+		&t.AcceptanceKind, &t.Acceptance, &t.RejectCount)
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +92,18 @@ func (d *DB) GetTaskV2(taskID string) (*Task, error) {
 		return nil, fmt.Errorf("get task %q: %w", taskID, err)
 	}
 	return t, nil
+}
+
+// SetLabel updates the display label. The label is a cache: it never feeds
+// retrieval or matching — thought does.
+func (d *DB) SetLabel(taskID, label string) error {
+	if strings.TrimSpace(label) == "" {
+		return fmt.Errorf("label must not be empty")
+	}
+	if _, err := d.q.Exec("UPDATE tasks SET label = ? WHERE id = ?", label, taskID); err != nil {
+		return fmt.Errorf("set label: %w", err)
+	}
+	return nil
 }
 
 // DeleteTask removes a task row outright. Only for rolling back a capture
@@ -151,6 +166,75 @@ func (d *DB) transition(taskID, from, to string) (*Task, error) {
 	return d.GetTaskV2(taskID)
 }
 
+// PromoteTask moves a live task to unattended — the only gated transition on
+// the human path. The written acceptance is the entire ceremony budget:
+// without one, the daemon has nothing to gate the merge on, so this refuses.
+// In-place tasks can never be promoted (they'd auto-merge a dirty tree).
+func (d *DB) PromoteTask(taskID, kind, acceptance string) (*Task, error) {
+	if kind != "report" && kind != "ratchet" {
+		return nil, fmt.Errorf("acceptance kind must be report or ratchet, got %q", kind)
+	}
+	if strings.TrimSpace(acceptance) == "" {
+		return nil, fmt.Errorf("promote requires an acceptance condition")
+	}
+	t, err := d.GetTaskV2(taskID)
+	if err != nil {
+		return nil, err
+	}
+	if t.Status != "live" {
+		return nil, fmt.Errorf("task %s is %s; only live tasks promote", taskID, t.Status)
+	}
+	if t.Mode == nil || *t.Mode != "worktree" {
+		return nil, fmt.Errorf("task %s runs in place; in-place work cannot be promoted (no branch to merge)", taskID)
+	}
+	_, err = d.q.Exec(
+		`UPDATE tasks SET status = 'unattended', acceptance_kind = ?, acceptance = ?,
+		        reject_count = 0
+		 WHERE id = ?`, kind, acceptance, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("promote: %w", err)
+	}
+	if err := d.addSystemNote(taskID, "live", "unattended"); err != nil {
+		return nil, err
+	}
+	return d.GetTaskV2(taskID)
+}
+
+// UnattendedTasks returns tasks the daemon owns.
+func (d *DB) UnattendedTasks() ([]Task, error) {
+	rows, err := d.q.Query(
+		`SELECT ` + taskColumnsV2 + ` FROM tasks WHERE status = 'unattended'`)
+	if err != nil {
+		return nil, fmt.Errorf("unattended tasks: %w", err)
+	}
+	defer rows.Close()
+	var out []Task
+	for rows.Next() {
+		t, err := d.scanTaskV2(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan unattended: %w", err)
+		}
+		out = append(out, *t)
+	}
+	return out, rows.Err()
+}
+
+// IncrementRejectCount bumps the reviewer-rejection counter and returns the
+// new value. The daemon blocks the task at the cap rather than burning
+// tokens on an unbounded reject/redo loop overnight.
+func (d *DB) IncrementRejectCount(taskID string) (int, error) {
+	if _, err := d.q.Exec(
+		"UPDATE tasks SET reject_count = reject_count + 1 WHERE id = ?", taskID); err != nil {
+		return 0, fmt.Errorf("increment reject count: %w", err)
+	}
+	var n int
+	if err := d.q.QueryRow(
+		"SELECT reject_count FROM tasks WHERE id = ?", taskID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("read reject count: %w", err)
+	}
+	return n, nil
+}
+
 // BoardTasks returns everything the board renders: all open v2 work plus
 // tasks closed within the last week (shown collapsed).
 func (d *DB) BoardTasks() ([]Task, error) {
@@ -174,6 +258,77 @@ func (d *DB) BoardTasks() ([]Task, error) {
 		out = append(out, *t)
 	}
 	return out, rows.Err()
+}
+
+// ClosedTask is the slice of a closed row the dedup scorer needs.
+type ClosedTask struct {
+	ID         string
+	Text       string // thought, falling back to title for pre-v2 rows
+	Status     string
+	KillReason string
+	Acceptance string
+	UpdatedAt  string
+}
+
+// ClosedTasks returns done, killed, and parked tasks for dedup retrieval.
+func (d *DB) ClosedTasks() ([]ClosedTask, error) {
+	rows, err := d.q.Query(
+		`SELECT id,
+		        CASE WHEN thought != '' THEN thought ELSE title END,
+		        status, COALESCE(kill_reason, ''), COALESCE(acceptance, ''), updated_at
+		 FROM tasks WHERE status IN ('done','killed','parked')`)
+	if err != nil {
+		return nil, fmt.Errorf("closed tasks: %w", err)
+	}
+	defer rows.Close()
+	var out []ClosedTask
+	for rows.Next() {
+		var c ClosedTask
+		if err := rows.Scan(&c.ID, &c.Text, &c.Status, &c.KillReason, &c.Acceptance, &c.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan closed task: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// SnapshotJSON renders the board state as JSON — the only view of the ledger
+// the model ever sees (PRD I2: no pane text, ever).
+func (d *DB) SnapshotJSON() ([]byte, error) {
+	tasks, err := d.BoardTasks()
+	if err != nil {
+		return nil, err
+	}
+	return json.MarshalIndent(tasks, "", "  ")
+}
+
+// LastSeen returns when the human last read the brief; zero time if never.
+func (d *DB) LastSeen() (time.Time, error) {
+	var v string
+	err := d.q.QueryRow("SELECT value FROM meta WHERE key = 'last_seen'").Scan(&v)
+	if err == sql.ErrNoRows {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("last seen: %w", err)
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}, nil
+	}
+	return t, nil
+}
+
+// MarkSeen records that the human is caught up as of t.
+func (d *DB) MarkSeen(t time.Time) error {
+	_, err := d.q.Exec(
+		`INSERT INTO meta (key, value) VALUES ('last_seen', ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		t.UTC().Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("mark seen: %w", err)
+	}
+	return nil
 }
 
 // newTaskID generates a unique 4-char hex ID with collision checking.
