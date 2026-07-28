@@ -1,6 +1,8 @@
 package db
 
 import (
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -218,6 +220,45 @@ func (d *DB) ClosedTasks() ([]ClosedTask, error) {
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// SnapshotJSON renders the board state as JSON — the only view of the ledger
+// the model ever sees (PRD I2: no pane text, ever).
+func (d *DB) SnapshotJSON() ([]byte, error) {
+	tasks, err := d.BoardTasks()
+	if err != nil {
+		return nil, err
+	}
+	return json.MarshalIndent(tasks, "", "  ")
+}
+
+// LastSeen returns when the human last read the brief; zero time if never.
+func (d *DB) LastSeen() (time.Time, error) {
+	var v string
+	err := d.q.QueryRow("SELECT value FROM meta WHERE key = 'last_seen'").Scan(&v)
+	if err == sql.ErrNoRows {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("last seen: %w", err)
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}, nil
+	}
+	return t, nil
+}
+
+// MarkSeen records that the human is caught up as of t.
+func (d *DB) MarkSeen(t time.Time) error {
+	_, err := d.q.Exec(
+		`INSERT INTO meta (key, value) VALUES ('last_seen', ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		t.UTC().Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("mark seen: %w", err)
+	}
+	return nil
 }
 
 // newTaskID generates a unique 4-char hex ID with collision checking.

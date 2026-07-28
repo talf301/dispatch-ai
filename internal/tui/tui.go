@@ -28,6 +28,9 @@ const (
 	modeBoard   mode = iota
 	modeCapture      // g — inline dt go
 	modeKill         // x — reason entry
+	modeCommand      // : — fuzzy instruction entry
+	modeConfirm      // reviewing a proposed dt batch
+	modeBrief        // rendered what-changed digest
 )
 
 type lane int
@@ -71,6 +74,9 @@ type Model struct {
 	dtBin     string // path to the dt binary (os.Executable)
 	width     int
 	height    int
+	busy      bool     // a model call is in flight
+	proposal  []string // dt batch lines awaiting confirmation
+	brief     string   // rendered digest
 
 	// Commit-time cache for staleness: workdir → HEAD commit time.
 	// Refreshed every commitCacheTTL, not every 2s tick.
@@ -100,6 +106,18 @@ type boardMsg struct {
 type dtDoneMsg struct {
 	verb string
 	err  error
+}
+type proposalMsg struct {
+	cmds []string
+	err  error
+}
+type briefMsg struct {
+	text string
+	err  error
+}
+type batchDoneMsg struct {
+	n   int
+	err error
 }
 
 func tick() tea.Cmd {
@@ -222,10 +240,53 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.refresh()
 
+	case proposalMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.mode, m.status = modeBoard, msg.err.Error()
+			return m, nil
+		}
+		m.proposal, m.mode = msg.cmds, modeConfirm
+		return m, nil
+
+	case briefMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.mode, m.status = modeBoard, msg.err.Error()
+			return m, nil
+		}
+		m.brief, m.mode = msg.text, modeBrief
+		m.store.MarkSeen(time.Now())
+		return m, nil
+
+	case batchDoneMsg:
+		m.busy, m.mode, m.proposal = false, modeBoard, nil
+		if msg.err != nil {
+			m.status = "Batch failed, nothing applied: " + msg.err.Error()
+		} else {
+			m.status = fmt.Sprintf("Applied %d commands.", msg.n)
+		}
+		return m, m.refresh()
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
 	return m, nil
+}
+
+// runBatch pipes approved commands into `dt batch` on stdin: the whole set
+// applies atomically or not at all, through the same enforcement path as a
+// human at the shell (I4).
+func (m Model) runBatch(cmds []string) tea.Cmd {
+	return func() tea.Msg {
+		c := exec.Command(m.dtBin, "batch")
+		c.Stdin = strings.NewReader(strings.Join(cmds, "\n") + "\n")
+		out, err := c.CombinedOutput()
+		if err != nil {
+			err = fmt.Errorf("%s", strings.TrimSpace(string(out)))
+		}
+		return batchDoneMsg{n: len(cmds), err: err}
+	}
 }
 
 // selectable returns rows in display order. Parked and closed rows are only
@@ -243,7 +304,8 @@ func (m Model) selectable() []row {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.mode == modeCapture || m.mode == modeKill {
+	switch m.mode {
+	case modeCapture, modeKill, modeCommand:
 		switch msg.String() {
 		case "esc":
 			m.mode = modeBoard
@@ -254,19 +316,41 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			text := strings.TrimSpace(m.input.Value())
 			m.input.SetValue("")
 			m.input.Blur()
-			wasKill := m.mode == modeKill
+			was := m.mode
 			m.mode = modeBoard
 			if text == "" {
 				return m, nil
 			}
-			if wasKill {
+			switch was {
+			case modeKill:
 				return m, m.runDT("kill", m.killID, text)
+			case modeCommand:
+				m.busy = true
+				return m, func() tea.Msg {
+					cmds, err := propose(m.store, text)
+					return proposalMsg{cmds: cmds, err: err}
+				}
+			default:
+				return m, m.runDT("go", text)
 			}
-			return m, m.runDT("go", text)
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
+
+	case modeConfirm:
+		switch msg.String() {
+		case "y", "enter":
+			m.busy = true
+			return m, m.runBatch(m.proposal)
+		case "n", "esc", "q":
+			m.mode, m.proposal, m.status = modeBoard, nil, "Discarded."
+		}
+		return m, nil
+
+	case modeBrief:
+		m.mode = modeBoard
+		return m, nil
 	}
 
 	switch msg.String() {
@@ -289,6 +373,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.input.Placeholder = "what's the thought?"
 		m.input.Focus()
 		return m, textinput.Blink
+	case ":":
+		m.mode = modeCommand
+		m.input.Placeholder = "e.g. park everything in sc-api until monday"
+		m.input.Focus()
+		return m, textinput.Blink
+	case "b":
+		m.busy = true
+		return m, func() tea.Msg {
+			text, err := brief(m.store)
+			return briefMsg{text: text, err: err}
+		}
 	case "x":
 		if t, ok := m.current(); ok {
 			m.mode = modeKill
@@ -353,6 +448,19 @@ var (
 )
 
 func (m Model) View() string {
+	switch m.mode {
+	case modeConfirm:
+		var b strings.Builder
+		b.WriteString(laneStyle.Render("Apply these?") + "\n\n")
+		for _, c := range m.proposal {
+			b.WriteString("  dt " + c + "\n")
+		}
+		b.WriteString(dimStyle.Render("\nRuns as one atomic dt batch.\ny apply · n discard"))
+		return b.String()
+	case modeBrief:
+		return m.brief + dimStyle.Render("\n\nAny key to return.")
+	}
+
 	var b strings.Builder
 	idx := 0
 
@@ -389,13 +497,16 @@ func (m Model) View() string {
 		b.WriteString(dimStyle.Render("Nothing in flight. Press g and type the thought.\n"))
 	}
 
-	if m.mode == modeCapture || m.mode == modeKill {
+	if m.mode == modeCapture || m.mode == modeKill || m.mode == modeCommand {
 		b.WriteString("\n" + m.input.View() + "\n")
+	}
+	if m.busy {
+		b.WriteString(dimStyle.Render("\nThinking…\n"))
 	}
 	if m.status != "" {
 		b.WriteString(statusStyle.Render(m.status) + "\n")
 	}
-	b.WriteString(dimStyle.Render("\nj/k move · ⏎ focus · g capture · x kill · p park · r resume · z all · q quit"))
+	b.WriteString(dimStyle.Render("\nj/k move · ⏎ focus · g capture · : command · b brief · x kill · p park · r resume · z all · q quit"))
 	return b.String()
 }
 

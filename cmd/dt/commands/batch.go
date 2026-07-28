@@ -36,6 +36,7 @@ func NewBatchCmd() *cobra.Command {
 			lineNum := 0
 			executed := 0
 			var refs []string
+			var killed, parked []string // herdr teardown after commit
 
 			var pending strings.Builder
 			pendingStart := 0
@@ -82,6 +83,14 @@ func NewBatchCmd() *cobra.Command {
 				if id != "" {
 					refs = append(refs, id)
 				}
+				if parts := splitArgs(resolved); len(parts) > 1 {
+					switch parts[0] {
+					case "kill":
+						killed = append(killed, parts[1])
+					case "park":
+						parked = append(parked, parts[1])
+					}
+				}
 				executed++
 			}
 
@@ -97,6 +106,20 @@ func NewBatchCmd() *cobra.Command {
 
 			if err := tx.Commit(); err != nil {
 				exitError(cmd, fmt.Errorf("commit: %w", err))
+			}
+
+			// herdr side effects happen outside the transaction, best-effort,
+			// same as the standalone kill/park commands.
+			for _, id := range killed {
+				if t, err := d.GetTaskV2(id); err == nil {
+					closeTaskTab(t)
+					removeTaskWorktree(t)
+				}
+			}
+			for _, id := range parked {
+				if t, err := d.GetTaskV2(id); err == nil {
+					closeTaskTab(t)
+				}
 			}
 
 			// GraphPilot integration: wire GP graph if GRAPHPILOT_NODE is set.
@@ -229,6 +252,29 @@ func executeLine(database *db.DB, line string) (string, error) {
 		author := "batch"
 		_, err := database.AddNote(parts[1], strings.Join(parts[2:], " "), &author)
 		return "", err
+	case "kill":
+		if len(parts) < 3 {
+			return "", fmt.Errorf("kill requires 2 arguments: <id> <reason>")
+		}
+		_, err := database.KillTask(parts[1], strings.Join(parts[2:], " "))
+		return "", err
+	case "park":
+		if len(parts) != 2 {
+			return "", fmt.Errorf("park requires 1 argument: <id>")
+		}
+		_, err := database.ParkTask(parts[1])
+		return "", err
+	case "resume":
+		if len(parts) != 2 {
+			return "", fmt.Errorf("resume requires 1 argument: <id>")
+		}
+		_, err := database.ResumeTask(parts[1])
+		return "", err
+	case "relabel":
+		if len(parts) < 3 {
+			return "", fmt.Errorf("relabel requires 2 arguments: <id> <text>")
+		}
+		return "", database.SetLabel(parts[1], strings.Join(parts[2:], " "))
 	default:
 		return "", fmt.Errorf("unknown command: %s", parts[0])
 	}
