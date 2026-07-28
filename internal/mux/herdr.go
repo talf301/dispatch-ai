@@ -111,8 +111,21 @@ func (h Herdr) CreateTab(workspaceID, cwd, label string) (string, string, error)
 }
 
 func (h Herdr) RunPane(paneID string, argv []string) error {
-	args := append([]string{"pane", "run", paneID}, argv...)
+	quoted := make([]string, len(argv))
+	for i, arg := range argv {
+		quoted[i] = shellQuote(arg)
+	}
+	args := append([]string{"pane", "run", paneID}, strings.Join(quoted, " "))
 	return h.run(nil, args...)
+}
+
+func (h Herdr) StartAgent(name, kind, paneID string, argv []string) error {
+	args := []string{"agent", "start", name, "--kind", kind, "--pane", paneID, "--timeout", "30000", "--"}
+	return h.run(nil, append(args, argv...)...)
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func (h Herdr) FocusTab(tabID string) error {

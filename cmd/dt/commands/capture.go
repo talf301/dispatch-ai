@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dispatch-ai/dispatch/internal/agentctx"
 	"github.com/dispatch-ai/dispatch/internal/daemon"
@@ -104,10 +105,16 @@ func NewGoCmd() *cobra.Command {
 			if err := d.SetRuntime(task.ID, workdir, ws, tab, pane); err != nil {
 				exitError(cmd, err)
 			}
-			if err := h.RunPane(pane, agentctx.ClaudeArgs(task.ID, thought)); err != nil {
-				fmt.Fprintln(os.Stderr, "warning: could not start claude:", err)
-			}
 			h.FocusTab(tab)
+			sessionPath := filepath.Join(workdir, ".dispatch-session.md")
+			if err := agentctx.WriteSessionPrompt(sessionPath, task.ID); err != nil {
+				exitError(cmd, fmt.Errorf("write session context: %w", err))
+			}
+			if err := startAgent(h, pane, task.ID, sessionPath); err != nil {
+				fmt.Fprintln(os.Stderr, "warning: could not start claude:", err)
+			} else if err := h.PromptAgent(pane, thought); err != nil {
+				fmt.Fprintln(os.Stderr, "warning: could not send thought to claude:", err)
+			}
 
 			// The human is already typing in the pane; the label call runs
 			// after focus, so it costs the capture path nothing (M2).
@@ -125,6 +132,27 @@ func NewGoCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noDedup, "no-dedup", false, "skip the similar-closed-work check")
 	cmd.Flags().StringVarP(&repoFlag, "repo", "r", "", "repo path (default: inferred from cwd)")
 	return cmd
+}
+
+func startAgent(h mux.Herdr, pane, taskID, sessionPath string) error {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(30 * time.Second)
+	defer deadline.Stop()
+	args := []string{"--append-system-prompt-file", sessionPath}
+	var lastErr error
+	for {
+		if err := h.StartAgent("dispatch-"+taskID, "claude", pane, args); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			return fmt.Errorf("pane %s was not ready: %w", pane, lastErr)
+		}
+	}
 }
 
 // checkDedup is the two-stage capture-time dedup (M3). Stage 1 is free and
