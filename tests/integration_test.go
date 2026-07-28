@@ -78,11 +78,12 @@ func TestExitCriteria_ReadyOrder(t *testing.T) {
 	bin := buildBinary(t, tmpDir)
 	dbPath := filepath.Join(tmpDir, "test.db")
 
-	// Create 10 tasks.
+	// Create 10 tasks. dt add proposes; approve each so it becomes ready.
 	ids := make([]string, 10)
 	for i := 0; i < 10; i++ {
 		out := runDT(t, bin, dbPath, "add", fmt.Sprintf("Task %d", i))
 		ids[i] = getID(t, out)
+		runDT(t, bin, dbPath, "reopen", ids[i])
 	}
 
 	// Tasks 1, 2, 3 depend on task 0 (task 0 unblocks 3 tasks).

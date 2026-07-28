@@ -25,7 +25,9 @@ func NewAddCmd() *cobra.Command {
 				repo = &v
 			}
 
-			task, err := d.AddTask(title, desc, parent, after, repo)
+			// Agent-facing path: new work is proposed, never auto-dispatched.
+			// A human approves it with `dt reopen <id>`.
+			task, err := d.AddTaskWithStatus(title, desc, parent, after, repo, "proposed")
 			if err != nil {
 				exitError(cmd, err)
 			}
