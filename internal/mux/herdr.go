@@ -20,6 +20,9 @@ type Mux interface {
 	CreateTab(workspaceID, cwd, label string) (string, string, error)
 	// RunPane runs a command in a pane.
 	RunPane(paneID string, argv []string) error
+	// StartAgent starts a tracked agent of the given kind in a pane, waiting
+	// up to timeout for the pane to be ready.
+	StartAgent(name, kind, paneID string, timeout time.Duration, argv []string) error
 	// FocusTab focuses a tab in the herdr window.
 	FocusTab(tabID string) error
 	// RenameTab updates a tab's label.

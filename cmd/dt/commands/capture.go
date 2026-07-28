@@ -148,7 +148,7 @@ func NewGoCmd() *cobra.Command {
 // attempt.
 const startAgentAttemptTimeout = 2 * time.Second
 
-func startAgent(h mux.Herdr, pane, taskID, sessionPath string) error {
+func startAgent(h mux.Mux, pane, taskID, sessionPath string) error {
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	deadline := time.NewTimer(30 * time.Second)
