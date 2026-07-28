@@ -116,7 +116,9 @@ func NewGoCmd() *cobra.Command {
 			h.FocusTab(tab)
 			sessionPath := sessionFilePath(task.ID)
 			if err := agentctx.WriteSessionPrompt(sessionPath, task.ID); err != nil {
-				exitError(cmd, fmt.Errorf("write session context: %w", err))
+				fmt.Fprintln(os.Stderr, "warning: task captured, but failed to write session context:", err)
+				printTask(task)
+				return
 			}
 			if err := startAgent(h, pane, task.ID, sessionPath); err != nil {
 				fmt.Fprintln(os.Stderr, "warning: could not start claude:", err)
