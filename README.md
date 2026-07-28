@@ -89,10 +89,14 @@ Rows show the label; **the focused row reveals the verbatim thought**. The label
 | `Enter` | Focus the task's herdr tab (the board stays alive; revives a dead tab via `dt resume`) |
 | `g` | Capture — inline `dt go` |
 | `u` | Promote — `report <condition>` or `ratchet <command>` |
+| `a` | Approve the selected proposed task (`dt reopen`) |
+| `d` | Mark the selected task done (`dt done`) |
 | `x` / `p` / `r` | Kill (reason required) / park / resume |
 | `:` | Fuzzy command — English in, a `dt batch` you confirm out |
 | `b` | Brief — what changed since you last looked |
-| `z` / `q` | Expand collapsed lanes / quit |
+| `z` | Expand collapsed lanes |
+| `?` | Scrollable shortcut help |
+| `q` | Quit |
 
 Mutations shell out to `dt` itself — the TUI never writes SQLite.
 

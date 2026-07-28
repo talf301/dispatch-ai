@@ -412,7 +412,7 @@ func closeTaskTab(task *db.Task) {
 	}
 }
 
-// removeTaskWorktree tears down a kill'd task's worktree. Best-effort.
+// removeTaskWorktree tears down a task's worktree. Best-effort.
 func removeTaskWorktree(task *db.Task) {
 	if task.Mode == nil || *task.Mode != "worktree" ||
 		task.Workdir == nil || task.Repo == nil {
