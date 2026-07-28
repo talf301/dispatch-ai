@@ -156,7 +156,7 @@ func (d *DB) transition(taskID, from, to string) (*Task, error) {
 func (d *DB) BoardTasks() ([]Task, error) {
 	rows, err := d.q.Query(
 		`SELECT ` + taskColumnsV2 + ` FROM tasks
-		 WHERE status IN ('live','unattended','blocked','parked')
+		 WHERE status IN ('live','unattended','blocked','parked','proposed')
 		    OR (status IN ('done','killed')
 		        AND updated_at >= datetime('now','-7 days')
 		        AND thought != '')

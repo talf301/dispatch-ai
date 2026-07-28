@@ -32,11 +32,18 @@ type Task struct {
 	LastActivity *string `json:"last_activity,omitempty"`
 }
 
-// AddTask creates a new task with a unique 4-char hex ID.
+// AddTask creates an open task with a unique 4-char hex ID.
 // If parentID is non-empty, verifies the parent exists.
 // If afterID is non-empty, creates a dependency (afterID blocks the new task).
 // repo is an optional repository path associated with the task.
 func (d *DB) AddTask(title, description, parentID, afterID string, repo *string) (*Task, error) {
+	return d.AddTaskWithStatus(title, description, parentID, afterID, repo, "open")
+}
+
+// AddTaskWithStatus is AddTask with an explicit initial status. The
+// agent-facing `dt add` passes "proposed": agent-discovered work never
+// auto-dispatches until a human approves it with `dt reopen`.
+func (d *DB) AddTaskWithStatus(title, description, parentID, afterID string, repo *string, status string) (*Task, error) {
 	taskID, err := d.newTaskID()
 	if err != nil {
 		return nil, err
@@ -59,9 +66,9 @@ func (d *DB) AddTask(title, description, parentID, afterID string, repo *string)
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
 	_, err = d.q.Exec(
-		`INSERT INTO tasks (id, title, description, parent_id, repo, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		taskID, title, description, parentPtr, repo, now, now,
+		`INSERT INTO tasks (id, title, description, status, parent_id, repo, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		taskID, title, description, status, parentPtr, repo, now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert task: %w", err)

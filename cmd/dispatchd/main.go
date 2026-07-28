@@ -53,6 +53,8 @@ var rootCmd = &cobra.Command{
 		pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
 		workerPromptPath, _ := cmd.Flags().GetString("worker-prompt")
 		reviewerPromptPath, _ := cmd.Flags().GetString("reviewer-prompt")
+		workerAgent, _ := cmd.Flags().GetString("worker-agent")
+		reviewerAgent, _ := cmd.Flags().GetString("reviewer-agent")
 		gpEnabled, _ := cmd.Flags().GetBool("gp")
 
 		if workerPromptPath == "" || reviewerPromptPath == "" {
@@ -107,12 +109,18 @@ var rootCmd = &cobra.Command{
 			GPEnabled:    gpEnabled,
 		}
 
-		spawner := &daemon.ClaudeSpawner{
-			ClaudeBin:      "claude",
-			WorkerPrompt:   string(workerPrompt),
-			ReviewerPrompt: string(reviewerPrompt),
-			OutputLines:    100,
-			SessionDir:     filepath.Join(home, ".dispatch", "sessions"),
+		newSpawner := func(agent string) *daemon.CLISpawner {
+			return &daemon.CLISpawner{
+				Agent:          agent,
+				WorkerPrompt:   string(workerPrompt),
+				ReviewerPrompt: string(reviewerPrompt),
+				OutputLines:    100,
+				SessionDir:     filepath.Join(home, ".dispatch", "sessions"),
+			}
+		}
+		spawner := &daemon.RoleSpawner{
+			Worker:   newSpawner(workerAgent),
+			Reviewer: newSpawner(reviewerAgent),
 		}
 
 		d := daemon.New(database, cfg, spawner)
@@ -139,6 +147,8 @@ func init() {
 	rootCmd.Flags().Duration("poll-interval", envDurationOrDefault("DISPATCH_POLL_INTERVAL", 5*time.Second), "poll interval")
 	rootCmd.Flags().String("worker-prompt", envOrDefault("DISPATCH_WORKER_PROMPT", ""), "path to worker.md prompt file (required)")
 	rootCmd.Flags().String("reviewer-prompt", envOrDefault("DISPATCH_REVIEWER_PROMPT", ""), "path to reviewer.md prompt file (required)")
+	rootCmd.Flags().String("worker-agent", envOrDefault("DISPATCH_WORKER_AGENT", "claude"), "agent CLI for workers: claude or codex")
+	rootCmd.Flags().String("reviewer-agent", envOrDefault("DISPATCH_REVIEWER_AGENT", "claude"), "agent CLI for the review gate: claude or codex")
 	rootCmd.Flags().Bool("gp", os.Getenv("DISPATCH_GP") == "1", "enable GraphPilot integration (env: DISPATCH_GP=1)")
 }
 

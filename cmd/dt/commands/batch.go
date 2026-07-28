@@ -288,7 +288,7 @@ func batchAdd(database *db.DB, args []string) (string, error) {
 		return "", fmt.Errorf("add requires a title")
 	}
 
-	task, err := database.AddTask(title, desc, parent, after, repo)
+	task, err := database.AddTaskWithStatus(title, desc, parent, after, repo, "proposed")
 	if err != nil {
 		return "", err
 	}

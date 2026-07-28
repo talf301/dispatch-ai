@@ -122,7 +122,8 @@ func (m Model) refresh() tea.Cmd {
 // classify picks the lane. Lane order encodes urgency, not lifecycle.
 func classify(t db.Task, agent string) lane {
 	switch {
-	case t.Status == "blocked" || agent == "blocked":
+	// Proposed work needs a human call (approve or kill) just like blocked.
+	case t.Status == "blocked" || t.Status == "proposed" || agent == "blocked":
 		return laneNeedsYou
 	case t.Status == "live":
 		return laneLive
@@ -369,6 +370,8 @@ func (m Model) writeRow(b *strings.Builder, r row, focused bool) {
 	}
 	badge := r.agent
 	switch {
+	case t.Status == "proposed":
+		badge = alertStyle.Render("proposed") + dimStyle.Render(" · dt reopen to approve")
 	case t.Status == "killed":
 		badge = "killed"
 	case t.Status == "done":
