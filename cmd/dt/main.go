@@ -50,6 +50,7 @@ func init() {
 	rootCmd.AddCommand(commands.NewKillCmd())
 	rootCmd.AddCommand(commands.NewParkCmd())
 	rootCmd.AddCommand(commands.NewResumeCmd())
+	rootCmd.AddCommand(commands.NewRelabelCmd())
 	rootCmd.AddCommand(commands.NewTuiCmd())
 }
 

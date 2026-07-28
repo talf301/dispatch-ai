@@ -91,6 +91,18 @@ func (d *DB) GetTaskV2(taskID string) (*Task, error) {
 	return t, nil
 }
 
+// SetLabel updates the display label. The label is a cache: it never feeds
+// retrieval or matching — thought does.
+func (d *DB) SetLabel(taskID, label string) error {
+	if strings.TrimSpace(label) == "" {
+		return fmt.Errorf("label must not be empty")
+	}
+	if _, err := d.q.Exec("UPDATE tasks SET label = ? WHERE id = ?", label, taskID); err != nil {
+		return fmt.Errorf("set label: %w", err)
+	}
+	return nil
+}
+
 // DeleteTask removes a task row outright. Only for rolling back a capture
 // that failed at birth — closed work is killed, never deleted.
 func (d *DB) DeleteTask(taskID string) error {
