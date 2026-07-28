@@ -4,8 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
-
-	"github.com/dispatch-ai/dispatch/internal/id"
 )
 
 // Task represents a row in the tasks table.
@@ -20,6 +18,18 @@ type Task struct {
 	Repo        *string `json:"repo"`
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
+
+	// v2 (capture-first) fields. Populated by the v2 queries in tasks_v2.go;
+	// the legacy queries above leave them zero.
+	Thought      string  `json:"thought,omitempty"`
+	Label        *string `json:"label,omitempty"`
+	Mode         *string `json:"mode,omitempty"` // worktree | in_place
+	Workdir      *string `json:"workdir,omitempty"`
+	HerdrWs      *string `json:"herdr_ws,omitempty"`
+	HerdrTab     *string `json:"herdr_tab,omitempty"`
+	HerdrPane    *string `json:"herdr_pane,omitempty"`
+	KillReason   *string `json:"kill_reason,omitempty"`
+	LastActivity *string `json:"last_activity,omitempty"`
 }
 
 // AddTask creates a new task with a unique 4-char hex ID.
@@ -27,22 +37,9 @@ type Task struct {
 // If afterID is non-empty, creates a dependency (afterID blocks the new task).
 // repo is an optional repository path associated with the task.
 func (d *DB) AddTask(title, description, parentID, afterID string, repo *string) (*Task, error) {
-	// Generate unique ID with collision check.
-	var taskID string
-	for i := 0; i < 100; i++ {
-		candidate := id.Generate()
-		var exists int
-		err := d.q.QueryRow("SELECT COUNT(*) FROM tasks WHERE id = ?", candidate).Scan(&exists)
-		if err != nil {
-			return nil, fmt.Errorf("check id collision: %w", err)
-		}
-		if exists == 0 {
-			taskID = candidate
-			break
-		}
-	}
-	if taskID == "" {
-		return nil, fmt.Errorf("failed to generate unique task ID after 100 attempts")
+	taskID, err := d.newTaskID()
+	if err != nil {
+		return nil, err
 	}
 
 	// Verify parent exists if set.
@@ -61,7 +58,7 @@ func (d *DB) AddTask(title, description, parentID, afterID string, repo *string)
 
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
-	_, err := d.q.Exec(
+	_, err = d.q.Exec(
 		`INSERT INTO tasks (id, title, description, parent_id, repo, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		taskID, title, description, parentPtr, repo, now, now,

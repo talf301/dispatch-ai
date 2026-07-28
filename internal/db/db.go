@@ -50,7 +50,13 @@ func Open(path string) (*DB, error) {
 	}
 
 	d := &DB{q: sqlDB, sqlDB: sqlDB}
-	if err := d.migrate(); err != nil {
+	// Pin the pool to one connection during migration: the rebuild path issues
+	// BEGIN/COMMIT and per-connection pragmas as separate Execs, which must all
+	// land on the same connection.
+	sqlDB.SetMaxOpenConns(1)
+	err = d.migrate()
+	sqlDB.SetMaxOpenConns(0)
+	if err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
@@ -89,20 +95,48 @@ func (d *DB) Rollback() error {
 	return tx.Rollback()
 }
 
+// taskColumnsV2 is the full v2 tasks schema. Fresh databases are created with
+// it directly; legacy databases are rebuilt into it (SQLite cannot alter a
+// CHECK constraint in place).
+const taskSchemaV2 = `(
+	id          TEXT PRIMARY KEY,
+	title       TEXT NOT NULL,
+	description TEXT NOT NULL DEFAULT '',
+	status      TEXT NOT NULL DEFAULT 'open'
+	            CHECK (status IN ('open','active','blocked','done',
+	                              'live','unattended','parked','killed','proposed')),
+	block_reason TEXT,
+	assignee    TEXT,
+	parent_id   TEXT REFERENCES tasks(id),
+	created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+	updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+	repo        TEXT,
+	thought     TEXT NOT NULL DEFAULT '',
+	label       TEXT,
+	mode        TEXT,
+	workdir     TEXT,
+	herdr_ws    TEXT,
+	herdr_tab   TEXT,
+	herdr_pane  TEXT,
+	held_by     TEXT,
+	held_pid    INTEGER,
+	acceptance_kind TEXT,
+	acceptance  TEXT,
+	kill_reason TEXT,
+	last_activity TEXT,
+	reject_count INTEGER NOT NULL DEFAULT 0
+)`
+
+const updatedAtTrigger = `CREATE TRIGGER IF NOT EXISTS tasks_updated_at
+	AFTER UPDATE ON tasks
+	WHEN NEW.updated_at = OLD.updated_at
+	BEGIN
+		UPDATE tasks SET updated_at = datetime('now') WHERE id = OLD.id;
+	END`
+
 func (d *DB) migrate() error {
 	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS tasks (
-			id          TEXT PRIMARY KEY,
-			title       TEXT NOT NULL,
-			description TEXT NOT NULL DEFAULT '',
-			status      TEXT NOT NULL DEFAULT 'open'
-			            CHECK (status IN ('open','active','blocked','done')),
-			block_reason TEXT,
-			assignee    TEXT,
-			parent_id   TEXT REFERENCES tasks(id),
-			created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-			updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-		)`,
+		`CREATE TABLE IF NOT EXISTS tasks ` + taskSchemaV2,
 		`CREATE TABLE IF NOT EXISTS deps (
 			blocker_id TEXT NOT NULL REFERENCES tasks(id),
 			blocked_id TEXT NOT NULL REFERENCES tasks(id),
@@ -115,12 +149,7 @@ func (d *DB) migrate() error {
 			author     TEXT,
 			created_at TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,
-		`CREATE TRIGGER IF NOT EXISTS tasks_updated_at
-		AFTER UPDATE ON tasks
-		WHEN NEW.updated_at = OLD.updated_at
-		BEGIN
-			UPDATE tasks SET updated_at = datetime('now') WHERE id = OLD.id;
-		END`,
+		updatedAtTrigger,
 	}
 	for _, s := range stmts {
 		if _, err := d.q.Exec(s); err != nil {
@@ -128,33 +157,74 @@ func (d *DB) migrate() error {
 		}
 	}
 
-	// Add repo column if it doesn't exist yet.
-	// SQLite lacks IF NOT EXISTS for ALTER TABLE, so we check pragmatically.
-	rows, err := d.q.Query("PRAGMA table_info(tasks)")
+	// Legacy databases predate the v2 columns and carry a status CHECK that
+	// rejects the v2 statuses. SQLite can't alter a CHECK, so rebuild the
+	// table once: copy rows into a fresh v2-schema table and swap it in.
+	hasThought, err := d.hasTaskColumn("thought")
 	if err != nil {
-		return fmt.Errorf("pragma table_info: %w", err)
+		return err
 	}
-	hasRepo := false
-	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull int
-		var dflt *string
-		var pk int
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan table_info: %w", err)
-		}
-		if name == "repo" {
-			hasRepo = true
-		}
-	}
-	rows.Close()
-	if !hasRepo {
-		if _, err := d.q.Exec("ALTER TABLE tasks ADD COLUMN repo TEXT"); err != nil {
-			return fmt.Errorf("add repo column: %w", err)
-		}
+	if hasThought {
+		return nil
 	}
 
+	hasRepo, err := d.hasTaskColumn("repo")
+	if err != nil {
+		return err
+	}
+	repoExpr := "repo"
+	if !hasRepo {
+		repoExpr = "NULL"
+	}
+
+	// Foreign keys must be off for the drop/rename swap; deps and notes still
+	// reference tasks. The pragma is a no-op inside a transaction, so it
+	// brackets one.
+	if _, err := d.q.Exec("PRAGMA foreign_keys=OFF"); err != nil {
+		return fmt.Errorf("fk off: %w", err)
+	}
+	rebuild := []string{
+		"BEGIN",
+		`CREATE TABLE tasks_v2_migration ` + taskSchemaV2,
+		`INSERT INTO tasks_v2_migration
+			(id, title, description, status, block_reason, assignee, parent_id,
+			 created_at, updated_at, repo)
+		 SELECT id, title, description, status, block_reason, assignee, parent_id,
+			 created_at, updated_at, ` + repoExpr + ` FROM tasks`,
+		"DROP TABLE tasks",
+		"ALTER TABLE tasks_v2_migration RENAME TO tasks",
+		updatedAtTrigger,
+		"COMMIT",
+	}
+	for _, s := range rebuild {
+		if _, err := d.q.Exec(s); err != nil {
+			d.q.Exec("ROLLBACK")
+			d.q.Exec("PRAGMA foreign_keys=ON")
+			return fmt.Errorf("rebuild tasks table: %w\nSQL: %s", err, s)
+		}
+	}
+	if _, err := d.q.Exec("PRAGMA foreign_keys=ON"); err != nil {
+		return fmt.Errorf("fk on: %w", err)
+	}
 	return nil
+}
+
+func (d *DB) hasTaskColumn(col string) (bool, error) {
+	rows, err := d.q.Query("PRAGMA table_info(tasks)")
+	if err != nil {
+		return false, fmt.Errorf("pragma table_info: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var dflt *string
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return false, fmt.Errorf("scan table_info: %w", err)
+		}
+		if name == col {
+			return true, nil
+		}
+	}
+	return false, nil
 }

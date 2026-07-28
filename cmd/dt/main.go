@@ -45,6 +45,12 @@ func init() {
 	rootCmd.AddCommand(commands.NewListCmd())
 	rootCmd.AddCommand(commands.NewBatchCmd())
 	rootCmd.AddCommand(commands.NewInitCmd())
+	rootCmd.AddCommand(commands.NewGoCmd())
+	rootCmd.AddCommand(commands.NewAdoptCmd())
+	rootCmd.AddCommand(commands.NewKillCmd())
+	rootCmd.AddCommand(commands.NewParkCmd())
+	rootCmd.AddCommand(commands.NewResumeCmd())
+	rootCmd.AddCommand(commands.NewTuiCmd())
 }
 
 func main() {
