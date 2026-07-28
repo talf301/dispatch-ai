@@ -6,6 +6,7 @@ package agentctx
 
 import (
 	_ "embed"
+	"os"
 	"strings"
 )
 
@@ -15,6 +16,10 @@ var sessionPrompt string
 // SessionPrompt renders the context for one task.
 func SessionPrompt(taskID string) string {
 	return strings.ReplaceAll(sessionPrompt, "$TASK_ID", taskID)
+}
+
+func WriteSessionPrompt(path, taskID string) error {
+	return os.WriteFile(path, []byte(SessionPrompt(taskID)), 0o600)
 }
 
 // ClaudeArgs builds the claude invocation for a captured session: the
