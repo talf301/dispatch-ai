@@ -44,3 +44,18 @@ func Oneshot(prompt string) (string, error) {
 	}
 	return strings.TrimSpace(string(out)), nil
 }
+
+// StripFence unwraps a markdown-fenced block when the fence is the entire
+// output. This is the single permitted normalization across all structured
+// call sites; JSON buried in prose stays a hard error.
+func StripFence(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "```") || !strings.HasSuffix(s, "```") {
+		return s
+	}
+	body := strings.TrimSuffix(strings.TrimPrefix(s, "```"), "```")
+	if i := strings.IndexByte(body, '\n'); i >= 0 {
+		body = body[i+1:] // drop the language tag line
+	}
+	return strings.TrimSpace(body)
+}

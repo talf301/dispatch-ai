@@ -14,6 +14,8 @@ import (
 	"math"
 	"sort"
 	"strings"
+
+	"github.com/dispatch-ai/dispatch/internal/llm"
 )
 
 // stopwords: tokens that carry no signal in a one-line thought.
@@ -124,27 +126,13 @@ func JudgePrompt(thought string, cands []Candidate) string {
 	return b.String()
 }
 
-// stripFence unwraps a markdown-fenced block when the fence is the entire
-// output. This is the single permitted normalization; JSON buried in prose
-// still hard-errors.
-func stripFence(s string) string {
-	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "```") || !strings.HasSuffix(s, "```") {
-		return s
-	}
-	body := strings.TrimSuffix(strings.TrimPrefix(s, "```"), "```")
-	if i := strings.IndexByte(body, '\n'); i >= 0 {
-		body = body[i+1:] // drop the language tag line
-	}
-	return strings.TrimSpace(body)
-}
 
 // ParseJudge enforces the output contract. Anything that isn't a bare JSON
 // array of {id, reason} is a hard error carrying the raw output — no salvage
 // parsing, by design (PRD §13).
 func ParseJudge(raw string) ([]Match, error) {
 	var out []Match
-	if err := json.Unmarshal([]byte(stripFence(raw)), &out); err != nil {
+	if err := json.Unmarshal([]byte(llm.StripFence(raw)), &out); err != nil {
 		return nil, fmt.Errorf("dedup judge broke its output contract; raw output:\n%s", raw)
 	}
 	return out, nil
