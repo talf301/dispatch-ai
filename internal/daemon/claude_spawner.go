@@ -11,23 +11,53 @@ import (
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
 
-// ClaudeSpawner spawns Claude Code CLI processes as workers.
-type ClaudeSpawner struct {
-	ClaudeBin      string // path to claude binary, default "claude"
+// CLISpawner spawns coding-agent CLI processes (claude or codex) as workers
+// and reviewers. Both run non-interactively with permissions bypassed — the
+// worktree is the isolation boundary and enforcement lives in the daemon,
+// not in the agent's own gates.
+type CLISpawner struct {
+	Agent          string // "claude" (default) or "codex"
+	Bin            string // binary path override, default = Agent name
 	WorkerPrompt   string // contents of worker.md (with $TASK_ID placeholder)
 	ReviewerPrompt string // contents of reviewer.md (with $TASK_ID placeholder)
 	OutputLines    int    // ring buffer size, default 100
 	SessionDir     string // path to ~/.dispatch/sessions/
 }
 
-// Compile-time check that ClaudeSpawner implements WorkerSpawner.
-var _ WorkerSpawner = (*ClaudeSpawner)(nil)
+// Compile-time check that CLISpawner implements WorkerSpawner.
+var _ WorkerSpawner = (*CLISpawner)(nil)
 
-func (s *ClaudeSpawner) Spawn(ctx context.Context, task db.Task, workDir string, role SpawnRole, logSuffix string) (WorkerHandle, error) {
-	bin := s.ClaudeBin
-	if bin == "" {
-		bin = "claude"
+// argv builds the non-interactive invocation for the configured agent.
+func (s *CLISpawner) argv(systemPrompt, prompt string) (string, []string, error) {
+	agent := s.Agent
+	if agent == "" {
+		agent = "claude"
 	}
+	bin := s.Bin
+	if bin == "" {
+		bin = agent
+	}
+	switch agent {
+	case "claude":
+		return bin, []string{
+			"--print",
+			"--dangerously-skip-permissions",
+			"--system-prompt", systemPrompt,
+			prompt,
+		}, nil
+	case "codex":
+		// codex exec has no system-prompt slot; prepend it to the prompt.
+		return bin, []string{
+			"exec",
+			"--dangerously-bypass-approvals-and-sandbox",
+			systemPrompt + "\n\n" + prompt,
+		}, nil
+	default:
+		return "", nil, fmt.Errorf("unknown agent %q (want claude or codex)", agent)
+	}
+}
+
+func (s *CLISpawner) Spawn(ctx context.Context, task db.Task, workDir string, role SpawnRole, logSuffix string) (WorkerHandle, error) {
 	lines := s.OutputLines
 	if lines == 0 {
 		lines = 100
@@ -49,11 +79,9 @@ func (s *ClaudeSpawner) Spawn(ctx context.Context, task db.Task, workDir string,
 	}
 	systemPrompt = strings.ReplaceAll(systemPrompt, "$PARENT_ID", parentID)
 
-	args := []string{
-		"--print",
-		"--dangerously-skip-permissions",
-		"--system-prompt", systemPrompt,
-		prompt,
+	bin, args, err := s.argv(systemPrompt, prompt)
+	if err != nil {
+		return nil, err
 	}
 
 	cmd := exec.CommandContext(ctx, bin, args...)
@@ -79,10 +107,10 @@ func (s *ClaudeSpawner) Spawn(ctx context.Context, task db.Task, workDir string,
 		if logFile != nil {
 			logFile.Close()
 		}
-		return nil, fmt.Errorf("start claude: %w", err)
+		return nil, fmt.Errorf("start %s: %w", bin, err)
 	}
 
-	h := &claudeHandle{cmd: cmd, tw: tw, logFile: logFile, done: make(chan struct{})}
+	h := &cliHandle{cmd: cmd, tw: tw, logFile: logFile, done: make(chan struct{})}
 	go func() {
 		h.exitErr = cmd.Wait()
 		if h.logFile != nil {
@@ -94,7 +122,7 @@ func (s *ClaudeSpawner) Spawn(ctx context.Context, task db.Task, workDir string,
 	return h, nil
 }
 
-type claudeHandle struct {
+type cliHandle struct {
 	cmd     *exec.Cmd
 	tw      *TeeWriter
 	logFile *os.File
@@ -102,11 +130,11 @@ type claudeHandle struct {
 	exitErr error
 }
 
-// Compile-time check that claudeHandle implements WorkerHandle.
-var _ WorkerHandle = (*claudeHandle)(nil)
+// Compile-time check that cliHandle implements WorkerHandle.
+var _ WorkerHandle = (*cliHandle)(nil)
 
-func (h *claudeHandle) PID() int             { return h.cmd.Process.Pid }
-func (h *claudeHandle) Done() <-chan struct{} { return h.done }
-func (h *claudeHandle) Err() error           { <-h.done; return h.exitErr }
-func (h *claudeHandle) Wait() error          { return h.Err() }
-func (h *claudeHandle) Output() string       { return h.tw.String() }
+func (h *cliHandle) PID() int              { return h.cmd.Process.Pid }
+func (h *cliHandle) Done() <-chan struct{} { return h.done }
+func (h *cliHandle) Err() error            { <-h.done; return h.exitErr }
+func (h *cliHandle) Wait() error           { return h.Err() }
+func (h *cliHandle) Output() string        { return h.tw.String() }
