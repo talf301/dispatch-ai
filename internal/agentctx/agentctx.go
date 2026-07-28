@@ -1,7 +1,9 @@
 // Package agentctx carries the dispatch context injected into every captured
-// agent session via --append-system-prompt. This is how a session knows it's
-// inside a dispatch task without relying on anything in the user's global
-// agent config — the contract ships with dispatch itself.
+// agent session, either inline via --append-system-prompt or, for the
+// capture path, written to disk and passed via --append-system-prompt-file.
+// This is how a session knows it's inside a dispatch task without relying on
+// anything in the user's global agent config — the contract ships with
+// dispatch itself.
 package agentctx
 
 import (
