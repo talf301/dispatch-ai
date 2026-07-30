@@ -18,6 +18,10 @@ func NewDoneCmd() *cobra.Command {
 			if err != nil {
 				exitError(cmd, err)
 			}
+			if cleanup, err := d.GetTaskV2(task.ID); err == nil {
+				closeTaskTab(cleanup)
+				removeTaskWorktree(cleanup)
+			}
 
 			if jsonFlag(cmd) {
 				printJSON(task)
