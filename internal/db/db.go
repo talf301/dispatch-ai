@@ -153,6 +153,25 @@ func (d *DB) migrate() error {
 			key   TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS task_attempts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			attempt_key TEXT NOT NULL UNIQUE,
+			task_id TEXT NOT NULL REFERENCES tasks(id),
+			role TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			model TEXT,
+			started_at TEXT NOT NULL,
+			ended_at TEXT,
+			exit_status INTEGER,
+			input_tokens INTEGER,
+			cached_input_tokens INTEGER,
+			output_tokens INTEGER,
+			reasoning_tokens INTEGER,
+			turn_count INTEGER,
+			tool_output_bytes INTEGER,
+			wait_only_count INTEGER,
+			raw_usage TEXT
+		)`,
 		updatedAtTrigger,
 	}
 	for _, s := range stmts {

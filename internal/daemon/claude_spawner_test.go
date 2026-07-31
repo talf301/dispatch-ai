@@ -132,3 +132,42 @@ func TestRoleSpawner_RoutesByRole(t *testing.T) {
 		}
 	}
 }
+
+func TestCLISpawner_PersistsProviderUsageOnce(t *testing.T) {
+	cases := []struct{ name, agent, output string }{
+		{"codex", "codex", `echo '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":2}}'`},
+		{"claude", "claude", `echo '{"type":"system","session_id":"s","model":"m"}'\necho '{"type":"result","is_error":false,"num_turns":1,"usage":{"input_tokens":3,"output_tokens":5},"result":"ok"}'`},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			d, err := db.Open(filepath.Join(t.TempDir(), "usage.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			task, err := d.AddTask("usage", "", "", "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bin := writeFakeBin(t, t.TempDir(), tt.name, tt.output+"\n")
+			s := &CLISpawner{Agent: tt.agent, Bin: bin, UsageDB: d}
+			h, err := s.Spawn(context.Background(), *task, t.TempDir(), RoleWorker, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.Wait(); err != nil {
+				t.Fatal(err)
+			}
+			r, err := d.Usage(task.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(r.Attempts) != 1 || r.Attempts[0].ExitStatus == nil {
+				t.Fatalf("attempts = %+v", r.Attempts)
+			}
+			if r.Totals.Attempts != 1 {
+				t.Fatalf("totals = %+v", r.Totals)
+			}
+		})
+	}
+}
