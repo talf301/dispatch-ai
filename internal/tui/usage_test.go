@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/dispatch-ai/dispatch/internal/db"
+	"github.com/muesli/termenv"
 )
 
 func TestUsageViewStates(t *testing.T) {
@@ -41,6 +42,20 @@ func TestUsageViewFitsNarrowTerminal(t *testing.T) {
 		if width := lipgloss.Width(line); width > model.width {
 			t.Errorf("line width %d exceeds terminal width %d: %q", width, model.width, line)
 		}
+	}
+}
+
+func TestBoundLinesPreservesANSI(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	defer lipgloss.SetColorProfile(profile)
+	styled := lipgloss.NewStyle().Faint(true).Render(strings.Repeat("x", 40))
+	got := boundLines(styled, 24)
+	if width := lipgloss.Width(got); width != 24 {
+		t.Fatalf("width = %d, want 24: %q", width, got)
+	}
+	if !strings.HasSuffix(got, "\x1b[0m") {
+		t.Fatalf("truncated ANSI line lost reset: %q", got)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
 	"github.com/dispatch-ai/dispatch/internal/mux"
@@ -424,6 +425,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return usageMsg{err: err}
 				}
 				now := time.Now().UTC()
+				// Today/week intentionally use UTC calendar boundaries for deterministic aggregates.
 				today, err := m.store.UsageSince(time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC))
 				if err != nil {
 					return usageMsg{err: err}
@@ -593,7 +595,7 @@ func (m Model) viewUsage() string {
 	b.WriteString(dimStyle.Render("Provider-emitted values; duration is derived from timestamps. Missing values are not estimated.") + "\n\n")
 	b.WriteString(fmt.Sprintf("Attempts %d  ·  raw input %s  ·  cached input %s  ·  output %s  ·  turns %s\n",
 		r.Totals.Attempts, number(r.Totals.InputTokens), number(r.Totals.CachedInputTokens), number(r.Totals.OutputTokens), strconv.Itoa(r.Totals.Turns)))
-	b.WriteString(fmt.Sprintf("Today  %s in / %s out / %d turns    Week  %s in / %s out / %d turns\n\n",
+	b.WriteString(fmt.Sprintf("Today (all tasks)  %s in / %s out / %d turns    Week (all tasks)  %s in / %s out / %d turns\n\n",
 		number(m.usage.today.InputTokens), number(m.usage.today.OutputTokens), m.usage.today.Turns,
 		number(m.usage.week.InputTokens), number(m.usage.week.OutputTokens), m.usage.week.Turns))
 	for _, a := range r.Attempts {
@@ -641,7 +643,7 @@ func boundLines(s string, width int) string {
 	var out []string
 	for _, line := range strings.Split(s, "\n") {
 		if lipgloss.Width(line) > width {
-			line = truncate(line, width)
+			line = ansi.Truncate(line, width, "…")
 		}
 		out = append(out, line)
 	}

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func tempDBPath(t *testing.T) string {
@@ -121,6 +122,31 @@ func TestUsageAttemptIsIdempotent(t *testing.T) {
 	}
 	if len(r.Attempts) != 1 {
 		t.Fatalf("restart duplicated attempt: %+v", r)
+	}
+}
+
+func TestUsageSinceComparesFractionalSecondsNumerically(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	task, err := d.AddTask("usage boundary", "", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.StartAttempt("boundary", task.ID, "worker", "codex", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.q.Exec("UPDATE task_attempts SET started_at=? WHERE attempt_key=?", "2026-07-31T00:00:00.5Z", "boundary"); err != nil {
+		t.Fatal(err)
+	}
+	r, err := d.UsageSince(time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Attempts) != 1 {
+		t.Fatalf("fractional-second attempt missing from report: %+v", r)
 	}
 }
 

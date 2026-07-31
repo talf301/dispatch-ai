@@ -90,7 +90,7 @@ func (d *DB) usage(taskID string, since time.Time) (*UsageReport, error) {
 		args = append(args, taskID)
 	}
 	if !since.IsZero() {
-		clauses = append(clauses, "started_at >= ?")
+		clauses = append(clauses, "julianday(started_at) >= julianday(?)")
 		args = append(args, since.UTC().Format(time.RFC3339Nano))
 	}
 	if len(clauses) > 0 {
