@@ -15,6 +15,7 @@ import (
 
 	"github.com/dispatch-ai/dispatch/internal/config"
 	"github.com/dispatch-ai/dispatch/internal/db"
+	managerpkg "github.com/dispatch-ai/dispatch/internal/manager"
 	"github.com/dispatch-ai/dispatch/internal/mux"
 )
 
@@ -31,6 +32,7 @@ type Config struct {
 	// M5: unattended v2 dispatch. Nil Mux disables it (v1 loop unaffected).
 	Mux           mux.Mux
 	ReviewerAgent string // agent CLI for acceptance reviews, default claude
+	Manager       bool   // run the single human-facing manager session
 }
 
 // DefaultConfig returns configuration with defaults.
@@ -52,12 +54,12 @@ type Daemon struct {
 	worktreeBase           string
 	repos                  map[string]config.RepoConfig // repoPath -> RepoConfig
 	baseBranch             string
-	gpBin                  string              // path to gp binary, empty if GP integration disabled
+	gpBin                  string                  // path to gp binary, empty if GP integration disabled
 	workers                map[string]WorkerHandle // taskID -> handle
-	workerRepo             map[string]string        // taskID -> repoPath
-	taskRoles              map[string]SpawnRole     // taskID -> current role
-	reviewRound            map[string]int           // taskID -> review round count
-	noteCountAtReviewStart map[string]int           // taskID -> note count when reviewer was spawned
+	workerRepo             map[string]string       // taskID -> repoPath
+	taskRoles              map[string]SpawnRole    // taskID -> current role
+	reviewRound            map[string]int          // taskID -> review round count
+	noteCountAtReviewStart map[string]int          // taskID -> note count when reviewer was spawned
 	logger                 *log.Logger
 
 	// M5: unattended v2 watchers (goroutines, unlike the tick-driven v1 path).
@@ -66,6 +68,8 @@ type Daemon struct {
 	sessionDir         string
 	mu                 sync.Mutex
 	watchingUnattended map[string]bool
+	manager            *managerpkg.Manager
+	managerCwd         string
 }
 
 // New creates a Daemon from the given config and spawner.
@@ -91,6 +95,13 @@ func New(database *db.DB, cfg Config, spawner WorkerSpawner) *Daemon {
 		reviewerAgent:          cfg.ReviewerAgent,
 		sessionDir:             cfg.SessionDir,
 		watchingUnattended:     make(map[string]bool),
+	}
+	if cfg.Manager && cfg.Mux != nil {
+		for repo := range repos {
+			d.manager = managerpkg.New(database, cfg.Mux)
+			d.managerCwd = repo
+			break
+		}
 	}
 
 	if cfg.GPEnabled {
@@ -247,11 +258,11 @@ func newAdoptedHandle(pid int, committed func() bool) *adoptedHandle {
 	return h
 }
 
-func (h *adoptedHandle) PID() int             { return h.pid }
+func (h *adoptedHandle) PID() int              { return h.pid }
 func (h *adoptedHandle) Done() <-chan struct{} { return h.done }
-func (h *adoptedHandle) Err() error           { <-h.done; return h.exitErr }
-func (h *adoptedHandle) Wait() error          { return h.Err() }
-func (h *adoptedHandle) Output() string       { return h.output }
+func (h *adoptedHandle) Err() error            { <-h.done; return h.exitErr }
+func (h *adoptedHandle) Wait() error           { return h.Err() }
+func (h *adoptedHandle) Output() string        { return h.output }
 
 // taskRepoPath returns the repo path for a task. A task without a repo field
 // only resolves when exactly one repo is configured — with several, map
@@ -691,6 +702,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	d.recoverActive()
 	d.cleanOrphanedWorktrees()
+	if d.manager != nil {
+		if err := d.manager.Start(d.managerCwd); err != nil {
+			return fmt.Errorf("start manager: %w", err)
+		}
+		go func() {
+			if err := d.manager.Run(ctx); err != nil && ctx.Err() == nil {
+				d.logger.Printf("manager: %v", err)
+			}
+		}()
+	}
 
 	ticker := time.NewTicker(d.cfg.PollInterval)
 	defer ticker.Stop()

@@ -95,6 +95,30 @@ func (d *DB) Rollback() error {
 	return tx.Rollback()
 }
 
+// GetMeta and SetMeta provide small durable cursors for process-local
+// surfaces such as the manager session. They intentionally do not become a
+// second task state machine.
+func (d *DB) GetMeta(key string) (string, bool, error) {
+	var value string
+	err := d.q.QueryRow("SELECT value FROM meta WHERE key = ?", key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("get meta %q: %w", key, err)
+	}
+	return value, true, nil
+}
+
+func (d *DB) SetMeta(key, value string) error {
+	_, err := d.q.Exec(`INSERT INTO meta (key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	if err != nil {
+		return fmt.Errorf("set meta %q: %w", key, err)
+	}
+	return nil
+}
+
 // taskColumnsV2 is the full v2 tasks schema. Fresh databases are created with
 // it directly; legacy databases are rebuilt into it (SQLite cannot alter a
 // CHECK constraint in place).
