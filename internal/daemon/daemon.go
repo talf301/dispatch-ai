@@ -330,8 +330,8 @@ func (d *Daemon) spawnReady() {
 
 	// Count active workers per repo.
 	activePerRepo := make(map[string]int)
-	for _, repoPath := range d.workerRepo {
-		activePerRepo[repoPath]++
+	for taskID := range d.workers {
+		activePerRepo[d.workerRepo[taskID]]++
 	}
 
 	for _, task := range tasks {
@@ -942,6 +942,10 @@ func (d *Daemon) cleanOrphanedWorktrees() {
 	// Also keep worktrees for tasks the daemon is actively managing
 	// (e.g., reviewer running after worker marked task done).
 	for taskID := range d.workers {
+		keepIDs[taskID] = true
+	}
+	// Keep worktrees for tasks reopened by a validation or review failure.
+	for taskID := range d.workerRepo {
 		keepIDs[taskID] = true
 	}
 

@@ -101,7 +101,7 @@ func TestDaemonIntegration_ValidationRunsOutsideWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spawner := &daemon.MockSpawner{ExitCode: 0}
+	spawner := &daemon.MockSpawner{ExitCode: 0, UsageDB: database}
 	d := daemon.New(database, daemon.Config{
 		Repos:        map[string]config.RepoConfig{repoDir: {Path: repoDir, MaxWorkers: 1, TestCommand: "sleep 1"}},
 		PollInterval: 50 * time.Millisecond,
@@ -113,9 +113,11 @@ func TestDaemonIntegration_ValidationRunsOutsideWorker(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- d.Run(ctx) }()
 
-	time.Sleep(250 * time.Millisecond)
-	if len(spawner.Spawned) != 1 {
-		t.Fatalf("model processes during validation = %d, want worker only", len(spawner.Spawned))
+	waitForCondition(t, 2*time.Second, 25*time.Millisecond, "worker spawn before validation", func() bool {
+		return spawner.SpawnCount() == 1
+	})
+	if got := spawner.SpawnCount(); got != 1 {
+		t.Fatalf("model processes during validation = %d, want worker only", got)
 	}
 	waitForCondition(t, 4*time.Second, 50*time.Millisecond, "validated task completion", func() bool {
 		updated, err := database.GetTask(task.ID)
@@ -123,6 +125,67 @@ func TestDaemonIntegration_ValidationRunsOutsideWorker(t *testing.T) {
 	})
 	cancel()
 	<-done
+	usage, err := database.Usage(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage.Attempts) != 2 {
+		t.Fatalf("model attempts = %d, want worker and reviewer", len(usage.Attempts))
+	}
+	for _, attempt := range usage.Attempts {
+		if attempt.WaitOnlyCount == nil || *attempt.WaitOnlyCount != 0 {
+			t.Errorf("%s wait-only count = %v, want 0", attempt.Role, attempt.WaitOnlyCount)
+		}
+	}
+}
+
+func TestDaemonIntegration_ValidationFailureAllowsOneRepair(t *testing.T) {
+	repoDir := initGitRepo(t)
+	database, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	task, err := database.AddTask("failing validation", "repair it", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawner := &daemon.MockSpawner{ExitCode: 0}
+	d := daemon.New(database, daemon.Config{
+		Repos:        map[string]config.RepoConfig{repoDir: {Path: repoDir, MaxWorkers: 1, TestCommand: "exit 1"}},
+		PollInterval: 25 * time.Millisecond,
+		WorktreeBase: filepath.Join(t.TempDir(), "worktrees"),
+	}, spawner)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+
+	waitForCondition(t, 4*time.Second, 25*time.Millisecond, "validation task blocked after one repair", func() bool {
+		updated, err := database.GetTask(task.ID)
+		return err == nil && updated.Status == "blocked"
+	})
+	cancel()
+	<-done
+
+	if got := spawner.SpawnCount(); got != 2 {
+		t.Fatalf("worker processes = %d, want two repair attempts", got)
+	}
+	notes, err := database.GetNotes(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repairs := 0
+	for _, note := range notes {
+		if strings.HasPrefix(note.Content, "Validation failure repair") {
+			repairs++
+		}
+	}
+	if repairs != 2 {
+		t.Fatalf("validation repair notes = %d, want first repair and bounded second failure", repairs)
+	}
 }
 
 func TestDaemonIntegration_WorkerCrash(t *testing.T) {
