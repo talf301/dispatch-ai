@@ -54,6 +54,7 @@ func init() {
 	rootCmd.AddCommand(commands.NewPromoteCmd())
 	rootCmd.AddCommand(commands.NewTuiCmd())
 	rootCmd.AddCommand(commands.NewManagerCmd())
+	rootCmd.AddCommand(commands.NewUsageCmd())
 }
 
 func main() {

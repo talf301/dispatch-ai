@@ -122,6 +122,7 @@ var rootCmd = &cobra.Command{
 				ReviewerPrompt: string(reviewerPrompt),
 				OutputLines:    100,
 				SessionDir:     filepath.Join(home, ".dispatch", "sessions"),
+				UsageDB:        database,
 			}
 		}
 		spawner := &daemon.RoleSpawner{
