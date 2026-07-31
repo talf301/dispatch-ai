@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
@@ -22,13 +23,24 @@ type MockSpawner struct {
 	OutputText string
 	SpawnErr   error
 	Spawned    []db.Task
+	UsageDB    *db.DB
+	mu         sync.Mutex
 }
 
 func (m *MockSpawner) Spawn(_ context.Context, task db.Task, workDir string, role SpawnRole, _ string) (WorkerHandle, error) {
 	if m.SpawnErr != nil {
 		return nil, m.SpawnErr
 	}
+	m.mu.Lock()
 	m.Spawned = append(m.Spawned, task)
+	spawnNumber := len(m.Spawned)
+	m.mu.Unlock()
+	if m.UsageDB != nil {
+		key := fmt.Sprintf("mock-%s-%s-%d", task.ID, role, spawnNumber)
+		_ = m.UsageDB.StartAttempt(key, task.ID, string(role), "mock", nil)
+		waits, status := 0, m.ExitCode
+		_ = m.UsageDB.FinishAttempt(key, db.Attempt{ExitStatus: &status, WaitOnlyCount: &waits})
+	}
 
 	// Workers with clean exit should commit to the worktree branch.
 	if m.ExitCode == 0 && role == RoleWorker {
@@ -47,6 +59,13 @@ func (m *MockSpawner) Spawn(_ context.Context, task db.Task, workDir string, rol
 	return h, nil
 }
 
+// SpawnCount returns the number of model processes started by the mock.
+func (m *MockSpawner) SpawnCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.Spawned)
+}
+
 type mockHandle struct {
 	pid      int
 	exitCode int
@@ -55,10 +74,10 @@ type mockHandle struct {
 	done     chan struct{}
 }
 
-func (h *mockHandle) PID() int             { return h.pid }
+func (h *mockHandle) PID() int              { return h.pid }
 func (h *mockHandle) Done() <-chan struct{} { return h.done }
-func (h *mockHandle) Err() error           { return h.exitErr }
-func (h *mockHandle) Output() string       { return h.output }
+func (h *mockHandle) Err() error            { return h.exitErr }
+func (h *mockHandle) Output() string        { return h.output }
 
 func (h *mockHandle) Wait() error {
 	<-h.done
