@@ -89,6 +89,42 @@ func TestDaemonIntegration_SpawnAndComplete(t *testing.T) {
 	}
 }
 
+func TestDaemonIntegration_ValidationRunsOutsideWorker(t *testing.T) {
+	repoDir := initGitRepo(t)
+	database, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	task, err := database.AddTask("slow validation", "run the worker", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawner := &daemon.MockSpawner{ExitCode: 0}
+	d := daemon.New(database, daemon.Config{
+		Repos:        map[string]config.RepoConfig{repoDir: {Path: repoDir, MaxWorkers: 1, TestCommand: "sleep 1"}},
+		PollInterval: 50 * time.Millisecond,
+		WorktreeBase: filepath.Join(t.TempDir(), "worktrees"),
+	}, spawner)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+
+	time.Sleep(250 * time.Millisecond)
+	if len(spawner.Spawned) != 1 {
+		t.Fatalf("model processes during validation = %d, want worker only", len(spawner.Spawned))
+	}
+	waitForCondition(t, 4*time.Second, 50*time.Millisecond, "validated task completion", func() bool {
+		updated, err := database.GetTask(task.ID)
+		return err == nil && updated.Status == "done"
+	})
+	cancel()
+	<-done
+}
+
 func TestDaemonIntegration_WorkerCrash(t *testing.T) {
 	repoDir := initGitRepo(t)
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -198,11 +234,11 @@ type immediateHandle struct {
 	done chan struct{}
 }
 
-func (h *immediateHandle) PID() int             { return daemon.FakePID }
-func (h *immediateHandle) Wait() error          { return nil }
+func (h *immediateHandle) PID() int              { return daemon.FakePID }
+func (h *immediateHandle) Wait() error           { return nil }
 func (h *immediateHandle) Done() <-chan struct{} { return h.done }
-func (h *immediateHandle) Err() error           { return nil }
-func (h *immediateHandle) Output() string       { return "" }
+func (h *immediateHandle) Err() error            { return nil }
+func (h *immediateHandle) Output() string        { return "" }
 
 // hangingSpawner creates workers that never exit.
 type hangingSpawner struct{}
@@ -217,11 +253,11 @@ type hangingHandle struct {
 
 // Use a PID that doesn't exist so SIGTERM during shutdown fails silently
 // instead of terminating the test process.
-func (h *hangingHandle) PID() int             { return 99999999 }
-func (h *hangingHandle) Wait() error          { <-h.done; return nil } // blocks forever
+func (h *hangingHandle) PID() int              { return 99999999 }
+func (h *hangingHandle) Wait() error           { <-h.done; return nil } // blocks forever
 func (h *hangingHandle) Done() <-chan struct{} { return h.done }
-func (h *hangingHandle) Err() error           { <-h.done; return nil } // blocks forever
-func (h *hangingHandle) Output() string       { return "" }
+func (h *hangingHandle) Err() error            { <-h.done; return nil } // blocks forever
+func (h *hangingHandle) Output() string        { return "" }
 
 // fileCommittingSpawner simulates a worker that creates a file, commits, and marks done.
 type fileCommittingSpawner struct {
