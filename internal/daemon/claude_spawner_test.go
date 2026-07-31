@@ -171,3 +171,20 @@ func TestCLISpawner_PersistsProviderUsageOnce(t *testing.T) {
 		})
 	}
 }
+
+func TestCLISpawner_ReviewerVerdictSurvivesJSONCapture(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeClaude := writeFakeBin(t, tmpDir, "claude", `echo '{"type":"result","is_error":false,"num_turns":1,"result":"Checked the change.\nVERDICT: approve"}'`)
+	s := &CLISpawner{Bin: fakeClaude, ReviewerPrompt: "Review the task."}
+	h, err := s.Spawn(context.Background(), db.Task{ID: "review1"}, tmpDir, RoleReviewer, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	ok, _, err := parseVerdict(h.Output())
+	if err != nil || !ok {
+		t.Fatalf("verdict = %v, err = %v, output = %q", ok, err, h.Output())
+	}
+}

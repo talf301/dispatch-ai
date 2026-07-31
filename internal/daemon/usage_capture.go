@@ -117,11 +117,15 @@ func (c *usageCapture) addUsage(v any, claude bool) {
 	num := func(key string) int64 { x, _ := m[key].(float64); return int64(x) }
 	if claude {
 		c.input += num("input_tokens")
+		c.input += num("cache_creation_input_tokens")
 		c.cached += num("cache_read_input_tokens") + num("cached_input_tokens")
 		c.outputTokens += num("output_tokens")
 		c.reasoning += num("reasoning_output_tokens")
 	} else {
+		// Codex emits final usage for each completed turn, not a cumulative
+		// thread total; sum the per-turn deltas.
 		c.input += num("input_tokens")
+		c.input += num("cache_write_input_tokens")
 		c.cached += num("cached_input_tokens")
 		c.outputTokens += num("output_tokens")
 		c.reasoning += num("reasoning_output_tokens")
