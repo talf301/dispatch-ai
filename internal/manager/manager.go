@@ -5,6 +5,7 @@ package manager
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
@@ -85,7 +86,7 @@ func (m *Manager) Run(ctx context.Context) error {
 				continue
 			}
 			if err := m.Notify(event.TaskID); err != nil {
-				return err
+				log.Printf("manager: notify %s: %v", event.TaskID, err)
 			}
 		}
 	}

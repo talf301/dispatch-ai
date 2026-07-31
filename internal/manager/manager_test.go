@@ -8,16 +8,28 @@ import (
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
 
-type fakeMux struct{ prompts int }
+type fakeMux struct {
+	prompts          int
+	ensureWorkspaces int
+	createTabs       int
+	states           map[string]string
+}
 
-func (f *fakeMux) EnsureWorkspace(string, string) (string, error) { return "ws", nil }
+func (f *fakeMux) EnsureWorkspace(string, string) (string, error) {
+	f.ensureWorkspaces++
+	return "ws", nil
+}
 func (f *fakeMux) CreateTab(string, string, string) (string, string, error) {
+	f.createTabs++
 	return "tab", "pane", nil
 }
 func (f *fakeMux) RunPane(string, []string) error { return nil }
 func (f *fakeMux) FocusTab(string) error          { return nil }
 func (f *fakeMux) RenameTab(string, string) error { return nil }
 func (f *fakeMux) AgentStates() (map[string]string, error) {
+	if f.states != nil {
+		return f.states, nil
+	}
 	return map[string]string{"pane": "idle"}, nil
 }
 func (f *fakeMux) CurrentPane() (string, string, string, string, error)       { return "", "", "", "", nil }
@@ -72,5 +84,45 @@ func TestNotifyDeduplicatesAcrossManagerRestart(t *testing.T) {
 	}
 	if f.prompts != 1 {
 		t.Fatalf("got %d prompts, want one", f.prompts)
+	}
+}
+
+func TestStartRecoversAndRecreatesDeadPane(t *testing.T) {
+	d, err := db.Open(t.TempDir() + "/dispatch.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	f := &fakeMux{}
+
+	if err := New(d, f).Start("/repo"); err != nil {
+		t.Fatal(err)
+	}
+	if f.createTabs != 1 {
+		t.Fatalf("first start created %d tabs, want 1", f.createTabs)
+	}
+	for key, want := range map[string]string{workspaceKey: "ws", tabKey: "tab", paneKey: "pane"} {
+		got, _, err := d.GetMeta(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("meta %s = %q, want %q", key, got, want)
+		}
+	}
+
+	if err := New(d, f).Start("/repo"); err != nil {
+		t.Fatal(err)
+	}
+	if f.createTabs != 1 {
+		t.Fatalf("live pane recovery created %d tabs, want 1", f.createTabs)
+	}
+
+	f.states = map[string]string{}
+	if err := New(d, f).Start("/repo"); err != nil {
+		t.Fatal(err)
+	}
+	if f.createTabs != 2 {
+		t.Fatalf("dead pane recovery created %d tabs, want 2", f.createTabs)
 	}
 }

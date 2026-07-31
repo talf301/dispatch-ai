@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -97,10 +98,16 @@ func New(database *db.DB, cfg Config, spawner WorkerSpawner) *Daemon {
 		watchingUnattended:     make(map[string]bool),
 	}
 	if cfg.Manager && cfg.Mux != nil {
+		paths := make([]string, 0, len(repos))
 		for repo := range repos {
+			paths = append(paths, repo)
+		}
+		if len(paths) == 0 {
+			d.logger.Printf("WARNING: --manager enabled but no repository is configured; manager disabled")
+		} else {
+			sort.Strings(paths)
 			d.manager = managerpkg.New(database, cfg.Mux)
-			d.managerCwd = repo
-			break
+			d.managerCwd = paths[0]
 		}
 	}
 
