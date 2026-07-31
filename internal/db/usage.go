@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -69,13 +70,31 @@ func (d *DB) FinishAttempt(key string, a Attempt) error {
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
 func (d *DB) Usage(taskID string) (*UsageReport, error) {
+	return d.usage(taskID, time.Time{})
+}
+
+// UsageSince returns provider usage recorded at or after since. A zero since
+// is unbounded, which keeps the aggregate path on the same read model.
+func (d *DB) UsageSince(since time.Time) (*UsageReport, error) {
+	return d.usage("", since)
+}
+
+func (d *DB) usage(taskID string, since time.Time) (*UsageReport, error) {
 	query := `SELECT id, attempt_key, task_id, role, provider, model, started_at, ended_at,
 		exit_status, input_tokens, cached_input_tokens, output_tokens, reasoning_tokens, turn_count,
 		tool_output_bytes, wait_only_count, raw_usage FROM task_attempts`
+	var clauses []string
 	args := []any{}
 	if taskID != "" {
-		query += " WHERE task_id = ?"
+		clauses = append(clauses, "task_id = ?")
 		args = append(args, taskID)
+	}
+	if !since.IsZero() {
+		clauses = append(clauses, "started_at >= ?")
+		args = append(args, since.UTC().Format(time.RFC3339Nano))
+	}
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
 	query += " ORDER BY id"
 	rows, err := d.q.Query(query, args...)
