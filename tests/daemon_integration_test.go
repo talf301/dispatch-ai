@@ -102,10 +102,11 @@ func TestDaemonIntegration_ValidationRunsOutsideWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	spawner := &daemon.MockSpawner{ExitCode: 0, UsageDB: database}
+	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
 	d := daemon.New(database, daemon.Config{
 		Repos:        map[string]config.RepoConfig{repoDir: {Path: repoDir, MaxWorkers: 1, TestCommand: "sleep 1"}},
 		PollInterval: 50 * time.Millisecond,
-		WorktreeBase: filepath.Join(t.TempDir(), "worktrees"),
+		WorktreeBase: worktreeBase,
 	}, spawner)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -113,8 +114,9 @@ func TestDaemonIntegration_ValidationRunsOutsideWorker(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- d.Run(ctx) }()
 
-	waitForCondition(t, 2*time.Second, 25*time.Millisecond, "worker spawn before validation", func() bool {
-		return spawner.SpawnCount() == 1
+	waitForCondition(t, 2*time.Second, 25*time.Millisecond, "validation start", func() bool {
+		_, err := os.Stat(filepath.Join(worktreeBase, task.ID, "validation.pid"))
+		return err == nil
 	})
 	if got := spawner.SpawnCount(); got != 1 {
 		t.Fatalf("model processes during validation = %d, want worker only", got)
@@ -132,10 +134,15 @@ func TestDaemonIntegration_ValidationRunsOutsideWorker(t *testing.T) {
 	if len(usage.Attempts) != 2 {
 		t.Fatalf("model attempts = %d, want worker and reviewer", len(usage.Attempts))
 	}
+	roles := map[string]bool{}
 	for _, attempt := range usage.Attempts {
+		roles[attempt.Role] = true
 		if attempt.WaitOnlyCount == nil || *attempt.WaitOnlyCount != 0 {
 			t.Errorf("%s wait-only count = %v, want 0", attempt.Role, attempt.WaitOnlyCount)
 		}
+	}
+	if !roles["worker"] || !roles["reviewer"] {
+		t.Errorf("model attempt roles = %v, want worker and reviewer", roles)
 	}
 }
 
