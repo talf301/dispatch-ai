@@ -35,7 +35,9 @@ A command fixture emitted `item.started` and `item.completed` with
 and `status`. This is enough to retain a bounded readable tool log. The
 fixture did not expose a model field, provider cost, or a separate turn-final
 status field. `reasoning_output_tokens` was present and zero, so consumers
-must treat it as optional and not assume all versions emit it.
+must treat it as optional and not assume all versions emit it. The caller must
+retain the model it requested separately because this event stream does not
+identify one for pricing.
 
 Resume fixture:
 
@@ -57,26 +59,46 @@ thread ID and issue a new prompt.
 Fixture:
 
 ```sh
-claude -p --bare --tools '' --output-format stream-json --verbose \
+claude -p --tools '' --output-format stream-json --verbose \
   'Reply with exactly CLAUDE_FIXTURE_OK and nothing else.'
 ```
 
-The installed CLI was not authenticated. It still emitted this stream shape:
+The successful run returned `session_id=3c988ee9-02d8-455b-b098-4227c95d07a8`
+and emitted this representative subset of the stream:
 
 ```json
-{"type":"system","subtype":"init","session_id":"<uuid>","model":"claude-fable-5","claude_code_version":"2.1.220", "...":"..."}
-{"type":"assistant","message":{"model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[{"type":"text","text":"Not logged in · Please run /login"}]},"session_id":"<uuid>","error":"authentication_failed"}
-{"type":"result","is_error":true,"session_id":"<uuid>","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"modelUsage":{},"terminal_reason":"api_error","result":"Not logged in · Please run /login"}
+{"type":"system","subtype":"init","session_id":"<uuid>","model":"claude-sonnet-5","claude_code_version":"2.1.220", "...":"..."}
+{"type":"assistant","message":{"model":"claude-sonnet-5","usage":{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":41728,"cache_read_input_tokens":0},"content":[{"type":"text","text":"CLAUDE_FIXTURE_OK"}]},"session_id":"<uuid>"}
+{"type":"result","is_error":false,"num_turns":1,"session_id":"<uuid>","total_cost_usd":0.250644,"usage":{"input_tokens":2,"output_tokens":18,"cache_creation_input_tokens":41728,"cache_read_input_tokens":0,"iterations":[{"input_tokens":2,"output_tokens":18,"cache_read_input_tokens":0,"cache_creation_input_tokens":41728,"type":"message"}]},"modelUsage":{"claude-sonnet-5":{"inputTokens":2,"outputTokens":18,"cacheReadInputTokens":0,"cacheCreationInputTokens":41728,"costUSD":0.250644,"contextWindow":1000000,"maxOutputTokens":64000,"canonicalModel":"claude-sonnet-5","provider":"firstParty"}},"terminal_reason":"completed","subtype":"success","result":"CLAUDE_FIXTURE_OK"}
 ```
 
-The failure stream establishes the envelope fields `system.session_id`,
-`system.model`, `assistant.message.usage`, `assistant.content`,
-`result.session_id`, `result.is_error`, `result.usage`, `result.modelUsage`,
-and `result.terminal_reason`. It does not establish successful-run semantics.
-In particular, successful input/output token values, cache token behavior,
-reasoning token behavior, turn boundaries, and tool-call event fields remain
-unverified. The CLI exposes `--resume`, but resume behavior was not tested
-because no authenticated session could be created.
+The stable successful-run fields observed are `system.session_id`,
+`system.model`, `assistant.message.usage`, `assistant.message.content`,
+`result.session_id`, `result.is_error`, `result.num_turns`, `result.usage`,
+`result.modelUsage`, `result.total_cost_usd`, `result.terminal_reason`, and
+`result.result`. `usage` includes input, output, cache creation/read, service
+tier, and `iterations`; `modelUsage` is keyed by canonical model and includes
+cost, context window, maximum output, and provider. No reasoning-token field
+was exposed. With `--tools ''`, no tool-call event contract was exercised.
+
+Resume fixture:
+
+```sh
+claude -p --resume 3c988ee9-02d8-455b-b098-4227c95d07a8 --tools '' \
+  --output-format stream-json --verbose \
+  'Reply with exactly CLAUDE_RESUME_OK and nothing else.'
+```
+
+It returned the same `session_id`, `is_error=false`,
+`terminal_reason=completed`, `num_turns=1`, a new assistant message, and a
+new result usage block. Therefore a completed Claude process can also be
+continued by retaining its session ID and issuing a bounded prompt. This is
+provider-specific session resume, not a generic deferred-command protocol.
+
+The earlier `--bare` failure is still useful as a negative fixture: it returned
+`result.subtype=success` together with `is_error=true` and
+`terminal_reason=api_error`. Therefore `subtype` is not a success indicator;
+consumers must key off `is_error` and `terminal_reason`.
 
 ## Parsing and decision
 
@@ -86,9 +108,11 @@ assistant text, command output, exit status, and terminal error, truncating
 large text fields before rendering. Preserve the raw usage object separately
 when present.
 
-Go for usage accounting: Codex has a sufficient stable contract now; use
-optional fields and tolerate unknown event types. Claude needs one
-authenticated fixture before implementation commits to a successful usage
-contract. Go for generic deferred-command resume: no. Implement a thin
-provider-specific resume hook keyed by Codex `thread_id` only if needed;
-do not pretend Claude or arbitrary providers share that protocol.
+Go for usage accounting: yes for both providers. Codex exposes stable
+turn-final token fields, and Claude exposes successful usage, cache, model,
+cost, and terminal fields. Keep provider-specific parsing, treat optional
+fields and unknown event types defensively, and retain the requested Codex
+model outside its event stream. Go for generic deferred-command resume: no.
+Both tested CLIs support provider-specific resume hooks keyed by their
+persisted thread/session IDs, but arbitrary providers do not share that
+protocol.
