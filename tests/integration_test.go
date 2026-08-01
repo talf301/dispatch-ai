@@ -231,6 +231,7 @@ func TestExitCriteria_JSONOutput(t *testing.T) {
 func TestGoThoughtFileCapturesFileContent(t *testing.T) {
 	tmpDir := t.TempDir()
 	bin := buildBinary(t, tmpDir)
+	t.Setenv("PATH", tmpDir) // keep the real herdr out of this test
 	dbPath := filepath.Join(tmpDir, "test.db")
 	thoughtPath := filepath.Join(tmpDir, "thought.txt")
 	want := "assemble the linked planning context\nwith multiple lines"
