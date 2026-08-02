@@ -135,6 +135,9 @@ func TestCreatePR_AlreadyExistsIsSuccess(t *testing.T) {
 	if err := daemon.createPR(repoDir, "dispatch/abcd", *task); err != nil {
 		t.Errorf("createPR returned an error for an already-existing PR, want nil: %v", err)
 	}
+	if _, ok, err := d.GetMeta("pr.handled." + task.ID); err != nil || !ok {
+		t.Fatalf("existing PR was not recorded as handled: ok=%v err=%v", ok, err)
+	}
 }
 
 func strPtr(s string) *string { return &s }
