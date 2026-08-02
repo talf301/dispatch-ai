@@ -91,6 +91,27 @@ func TestCreateWorktree(t *testing.T) {
 	}
 }
 
+func TestValidateWorktreeRejectsFreshNonBase(t *testing.T) {
+	repo := initTestRepo(t)
+	wtDir := filepath.Join(t.TempDir(), "wt-validate")
+	base, err := DetectDefaultBranch(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CreateWorktree(repo, wtDir, "dispatch/validate-task", base); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("git", "commit", "--allow-empty", "-m", "unexpected change")
+	cmd.Dir = wtDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+	if err := validateWorktree(wtDir, "dispatch/validate-task", base, true); err == nil {
+		t.Fatal("validateWorktree accepted a fresh worktree with an extra commit")
+	}
+}
+
 func TestRemoveWorktree(t *testing.T) {
 	repo := initTestRepo(t)
 	wtDir := filepath.Join(t.TempDir(), "wt-remove")
@@ -298,6 +319,13 @@ func TestWorktreeBranchHasCommits(t *testing.T) {
 	wtDir := filepath.Join(t.TempDir(), "wt")
 	if err := CreateWorktree(repo, wtDir, branch, base); err != nil {
 		t.Fatal(err)
+	}
+	current, err := worktreeCurrentBranch(wtDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current != branch {
+		t.Errorf("current branch = %q, want %q", current, branch)
 	}
 
 	has, err := worktreeBranchHasCommits(wtDir, base, branch)

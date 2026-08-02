@@ -35,6 +35,7 @@ func (f *fakeMux) AgentStates() (map[string]string, error) {
 	}
 	return map[string]string{"pane": "idle"}, nil
 }
+func (f *fakeMux) AgentStatus(string) (string, error)                         { return "idle", nil }
 func (f *fakeMux) CurrentPane() (string, string, string, string, error)       { return "", "", "", "", nil }
 func (f *fakeMux) WaitAgent(string, time.Duration, ...string) (string, error) { return "idle", nil }
 func (f *fakeMux) PromptAgent(string, string) error                           { f.prompts++; return nil }

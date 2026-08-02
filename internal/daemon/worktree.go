@@ -153,6 +153,48 @@ func worktreeBranchHasCommits(wtDir, baseBranch, branchName string) (bool, error
 	return n > 0, nil
 }
 
+func worktreeCurrentBranch(wtDir string) (string, error) {
+	cmd := exec.Command("git", "branch", "--show-current")
+	cmd.Dir = wtDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("read worktree branch: %w", err)
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" {
+		return "", fmt.Errorf("worktree is detached")
+	}
+	return branch, nil
+}
+
+// validateWorktree checks the cheap invariants that must hold before a worker
+// can spend time on a task. A fresh branch must start exactly at baseBranch;
+// reopened tasks are allowed to retain their existing commits.
+func validateWorktree(wtDir, branchName, baseBranch string, fresh bool) error {
+	branch, err := worktreeCurrentBranch(wtDir)
+	if err != nil {
+		return err
+	}
+	if branch != branchName {
+		return fmt.Errorf("worktree is on branch %s, expected %s", branch, branchName)
+	}
+	base, err := revParse(wtDir, baseBranch)
+	if err != nil {
+		return fmt.Errorf("resolve base branch %s: %w", baseBranch, err)
+	}
+	if !fresh {
+		return nil
+	}
+	head, err := revParse(wtDir, "HEAD")
+	if err != nil {
+		return fmt.Errorf("resolve worktree HEAD: %w", err)
+	}
+	if head != base {
+		return fmt.Errorf("fresh worktree starts at %s, expected base %s", head, base)
+	}
+	return nil
+}
+
 func RemoveWorktree(repoDir, wtDir, branchName string, deleteBranch bool) error {
 	cmd := exec.Command("git", "worktree", "remove", wtDir, "--force")
 	cmd.Dir = repoDir

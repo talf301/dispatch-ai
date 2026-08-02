@@ -71,10 +71,12 @@ type fakeMux struct {
 	waits   int
 	pane    string
 	closed  []string
+	created int
 }
 
 func (f *fakeMux) EnsureWorkspace(label, cwd string) (string, error) { return "w1", nil }
 func (f *fakeMux) CreateTab(ws, cwd, label string) (string, string, error) {
+	f.created++
 	return "w1:t9", "w1:p9", nil
 }
 func (f *fakeMux) RunPane(pane string, argv []string) error { return nil }
@@ -92,6 +94,7 @@ func (f *fakeMux) CloseTab(tab string) error {
 func (f *fakeMux) AgentStates() (map[string]string, error) {
 	return map[string]string{f.pane: "idle"}, nil
 }
+func (f *fakeMux) AgentStatus(pane string) (string, error) { return "idle", nil }
 func (f *fakeMux) CurrentPane() (string, string, string, string, error) {
 	return "", "", "", "", nil
 }

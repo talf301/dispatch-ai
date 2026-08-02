@@ -103,6 +103,22 @@ func TestCLISpawner_CodexArgv(t *testing.T) {
 	}
 }
 
+func TestCLISpawner_ExplicitModel(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeCodex := writeFakeBin(t, tmpDir, "codex", "echo \"$@\"\nexit 0\n")
+	spawner := &CLISpawner{Agent: "codex", Bin: fakeCodex, WorkerPrompt: "worker", OutputLines: 10}
+	h, err := spawner.SpawnWithModel(context.Background(), db.Task{ID: "ab15"}, tmpDir, RoleWorker, "", "gpt-5.6-terra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(h.Output(), "--model gpt-5.6-terra") {
+		t.Fatalf("explicit model missing from argv: %s", h.Output())
+	}
+}
+
 func TestCLISpawner_UnknownAgent(t *testing.T) {
 	spawner := &CLISpawner{Agent: "gemini"}
 	_, err := spawner.Spawn(context.Background(), db.Task{ID: "ab13"}, t.TempDir(), RoleWorker, "")

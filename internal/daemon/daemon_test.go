@@ -73,6 +73,21 @@ func TestTaskRepoPath(t *testing.T) {
 	}
 }
 
+func TestTaskRepoPathMapsDispatchWorktree(t *testing.T) {
+	repo := initTestRepo(t)
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	cmd := exec.Command("git", "-C", repo, "worktree", "add", "-b", "dispatch/test", worktree)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create worktree: %v\n%s", err, out)
+	}
+	d := &Daemon{repos: testRepos(repo)}
+	task := &db.Task{ID: "abcd", Repo: &worktree}
+	got, err := d.taskRepoPath(task)
+	if err != nil || got != repo {
+		t.Fatalf("worktree repo: got (%q, %v), want (%q, nil)", got, err, repo)
+	}
+}
+
 func TestAdoptedHandle_CleanExitIsNotAFailure(t *testing.T) {
 	exitedPID := func(t *testing.T) int {
 		t.Helper()
@@ -234,9 +249,12 @@ func TestDaemon_SpawnWorker(t *testing.T) {
 	task, _ := d.AddTask("spawn test", "", "", "", nil)
 
 	spawner := &MockSpawner{ExitCode: 0}
+	fm := &fakeMux{}
 	daemon := New(d, Config{
 		Repos:        testRepos(repoDir),
 		WorktreeBase: worktreeBase,
+		SessionDir:   t.TempDir(),
+		Mux:          fm,
 	}, spawner)
 
 	daemon.spawnReady()
@@ -244,6 +262,16 @@ func TestDaemon_SpawnWorker(t *testing.T) {
 	updated, _ := d.GetTask(task.ID)
 	if updated.Status != "active" {
 		t.Errorf("status = %s, want active", updated.Status)
+	}
+	runtime, err := d.GetTaskV2(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Workdir == nil || *runtime.Workdir != filepath.Join(worktreeBase, task.ID) {
+		t.Fatalf("workdir = %v, want spawned worktree", runtime.Workdir)
+	}
+	if fm.created != 0 || (runtime.HerdrTab != nil && *runtime.HerdrTab != "") {
+		t.Fatalf("automated spawn created herdr runtime: tabs=%d tab=%v", fm.created, runtime.HerdrTab)
 	}
 
 	if len(spawner.Spawned) != 1 {

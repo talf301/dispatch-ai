@@ -36,6 +36,9 @@ func Oneshot(prompt string) (string, error) {
 	cmd := exec.CommandContext(ctx, bin, "-p", "--model", model, prompt)
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("llm call timed out after %s", Timeout)
+		}
 		msg := err.Error()
 		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
 			msg = strings.TrimSpace(string(ee.Stderr))

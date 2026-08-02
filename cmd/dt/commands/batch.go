@@ -334,6 +334,10 @@ func batchAdd(database *db.DB, args []string) (string, error) {
 		return "", fmt.Errorf("add requires a title")
 	}
 
+	if w := warnIfOrphanFromLivePlan(database, repo, parent); w != "" {
+		fmt.Fprintln(os.Stderr, w)
+	}
+
 	task, err := database.AddTaskWithStatus(title, desc, parent, after, repo, "proposed")
 	if err != nil {
 		return "", err
@@ -428,7 +432,7 @@ func quotesBalanced(s string) bool {
 	inDouble := false
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
-		case '\'' :
+		case '\'':
 			if !inDouble {
 				inSingle = !inSingle
 			}

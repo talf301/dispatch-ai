@@ -30,6 +30,11 @@ func initGitRepo(t *testing.T) string {
 			t.Fatalf("%v failed: %v\n%s", args, err, out)
 		}
 	}
+	// A completed standalone task pushes to origin and opens a PR, so every
+	// test repo needs a real (local) origin to push to and a stand-in gh to
+	// avoid hitting the network or a real GitHub account.
+	addBareOrigin(t, dir)
+	fakeGh(t, filepath.Join(t.TempDir(), "gh-calls.txt"))
 	return dir
 }
 
@@ -248,6 +253,95 @@ func TestDaemonIntegration_WorkerCrash(t *testing.T) {
 	}
 }
 
+func TestDaemonIntegration_PreflightBlocksUnavailableBase(t *testing.T) {
+	repoDir := initGitRepo(t)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	task, err := database.AddTask("preflight test", "must not spawn", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := daemon.New(database, daemon.Config{
+		Repos:        integrationRepos(repoDir, 1),
+		BaseBranch:   "missing-base",
+		PollInterval: 50 * time.Millisecond,
+		WorktreeBase: worktreeBase,
+	}, &daemon.MockSpawner{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+
+	waitForCondition(t, time.Second, 25*time.Millisecond, "preflight block", func() bool {
+		got, err := database.GetTask(task.ID)
+		return err == nil && got.Status == "blocked"
+	})
+	cancel()
+	<-done
+
+	got, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BlockReason == nil || !strings.Contains(*got.BlockReason, "base branch missing-base") {
+		t.Fatalf("block reason = %v, want missing base branch", got.BlockReason)
+	}
+}
+
+func TestDaemonIntegration_WorktreeCreationFailureBlocks(t *testing.T) {
+	repoDir := initGitRepo(t)
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	task, err := database.AddTask("occupied branch", "must not retry forever", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch := "dispatch/" + task.ID
+	occupied := filepath.Join(t.TempDir(), "occupied")
+	if err := daemon.CreateWorktree(repoDir, occupied, branch, ""); err != nil {
+		t.Fatal(err)
+	}
+	defer daemon.RemoveWorktree(repoDir, occupied, branch, true)
+
+	d := daemon.New(database, daemon.Config{
+		Repos:        integrationRepos(repoDir, 1),
+		PollInterval: 50 * time.Millisecond,
+		WorktreeBase: worktreeBase,
+	}, &daemon.MockSpawner{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+
+	waitForCondition(t, time.Second, 25*time.Millisecond, "worktree creation block", func() bool {
+		got, err := database.GetTask(task.ID)
+		return err == nil && got.Status == "blocked"
+	})
+	cancel()
+	<-done
+
+	got, err := database.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BlockReason == nil || !strings.Contains(*got.BlockReason, "could not create worktree") {
+		t.Fatalf("block reason = %v, want worktree creation failure", got.BlockReason)
+	}
+}
+
 func TestDaemonIntegration_MaxWorkers(t *testing.T) {
 	repoDir := initGitRepo(t)
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -308,7 +402,7 @@ func (h *immediateHandle) PID() int              { return daemon.FakePID }
 func (h *immediateHandle) Wait() error           { return nil }
 func (h *immediateHandle) Done() <-chan struct{} { return h.done }
 func (h *immediateHandle) Err() error            { return nil }
-func (h *immediateHandle) Output() string        { return "" }
+func (h *immediateHandle) Output() string        { return "VERDICT: approve" }
 
 // hangingSpawner creates workers that never exit.
 type hangingSpawner struct{}

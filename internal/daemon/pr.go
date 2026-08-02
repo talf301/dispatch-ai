@@ -8,12 +8,15 @@ import (
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
 
-// createPR pushes the plan branch and creates a GitHub PR for a completed parent task.
-func (d *Daemon) createPR(repoPath string, parentTask db.Task) error {
-	planBranch := fmt.Sprintf("dispatch/plan-%s", parentTask.ID)
-
-	// Push the plan branch to origin.
-	pushCmd := exec.Command("git", "push", "origin", planBranch)
+// createPR pushes headBranch and creates a GitHub PR for a completed task -
+// a plan branch (dispatch/plan-<id>) for a finished multi-child plan, or a
+// task's own branch (dispatch/<id>) for a standalone task acting as a plan
+// of one. Treating "a PR already exists for this head" as success (not an
+// error) makes this safe to call more than once for the same task, which
+// matters for both the retry queries below and daemon-restart recovery.
+func (d *Daemon) createPR(repoPath, headBranch string, task db.Task) error {
+	// Push headBranch to origin.
+	pushCmd := exec.Command("git", "push", "origin", headBranch)
 	pushCmd.Dir = repoPath
 	if out, err := pushCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git push: %w\n%s", err, out)
@@ -29,8 +32,8 @@ func (d *Daemon) createPR(repoPath string, parentTask db.Task) error {
 		}
 	}
 
-	// Fetch notes on the parent task for the PR body.
-	notes, err := d.db.GetNotes(parentTask.ID)
+	// Fetch notes on the task for the PR body.
+	notes, err := d.db.GetNotes(task.ID)
 	if err != nil {
 		return fmt.Errorf("get notes: %w", err)
 	}
@@ -39,17 +42,21 @@ func (d *Daemon) createPR(repoPath string, parentTask db.Task) error {
 
 	// Create the PR via gh CLI.
 	ghCmd := exec.Command("gh", "pr", "create",
-		"--head", planBranch,
+		"--head", headBranch,
 		"--base", baseBranch,
-		"--title", parentTask.Title,
+		"--title", task.Title,
 		"--body", body,
 	)
 	ghCmd.Dir = repoPath
 	if out, err := ghCmd.CombinedOutput(); err != nil {
+		if strings.Contains(strings.ToLower(string(out)), "already exists") {
+			d.logger.Printf("PR for %s (%s) already exists, treating as success", task.ID, headBranch)
+			return nil
+		}
 		return fmt.Errorf("gh pr create: %w\n%s", err, out)
 	}
 
-	d.logger.Printf("created PR for plan %s (%s)", parentTask.ID, parentTask.Title)
+	d.logger.Printf("created PR for %s (%s)", task.ID, task.Title)
 	return nil
 }
 
@@ -95,7 +102,8 @@ func (d *Daemon) triggerPR(ac *db.AutoComplete) {
 		return
 	}
 
-	if err := d.createPR(repoPath, *parent); err != nil {
+	planBranch := fmt.Sprintf("dispatch/plan-%s", ac.ParentID)
+	if err := d.createPR(repoPath, planBranch, *parent); err != nil {
 		reason := fmt.Sprintf("pr: %v", err)
 		if len(reason) > 4000 {
 			reason = reason[:4000]
@@ -127,7 +135,8 @@ func (d *Daemon) checkPendingPRs() {
 			continue
 		}
 
-		if err := d.createPR(repoPath, parent); err != nil {
+		planBranch := fmt.Sprintf("dispatch/plan-%s", parent.ID)
+		if err := d.createPR(repoPath, planBranch, parent); err != nil {
 			reason := fmt.Sprintf("pr: %v", err)
 			if len(reason) > 4000 {
 				reason = reason[:4000]
