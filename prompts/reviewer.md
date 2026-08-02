@@ -31,5 +31,6 @@ Run `dt show $TASK_ID` to read the task description and notes.
 
 ## How to finish
 
-- **Approve:** exit with code 0. The daemon will merge and complete the task.
-- **Reject:** add your feedback as a note, then exit with a non-zero code.
+- **Approve:** print `VERDICT: approve` as your final output line, then exit with code 0.
+- **Reject:** add your feedback as a note, print `VERDICT: reject` as your final output line,
+  then exit with a non-zero code.

@@ -3,10 +3,13 @@ package tests
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dispatch-ai/dispatch/internal/db"
 )
 
 func getID(t *testing.T, output string) string {
@@ -223,4 +226,73 @@ func TestExitCriteria_JSONOutput(t *testing.T) {
 		t.Fatalf("ready output is not a JSON array: %v\noutput: %s", err, readyOut)
 	}
 
+}
+
+func TestResumeActiveTaskAttachesLogOnDemand(t *testing.T) {
+	tmpDir := t.TempDir()
+	bin := buildBinary(t, tmpDir)
+	dbPath := filepath.Join(tmpDir, "test.db")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := projectRoot(t)
+	task, err := database.AddTask("automated work", "", "", "", &repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ClaimTask(task.ID, "worker"); err != nil {
+		t.Fatal(err)
+	}
+	workdir := filepath.Join(tmpDir, "worktree")
+	if err := os.MkdirAll(workdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRuntime(task.ID, workdir, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	home := filepath.Join(tmpDir, "home")
+	sessionDir := filepath.Join(home, ".dispatch", "sessions")
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(sessionDir, task.ID+"-review-1.log")
+	if err := os.WriteFile(logPath, []byte("reviewing\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	calls := filepath.Join(tmpDir, "herdr.calls")
+	herdr := filepath.Join(tmpDir, "herdr")
+	stub := `#!/bin/sh
+printf '%s\n' "$*" >> "$HERDR_CALLS"
+case "$1 $2" in
+  "workspace list") printf '%s\n' '{"result":{"workspaces":[]}}' ;;
+  "workspace create") printf '%s\n' '{"result":{"workspace":{"workspace_id":"ws"}}}' ;;
+  "tab create") printf '%s\n' '{"result":{"tab":{"tab_id":"tab"},"root_pane":{"pane_id":"pane"}}}' ;;
+esac
+`
+	if err := os.WriteFile(herdr, []byte(stub), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", tmpDir)
+	t.Setenv("HERDR_CALLS", calls)
+
+	runDT(t, bin, dbPath, "resume", task.ID)
+	runDT(t, bin, dbPath, "resume", task.ID)
+
+	callBytes, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callLog := string(callBytes)
+	if strings.Count(callLog, "tab create") != 1 {
+		t.Fatalf("created %d tabs, want one:\n%s", strings.Count(callLog, "tab create"), callLog)
+	}
+	if !strings.Contains(callLog, "pane run pane") || !strings.Contains(callLog, logPath) {
+		t.Fatalf("active task did not tail latest log:\n%s", callLog)
+	}
 }

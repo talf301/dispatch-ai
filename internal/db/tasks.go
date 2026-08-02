@@ -35,6 +35,7 @@ type Task struct {
 	AcceptanceKind *string `json:"acceptance_kind,omitempty"` // report | ratchet
 	Acceptance     *string `json:"acceptance,omitempty"`
 	RejectCount    int     `json:"reject_count,omitempty"`
+	Reviewing      bool    `json:"reviewing,omitempty"`
 }
 
 // AddTask creates an open task with a unique 4-char hex ID.
@@ -124,7 +125,7 @@ func (d *DB) ClaimTask(id, assignee string) (*Task, error) {
 	// Conditional update: the claim must be decided by the database, not by a
 	// read-then-write in the caller — two processes both see a NULL assignee.
 	res, err := d.q.Exec(
-		"UPDATE tasks SET status = 'active', assignee = ? WHERE id = ? AND assignee IS NULL",
+		"UPDATE tasks SET status = 'active', assignee = ? WHERE id = ? AND assignee IS NULL AND mode IS NULL",
 		assignee, id,
 	)
 	if err != nil {
@@ -305,6 +306,7 @@ func (d *DB) ReadyTasks() ([]Task, error) {
 		       t.assignee, t.parent_id, t.repo, t.created_at, t.updated_at
 		FROM tasks t
 		WHERE t.status = 'open'
+		  AND t.mode IS NULL
 		  AND t.assignee IS NULL
 		  AND NOT EXISTS (
 		    SELECT 1 FROM deps d

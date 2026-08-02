@@ -124,7 +124,8 @@ const taskSchemaV2 = `(
 	acceptance  TEXT,
 	kill_reason TEXT,
 	last_activity TEXT,
-	reject_count INTEGER NOT NULL DEFAULT 0
+	reject_count INTEGER NOT NULL DEFAULT 0,
+	reviewing     INTEGER NOT NULL DEFAULT 0
 )`
 
 const updatedAtTrigger = `CREATE TRIGGER IF NOT EXISTS tasks_updated_at
@@ -169,6 +170,15 @@ func (d *DB) migrate() error {
 		return err
 	}
 	if hasThought {
+		hasReviewing, err := d.hasTaskColumn("reviewing")
+		if err != nil {
+			return err
+		}
+		if !hasReviewing {
+			if _, err := d.q.Exec("ALTER TABLE tasks ADD COLUMN reviewing INTEGER NOT NULL DEFAULT 0"); err != nil {
+				return fmt.Errorf("add reviewing column: %w", err)
+			}
+		}
 		return nil
 	}
 

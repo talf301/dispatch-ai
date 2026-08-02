@@ -145,10 +145,9 @@ func NewGoCmd() *cobra.Command {
 }
 
 // startAgentAttemptTimeout bounds a single herdr readiness wait so the outer
-// deadline below can actually retry: at 30s the two would race, and a pane
-// that isn't ready yet would consume the whole retry budget on its first
-// attempt.
-const startAgentAttemptTimeout = 2 * time.Second
+// deadline below can actually retry. Herdr requires this to be greater than
+// 3 seconds.
+const startAgentAttemptTimeout = 5 * time.Second
 
 func startAgent(h mux.Mux, pane, taskID, sessionPath string) error {
 	ticker := time.NewTicker(250 * time.Millisecond)
@@ -162,6 +161,12 @@ func startAgent(h mux.Mux, pane, taskID, sessionPath string) error {
 			return nil
 		} else {
 			lastErr = err
+			// StartAgent can time out after launching Claude but before herdr
+			// finishes readiness detection. A retry then reports agent_name_taken;
+			// query the pane and treat an existing registration as success.
+			if _, statusErr := h.AgentStatus(pane); statusErr == nil {
+				return nil
+			}
 		}
 		select {
 		case <-ticker.C:
@@ -193,11 +198,13 @@ func checkDedup(d *db.DB, thought string) error {
 
 	raw, err := llm.Oneshot(dedup.JudgePrompt(thought, cands))
 	if err != nil {
-		return fmt.Errorf("dedup judge failed (rerun with --no-dedup to skip): %w", err)
+		fmt.Fprintf(os.Stderr, "warning: dedup judge unavailable; starting without duplicate check: %v\n", err)
+		return nil
 	}
 	matches, err := dedup.ParseJudge(raw)
 	if err != nil {
-		return err // hard error, raw output included — no salvage parsing
+		fmt.Fprintf(os.Stderr, "warning: dedup judge returned invalid output; starting without duplicate check: %v\n", err)
+		return nil
 	}
 	if len(matches) == 0 {
 		return nil
@@ -316,9 +323,8 @@ func NewParkCmd() *cobra.Command {
 	}
 }
 
-// NewResumeCmd brings a task back: parked tasks transition to live; live
-// tasks whose herdr tab has vanished (stale, herdr restart) get a fresh tab
-// resuming the conversation.
+// NewResumeCmd brings interactive tasks back and attaches active daemon tasks
+// to their current log on demand.
 func NewResumeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "resume <id>",
@@ -337,14 +343,36 @@ func NewResumeCmd() *cobra.Command {
 				if err != nil {
 					exitError(cmd, err)
 				}
-			} else if task.Status != "live" {
-				exitError(cmd, fmt.Errorf("task %s is %s; only parked or live tasks resume", task.ID, task.Status))
+			} else if task.Status == "open" && task.Mode != nil {
+				task, err = d.ResumeTask(args[0])
+				if err != nil {
+					exitError(cmd, err)
+				}
+			} else if task.Status != "live" && task.Status != "active" {
+				exitError(cmd, fmt.Errorf("task %s is %s; only parked, live, active, or released capture tasks resume", task.ID, task.Status))
 			}
 			if task.Workdir == nil || task.Repo == nil {
 				fmt.Printf("%s live again (no recorded workdir; start the session yourself)\n", task.ID)
 				return
 			}
 			h := mux.Herdr{}
+			if task.HerdrTab != nil && *task.HerdrTab != "" {
+				if err := h.FocusTab(*task.HerdrTab); err == nil {
+					fmt.Printf("%s already attached in %s\n", task.ID, *task.Workdir)
+					return
+				}
+			}
+			if task.HerdrPane != nil {
+				if states, stateErr := h.AgentStates(); stateErr == nil {
+					if _, alive := states[*task.HerdrPane]; alive {
+						if task.HerdrTab != nil {
+							_ = h.FocusTab(*task.HerdrTab)
+						}
+						fmt.Printf("%s already running in %s\n", task.ID, *task.Workdir)
+						return
+					}
+				}
+			}
 			ws, err := h.EnsureWorkspace(filepath.Base(*task.Repo), *task.Repo)
 			if err != nil {
 				exitError(cmd, err)
@@ -357,6 +385,24 @@ func NewResumeCmd() *cobra.Command {
 			if err != nil {
 				exitError(cmd, err)
 			}
+			if task.Status == "active" {
+				logPath, err := latestSessionLog(task.ID)
+				if err != nil {
+					_ = h.CloseTab(tab)
+					exitError(cmd, err)
+				}
+				if err := h.RunPane(pane, []string{"tail", "-f", logPath}); err != nil {
+					_ = h.CloseTab(tab)
+					exitError(cmd, err)
+				}
+				if err := d.SetRuntime(task.ID, *task.Workdir, ws, tab, pane); err != nil {
+					_ = h.CloseTab(tab)
+					exitError(cmd, err)
+				}
+				h.FocusTab(tab)
+				fmt.Printf("%s attached → %s\n", task.ID, logPath)
+				return
+			}
 			if err := d.SetRuntime(task.ID, *task.Workdir, ws, tab, pane); err != nil {
 				exitError(cmd, err)
 			}
@@ -368,6 +414,26 @@ func NewResumeCmd() *cobra.Command {
 			fmt.Printf("%s resumed → %s\n", task.ID, *task.Workdir)
 		},
 	}
+}
+
+func latestSessionLog(taskID string) (string, error) {
+	home, _ := os.UserHomeDir()
+	matches, err := filepath.Glob(filepath.Join(home, ".dispatch", "sessions", taskID+"*.log"))
+	if err != nil {
+		return "", err
+	}
+	var latest string
+	var latestAt time.Time
+	for _, path := range matches {
+		info, err := os.Stat(path)
+		if err == nil && (latest == "" || info.ModTime().After(latestAt)) {
+			latest, latestAt = path, info.ModTime()
+		}
+	}
+	if latest == "" {
+		return "", fmt.Errorf("no session log found for task %s", taskID)
+	}
+	return latest, nil
 }
 
 // generateLabel fires the one label model call (PRD site 1) and syncs the

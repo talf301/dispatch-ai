@@ -28,7 +28,7 @@ type CLISpawner struct {
 var _ WorkerSpawner = (*CLISpawner)(nil)
 
 // argv builds the non-interactive invocation for the configured agent.
-func (s *CLISpawner) argv(systemPrompt, prompt string) (string, []string, error) {
+func (s *CLISpawner) argv(systemPrompt, prompt, model string) (string, []string, error) {
 	agent := s.Agent
 	if agent == "" {
 		agent = "claude"
@@ -39,25 +39,35 @@ func (s *CLISpawner) argv(systemPrompt, prompt string) (string, []string, error)
 	}
 	switch agent {
 	case "claude":
-		return bin, []string{
+		args := []string{
 			"--print",
 			"--dangerously-skip-permissions",
 			"--system-prompt", systemPrompt,
-			prompt,
-		}, nil
+		}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+		return bin, append(args, prompt), nil
 	case "codex":
 		// codex exec has no system-prompt slot; prepend it to the prompt.
-		return bin, []string{
+		args := []string{
 			"exec",
 			"--dangerously-bypass-approvals-and-sandbox",
-			systemPrompt + "\n\n" + prompt,
-		}, nil
+		}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+		return bin, append(args, systemPrompt+"\n\n"+prompt), nil
 	default:
 		return "", nil, fmt.Errorf("unknown agent %q (want claude or codex)", agent)
 	}
 }
 
 func (s *CLISpawner) Spawn(ctx context.Context, task db.Task, workDir string, role SpawnRole, logSuffix string) (WorkerHandle, error) {
+	return s.SpawnWithModel(ctx, task, workDir, role, logSuffix, "")
+}
+
+func (s *CLISpawner) SpawnWithModel(ctx context.Context, task db.Task, workDir string, role SpawnRole, logSuffix, model string) (WorkerHandle, error) {
 	lines := s.OutputLines
 	if lines == 0 {
 		lines = 100
@@ -79,7 +89,7 @@ func (s *CLISpawner) Spawn(ctx context.Context, task db.Task, workDir string, ro
 	}
 	systemPrompt = strings.ReplaceAll(systemPrompt, "$PARENT_ID", parentID)
 
-	bin, args, err := s.argv(systemPrompt, prompt)
+	bin, args, err := s.argv(systemPrompt, prompt, model)
 	if err != nil {
 		return nil, err
 	}

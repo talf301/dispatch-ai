@@ -1,8 +1,35 @@
 package commands
 
 import (
+	"fmt"
+
+	"github.com/dispatch-ai/dispatch/internal/db"
 	"github.com/spf13/cobra"
 )
+
+// warnIfOrphanFromLivePlan returns a one-line warning if repo points at a
+// live task's worktree and no parent was given. A live task can never be
+// --parent - it doesn't go through the daemon's worker/review cycle, so it
+// never gets a dispatch/plan-<id> branch for children to accumulate into -
+// so a task created this way completes with its own solo PR rather than
+// joining a shared plan. Returns "" when there's nothing to warn about.
+func warnIfOrphanFromLivePlan(database *db.DB, repo *string, parent string) string {
+	if repo == nil || parent != "" {
+		return ""
+	}
+	live, err := database.ListTasks("live", true)
+	if err != nil {
+		return ""
+	}
+	for _, t := range live {
+		if t.Repo != nil && *t.Repo == *repo {
+			return fmt.Sprintf(
+				"warning: -r points at live task %s's worktree - it can't be --parent, so this task will get its own PR on completion. If this is part of a batch that should land as one PR, create a plan parent task first and pass --parent <id>.",
+				t.ID)
+		}
+	}
+	return ""
+}
 
 // NewAddCmd returns the cobra command for adding a task.
 func NewAddCmd() *cobra.Command {
@@ -23,6 +50,10 @@ func NewAddCmd() *cobra.Command {
 			if cmd.Flags().Changed("repo") {
 				v, _ := cmd.Flags().GetString("repo")
 				repo = &v
+			}
+
+			if w := warnIfOrphanFromLivePlan(d, repo, parent); w != "" {
+				cmd.PrintErrln(w)
 			}
 
 			// Agent-facing path: new work is proposed, never auto-dispatched.

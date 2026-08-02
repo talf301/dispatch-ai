@@ -650,6 +650,10 @@ func TestReadyTasks(t *testing.T) {
 	a, _ := d.AddTask("task A", "", "", "", nil)
 	b, _ := d.AddTask("task B", "", "", "", nil)
 	c, _ := d.AddTask("task C", "", "", "", nil)
+	captured, _ := d.CaptureTask("live interactive task", "repo", "worktree")
+	if _, err := d.q.Exec("UPDATE tasks SET status = 'open' WHERE id = ?", captured.ID); err != nil {
+		t.Fatal(err)
+	}
 	d.AddDep(a.ID, b.ID)
 
 	ready, err := d.ReadyTasks()
@@ -670,6 +674,9 @@ func TestReadyTasks(t *testing.T) {
 	}
 	if !ids[c.ID] {
 		t.Errorf("expected C (%s) to be ready", c.ID)
+	}
+	if ids[captured.ID] {
+		t.Errorf("capture-first task %s should not be ready for legacy dispatch", captured.ID)
 	}
 }
 

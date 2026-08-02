@@ -34,10 +34,14 @@ func (m *MockSpawner) Spawn(_ context.Context, task db.Task, workDir string, rol
 	if m.ExitCode == 0 && role == RoleWorker {
 		mockCommitInWorktree(workDir, task.ID)
 	}
+	output := m.OutputText
+	if role == RoleReviewer && m.ExitCode == 0 && output == "" {
+		output = "VERDICT: approve"
+	}
 	h := &mockHandle{
 		pid:      FakePID,
 		exitCode: m.ExitCode,
-		output:   m.OutputText,
+		output:   output,
 		done:     make(chan struct{}),
 	}
 	if m.ExitCode != 0 {
@@ -55,10 +59,10 @@ type mockHandle struct {
 	done     chan struct{}
 }
 
-func (h *mockHandle) PID() int             { return h.pid }
+func (h *mockHandle) PID() int              { return h.pid }
 func (h *mockHandle) Done() <-chan struct{} { return h.done }
-func (h *mockHandle) Err() error           { return h.exitErr }
-func (h *mockHandle) Output() string       { return h.output }
+func (h *mockHandle) Err() error            { return h.exitErr }
+func (h *mockHandle) Output() string        { return h.output }
 
 func (h *mockHandle) Wait() error {
 	<-h.done
