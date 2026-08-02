@@ -3,10 +3,13 @@ package tests
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dispatch-ai/dispatch/internal/db"
 )
 
 func getID(t *testing.T, output string) string {
@@ -223,4 +226,41 @@ func TestExitCriteria_JSONOutput(t *testing.T) {
 		t.Fatalf("ready output is not a JSON array: %v\noutput: %s", err, readyOut)
 	}
 
+}
+
+func TestGoThoughtFileCapturesFileContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	bin := buildBinary(t, tmpDir)
+	t.Setenv("PATH", tmpDir) // keep the real herdr out of this test
+	dbPath := filepath.Join(tmpDir, "test.db")
+	thoughtPath := filepath.Join(tmpDir, "thought.txt")
+	want := "assemble the linked planning context\nwith multiple lines"
+	if err := os.WriteFile(thoughtPath, []byte(want), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	runDT(t, bin, dbPath, "go", "--thought-file", thoughtPath, "--repo", projectRoot(t), "--here", "--no-dedup")
+
+	out := runDT(t, bin, dbPath, "list")
+	var result struct {
+		Tasks []map[string]interface{} `json:"tasks"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("failed to parse list output: %v\noutput: %s", err, out)
+	}
+	if len(result.Tasks) != 1 {
+		t.Fatalf("expected one captured task, got %d: %s", len(result.Tasks), out)
+	}
+	captured, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer captured.Close()
+	task, err := captured.GetTaskV2(result.Tasks[0]["id"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Thought != want {
+		t.Errorf("thought = %q, want %q", task.Thought, want)
+	}
 }

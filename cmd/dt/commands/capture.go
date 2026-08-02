@@ -44,12 +44,24 @@ func NewGoCmd() *cobra.Command {
 	var here bool
 	var noDedup bool
 	var repoFlag string
+	var thoughtFile string
 	cmd := &cobra.Command{
-		Use:   "go <thought>",
+		Use:   "go [thought]",
 		Short: "Capture a thought and start an agent on it",
-		Args:  cobra.ExactArgs(1),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 1 {
+				return fmt.Errorf("accepts at most one thought argument")
+			}
+			if len(args) == 0 && thoughtFile == "" {
+				return fmt.Errorf("requires a thought argument or --thought-file")
+			}
+			return nil
+		},
 		Run: func(cmd *cobra.Command, args []string) {
-			thought := args[0]
+			thought, err := loadThought(args, thoughtFile)
+			if err != nil {
+				exitError(cmd, err)
+			}
 			d := openDB(cmd)
 			defer d.Close()
 
@@ -141,6 +153,7 @@ func NewGoCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&here, "here", false, "run in place (dirty tree, no worktree)")
 	cmd.Flags().BoolVar(&noDedup, "no-dedup", false, "skip the similar-closed-work check")
 	cmd.Flags().StringVarP(&repoFlag, "repo", "r", "", "repo path (default: inferred from cwd)")
+	cmd.Flags().StringVar(&thoughtFile, "thought-file", "", "read the thought from a file")
 	return cmd
 }
 
@@ -169,6 +182,20 @@ func startAgent(h mux.Mux, pane, taskID, sessionPath string) error {
 			return fmt.Errorf("pane %s was not ready: %w", pane, lastErr)
 		}
 	}
+}
+
+func loadThought(args []string, path string) (string, error) {
+	if path != "" {
+		thought, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read thought file: %w", err)
+		}
+		return string(thought), nil
+	}
+	if len(args) == 0 {
+		return "", fmt.Errorf("requires a thought argument or --thought-file")
+	}
+	return args[0], nil
 }
 
 // checkDedup is the two-stage capture-time dedup (M3). Stage 1 is free and
