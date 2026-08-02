@@ -24,6 +24,9 @@ func (f *fakeMux) CreateTab(string, string, string) (string, string, error) {
 	return "tab", "pane", nil
 }
 func (f *fakeMux) RunPane(string, []string) error { return nil }
+func (f *fakeMux) StartAgent(string, string, string, time.Duration, []string) error {
+	return nil
+}
 func (f *fakeMux) FocusTab(string) error          { return nil }
 func (f *fakeMux) RenameTab(string, string) error { return nil }
 func (f *fakeMux) AgentStates() (map[string]string, error) {
