@@ -110,6 +110,9 @@ func (d *DB) addSystemNote(taskID, oldStatus, newStatus string) error {
 	author := "system"
 	content := fmt.Sprintf("Status changed: %s → %s", oldStatus, newStatus)
 	_, err := d.AddNote(taskID, content, &author)
+	if err == nil {
+		d.publish(Event{TaskID: taskID, OldStatus: oldStatus, NewStatus: newStatus})
+	}
 	return err
 }
 

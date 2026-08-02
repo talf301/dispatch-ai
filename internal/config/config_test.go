@@ -28,6 +28,7 @@ max_workers = 2
 
 [[repo]]
 path = "` + repoB + `"
+test_command = "go test ./..."
 `
 	cfgPath := filepath.Join(tmp, "config.toml")
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
@@ -48,7 +49,7 @@ path = "` + repoB + `"
 	}
 
 	// Default MaxWorkers applied
-	if cfg.Repos[1].Path != repoB || cfg.Repos[1].MaxWorkers != DefaultMaxWorkers {
+	if cfg.Repos[1].Path != repoB || cfg.Repos[1].MaxWorkers != DefaultMaxWorkers || cfg.Repos[1].TestCommand != "go test ./..." {
 		t.Errorf("repo[1] = %+v, want path=%s maxWorkers=%d", cfg.Repos[1], repoB, DefaultMaxWorkers)
 	}
 }

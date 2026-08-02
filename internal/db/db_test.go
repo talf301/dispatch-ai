@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func tempDBPath(t *testing.T) string {
@@ -67,7 +68,7 @@ func TestTablesExist(t *testing.T) {
 	}
 	defer d.Close()
 
-	tables := []string{"tasks", "deps", "notes"}
+	tables := []string{"tasks", "deps", "notes", "task_attempts"}
 	for _, tbl := range tables {
 		var name string
 		err := d.q.QueryRow(
@@ -76,6 +77,76 @@ func TestTablesExist(t *testing.T) {
 		if err != nil {
 			t.Errorf("table %q not found: %v", tbl, err)
 		}
+	}
+}
+
+func TestUsageAttemptIsIdempotent(t *testing.T) {
+	path := tempDBPath(t)
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := d.AddTask("usage", "", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.StartAttempt("a1", task.ID, "worker", "codex", nil); err != nil {
+		t.Fatal(err)
+	}
+	v := int64(7)
+	out := int64(3)
+	turns := 1
+	status := 0
+	if err := d.FinishAttempt("a1", Attempt{InputTokens: &v, OutputTokens: &out, TurnCount: &turns, ExitStatus: &status}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.FinishAttempt("a1", Attempt{InputTokens: &v}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := d.Usage(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Attempts) != 1 || r.Totals.InputTokens != 7 || r.Totals.OutputTokens != 3 {
+		t.Fatalf("report = %+v", r)
+	}
+	d.Close()
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	r, err = d.Usage(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Attempts) != 1 {
+		t.Fatalf("restart duplicated attempt: %+v", r)
+	}
+}
+
+func TestUsageSinceComparesFractionalSecondsNumerically(t *testing.T) {
+	d, err := Open(tempDBPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	task, err := d.AddTask("usage boundary", "", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.StartAttempt("boundary", task.ID, "worker", "codex", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.q.Exec("UPDATE task_attempts SET started_at=? WHERE attempt_key=?", "2026-07-31T00:00:00.5Z", "boundary"); err != nil {
+		t.Fatal(err)
+	}
+	r, err := d.UsageSince(time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Attempts) != 1 {
+		t.Fatalf("fractional-second attempt missing from report: %+v", r)
 	}
 }
 

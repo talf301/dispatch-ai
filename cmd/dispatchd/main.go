@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -56,6 +57,7 @@ var rootCmd = &cobra.Command{
 		workerAgent, _ := cmd.Flags().GetString("worker-agent")
 		reviewerAgent, _ := cmd.Flags().GetString("reviewer-agent")
 		gpEnabled, _ := cmd.Flags().GetBool("gp")
+		managerEnabled, _ := cmd.Flags().GetBool("manager")
 
 		if workerPromptPath == "" || reviewerPromptPath == "" {
 			return fmt.Errorf("--worker-prompt and --reviewer-prompt are required")
@@ -107,6 +109,10 @@ var rootCmd = &cobra.Command{
 			WorktreeBase: filepath.Join(home, ".dispatch", "worktrees"),
 			SessionDir:   filepath.Join(home, ".dispatch", "sessions"),
 			GPEnabled:    gpEnabled,
+			Manager:      managerEnabled,
+		}
+		if managerEnabled {
+			cfg.Mux = daemon.MuxIfAvailable(log.New(os.Stderr, "[dispatchd] ", log.LstdFlags))
 		}
 
 		newSpawner := func(agent string) *daemon.CLISpawner {
@@ -116,6 +122,7 @@ var rootCmd = &cobra.Command{
 				ReviewerPrompt: string(reviewerPrompt),
 				OutputLines:    100,
 				SessionDir:     filepath.Join(home, ".dispatch", "sessions"),
+				UsageDB:        database,
 			}
 		}
 		spawner := &daemon.RoleSpawner{
@@ -150,6 +157,7 @@ func init() {
 	rootCmd.Flags().String("worker-agent", envOrDefault("DISPATCH_WORKER_AGENT", "claude"), "agent CLI for workers: claude or codex")
 	rootCmd.Flags().String("reviewer-agent", envOrDefault("DISPATCH_REVIEWER_AGENT", "claude"), "agent CLI for the review gate: claude or codex")
 	rootCmd.Flags().Bool("gp", os.Getenv("DISPATCH_GP") == "1", "enable GraphPilot integration (env: DISPATCH_GP=1)")
+	rootCmd.Flags().Bool("manager", os.Getenv("DISPATCH_MANAGER") == "1", "run the human-facing manager session")
 }
 
 func main() {
