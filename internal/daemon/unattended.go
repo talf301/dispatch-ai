@@ -200,6 +200,7 @@ func (d *Daemon) verifyAcceptance(ctx context.Context, t *db.Task) (ok bool, rea
 			ReviewerPrompt: acceptanceReviewerPrompt(t),
 			OutputLines:    200,
 			SessionDir:     d.sessionDir,
+			UsageDB:        d.db,
 		}
 		handle, err := spawner.Spawn(ctx, *t, *t.Workdir, RoleReviewer, "-accept-review")
 		if err != nil {

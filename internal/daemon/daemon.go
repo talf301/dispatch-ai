@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/dispatch-ai/dispatch/internal/config"
 	"github.com/dispatch-ai/dispatch/internal/db"
+	managerpkg "github.com/dispatch-ai/dispatch/internal/manager"
 	"github.com/dispatch-ai/dispatch/internal/mux"
 )
 
@@ -34,6 +36,7 @@ type Config struct {
 	WorkerModel           string // optional explicit model for workers
 	WorkerEscalationModel string // optional model after repeated review rejection
 	WorkerEscalateAfter   int    // rejected review rounds before escalation; default 2
+	Manager               bool   // run the single human-facing manager session
 }
 
 // DefaultConfig returns configuration with defaults.
@@ -57,11 +60,12 @@ type Daemon struct {
 	baseBranch             string
 	gpBin                  string                  // path to gp binary, empty if GP integration disabled
 	workers                map[string]WorkerHandle // taskID -> handle
-	workerRepo             map[string]string       // taskID -> repoPath
-	taskRoles              map[string]SpawnRole    // taskID -> current role
-	noteCountAtReviewStart map[string]int          // taskID -> note count when reviewer was spawned
-	retrying               map[string]bool         // taskID -> reviewer repair retry pending
-	protocolRetries        map[string]int          // taskID -> malformed reviewer retries
+	validations            map[string]*validationHandle
+	workerRepo             map[string]string    // taskID -> repoPath
+	taskRoles              map[string]SpawnRole // taskID -> current role
+	noteCountAtReviewStart map[string]int       // taskID -> note count when reviewer was spawned
+	retrying               map[string]bool      // taskID -> reviewer repair retry pending
+	protocolRetries        map[string]int       // taskID -> malformed reviewer retries
 	logger                 *log.Logger
 
 	// M5: unattended v2 watchers (goroutines, unlike the tick-driven v1 path).
@@ -70,6 +74,9 @@ type Daemon struct {
 	sessionDir         string
 	mu                 sync.Mutex
 	watchingUnattended map[string]bool
+	manager            *managerpkg.Manager
+	managerCwd         string
+	runCtx             context.Context
 }
 
 // New creates a Daemon from the given config and spawner.
@@ -86,6 +93,7 @@ func New(database *db.DB, cfg Config, spawner WorkerSpawner) *Daemon {
 		repos:                  repos,
 		baseBranch:             cfg.BaseBranch,
 		workers:                make(map[string]WorkerHandle),
+		validations:            make(map[string]*validationHandle),
 		workerRepo:             make(map[string]string),
 		taskRoles:              make(map[string]SpawnRole),
 		noteCountAtReviewStart: make(map[string]int),
@@ -96,6 +104,19 @@ func New(database *db.DB, cfg Config, spawner WorkerSpawner) *Daemon {
 		reviewerAgent:          cfg.ReviewerAgent,
 		sessionDir:             cfg.SessionDir,
 		watchingUnattended:     make(map[string]bool),
+	}
+	if cfg.Manager && cfg.Mux != nil {
+		paths := make([]string, 0, len(repos))
+		for repo := range repos {
+			paths = append(paths, repo)
+		}
+		if len(paths) == 0 {
+			d.logger.Printf("WARNING: --manager enabled but no repository is configured; manager disabled")
+		} else {
+			sort.Strings(paths)
+			d.manager = managerpkg.New(database, cfg.Mux)
+			d.managerCwd = paths[0]
+		}
 	}
 
 	if cfg.GPEnabled {
@@ -132,6 +153,21 @@ func (d *Daemon) recoverActive() {
 		}
 
 		pidPath := filepath.Join(wtDir, "worker.pid")
+		validationPID := filepath.Join(wtDir, "validation.pid")
+		if _, err := os.Stat(validationPID); err == nil {
+			pid, startedAt, readErr := readPIDFile(validationPID)
+			_ = os.Remove(validationPID)
+			if readErr == nil && isProcessAlive(pid) && startedAt != "" && processStartTime(pid) == startedAt {
+				if process, err := os.FindProcess(pid); err == nil {
+					_ = process.Signal(syscall.SIGTERM)
+				}
+			}
+			d.logger.Printf("recovery: task %s had an interrupted validation, blocking", task.ID)
+			if _, err := d.db.BlockTask(task.ID, "validation interrupted by daemon restart"); err != nil {
+				d.logger.Printf("recovery: block task %s: %v", task.ID, err)
+			}
+			continue
+		}
 		pid, startedAt, err := readPIDFile(pidPath)
 		if os.IsNotExist(err) {
 			d.logger.Printf("recovery: task %s has no PID file, blocking", task.ID)
@@ -338,8 +374,8 @@ func (d *Daemon) spawnReady() {
 
 	// Count active workers per repo.
 	activePerRepo := make(map[string]int)
-	for _, repoPath := range d.workerRepo {
-		activePerRepo[repoPath]++
+	for taskID := range d.workers {
+		activePerRepo[d.workerRepo[taskID]]++
 	}
 
 	for _, task := range tasks {
@@ -620,6 +656,17 @@ func (d *Daemon) handleWorkerComplete(taskID string) {
 		}
 	}
 
+	if repoCfg, ok := d.repos[d.workerRepo[taskID]]; ok && repoCfg.TestCommand != "" {
+		if err := d.startValidation(taskID, repoCfg.TestCommand, wtDir); err != nil {
+			d.handleValidationFailure(taskID, err.Error(), "")
+		}
+		return
+	}
+	d.startReviewer(taskID, task, wtDir)
+}
+
+func (d *Daemon) startReviewer(taskID string, task *db.Task, wtDir string) {
+
 	// Record note count before reviewer spawns.
 	notes, err := d.db.GetNotes(taskID)
 	if err != nil {
@@ -654,6 +701,99 @@ func (d *Daemon) handleWorkerComplete(taskID string) {
 	d.workers[taskID] = handle
 	d.taskRoles[taskID] = RoleReviewer
 	d.logger.Printf("spawned reviewer for task %s (pid %d)", taskID, handle.PID())
+}
+
+// validationHandle is a daemon-owned child process. The daemon observes its
+// completion without spending a model turn waiting for it.
+type validationHandle struct {
+	cmd     *exec.Cmd
+	done    chan struct{}
+	err     error
+	output  *RingBuf
+	started time.Time
+}
+
+func (h *validationHandle) Output() string { return h.output.String() }
+
+func (d *Daemon) startValidation(taskID, command, workdir string) error {
+	ctx := d.runCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	output := NewRingBuf(100)
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.Dir = workdir
+	cmd.Stdout, cmd.Stderr = output, output
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start validation: %w", err)
+	}
+	h := &validationHandle{cmd: cmd, done: make(chan struct{}), output: output, started: time.Now()}
+	if err := writePIDFile(filepath.Join(workdir, "validation.pid"), cmd.Process.Pid); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("record validation: %w", err)
+	}
+	d.validations[taskID] = h
+	go func() {
+		h.err = cmd.Wait()
+		_ = os.Remove(filepath.Join(workdir, "validation.pid"))
+		close(h.done)
+	}()
+	d.logger.Printf("started validation for task %s (pid %d)", taskID, cmd.Process.Pid)
+	return nil
+}
+
+func (d *Daemon) monitorValidations() {
+	for taskID, h := range d.validations {
+		select {
+		case <-h.done:
+			delete(d.validations, taskID)
+			duration := time.Since(h.started).Round(time.Millisecond)
+			if h.err == nil {
+				d.logger.Printf("validation passed for task %s (duration %s, exit 0)", taskID, duration)
+				task, err := d.db.GetTask(taskID)
+				if err == nil {
+					d.startReviewer(taskID, task, filepath.Join(d.worktreeBase, taskID))
+				}
+			} else {
+				d.handleValidationFailure(taskID, fmt.Sprintf("%v (duration %s, non-zero exit)", h.err, duration), h.Output())
+			}
+		default:
+		}
+	}
+}
+
+func (d *Daemon) handleValidationFailure(taskID, validationErr, output string) {
+	if len(output) > 2000 {
+		output = output[len(output)-2000:]
+	}
+	notes, err := d.db.GetNotes(taskID)
+	if err != nil {
+		d.logger.Printf("validation: notes %s: %v", taskID, err)
+		return
+	}
+	repairs := 0
+	for _, note := range notes {
+		if strings.HasPrefix(note.Content, "Validation failure repair") {
+			repairs++
+		}
+	}
+	reason := fmt.Sprintf("validation failed: %s\n%s", validationErr, output)
+	author := "validation"
+	if _, err := d.db.AddNote(taskID, fmt.Sprintf("Validation failure repair %d/1\n%s", repairs+1, reason), &author); err != nil {
+		d.logger.Printf("validation: note %s: %v", taskID, err)
+	}
+	if repairs >= 1 {
+		if _, err := d.db.BlockTask(taskID, "validation failed after one repair attempt: "+reason); err != nil {
+			d.logger.Printf("validation: block %s: %v", taskID, err)
+		}
+		return
+	}
+	if _, err := d.db.ReopenTask(taskID); err != nil {
+		d.logger.Printf("validation: reopen %s: %v", taskID, err)
+		return
+	}
+	d.logger.Printf("validation: task %s failed, allowing one repair worker", taskID)
 }
 
 // handleReviewApproval merges the branch and marks the task done.
@@ -910,6 +1050,7 @@ func (d *Daemon) handleWorkerCrash(taskID string, exitErr error, handle WorkerHa
 // Run starts the daemon main loop. It blocks until ctx is cancelled.
 func (d *Daemon) Run(ctx context.Context) error {
 	d.logger.Println("starting daemon")
+	d.runCtx = ctx
 
 	// Ensure sessions directory exists.
 	sessDir := filepath.Join(filepath.Dir(d.worktreeBase), "sessions")
@@ -919,6 +1060,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	d.recoverActive()
 	d.cleanOrphanedWorktrees()
+	if d.manager != nil {
+		if err := d.manager.Start(d.managerCwd); err != nil {
+			return fmt.Errorf("start manager: %w", err)
+		}
+		go func() {
+			if err := d.manager.Run(ctx); err != nil && ctx.Err() == nil {
+				d.logger.Printf("manager: %v", err)
+			}
+		}()
+	}
 
 	ticker := time.NewTicker(d.cfg.PollInterval)
 	defer ticker.Stop()
@@ -932,6 +1083,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		case <-ticker.C:
 			d.spawnReady()
 			d.monitorWorkers()
+			d.monitorValidations()
 			d.scanUnattended(ctx)
 			d.checkPendingPRs()
 			d.cleanOrphanedWorktrees()
@@ -1021,6 +1173,10 @@ func (d *Daemon) cleanOrphanedWorktrees() {
 		keepIDs[taskID] = true
 	}
 	for taskID := range d.retrying {
+		keepIDs[taskID] = true
+	}
+	// Keep worktrees for tasks reopened by a validation or review failure.
+	for taskID := range d.workerRepo {
 		keepIDs[taskID] = true
 	}
 

@@ -84,6 +84,7 @@ var rootCmd = &cobra.Command{
 			}
 		}
 		gpEnabled, _ := cmd.Flags().GetBool("gp")
+		managerEnabled, _ := cmd.Flags().GetBool("manager")
 
 		if workerPromptPath == "" || reviewerPromptPath == "" {
 			return fmt.Errorf("--worker-prompt and --reviewer-prompt are required")
@@ -128,17 +129,19 @@ var rootCmd = &cobra.Command{
 		}
 
 		cfg := daemon.Config{
-			DBPath:        dbPath,
-			Repos:         repos,
-			BaseBranch:    baseBranch,
-			PollInterval:  pollInterval,
-			WorktreeBase:  filepath.Join(home, ".dispatch", "worktrees"),
-			SessionDir:    filepath.Join(home, ".dispatch", "sessions"),
-			GPEnabled:     gpEnabled,
-			Mux:           daemon.MuxIfAvailable(log.New(os.Stderr, "[dispatchd] ", log.LstdFlags)),
-			ReviewerAgent: reviewerAgent,
-			WorkerModel:   workerModel, WorkerEscalationModel: workerEscalationModel,
-			WorkerEscalateAfter: workerEscalateAfter,
+			DBPath:                dbPath,
+			Repos:                 repos,
+			BaseBranch:            baseBranch,
+			PollInterval:          pollInterval,
+			WorktreeBase:          filepath.Join(home, ".dispatch", "worktrees"),
+			SessionDir:            filepath.Join(home, ".dispatch", "sessions"),
+			GPEnabled:             gpEnabled,
+			Mux:                   daemon.MuxIfAvailable(log.New(os.Stderr, "[dispatchd] ", log.LstdFlags)),
+			ReviewerAgent:         reviewerAgent,
+			WorkerModel:           workerModel,
+			WorkerEscalationModel: workerEscalationModel,
+			WorkerEscalateAfter:   workerEscalateAfter,
+			Manager:               managerEnabled,
 		}
 
 		newSpawner := func(agent string) *daemon.CLISpawner {
@@ -148,6 +151,7 @@ var rootCmd = &cobra.Command{
 				ReviewerPrompt: string(reviewerPrompt),
 				OutputLines:    100,
 				SessionDir:     filepath.Join(home, ".dispatch", "sessions"),
+				UsageDB:        database,
 			}
 		}
 		spawner := &daemon.RoleSpawner{
@@ -185,6 +189,7 @@ func init() {
 	rootCmd.Flags().String("worker-escalation-model", os.Getenv("DISPATCH_WORKER_ESCALATION_MODEL"), "model for workers after repeated review rejection (optional)")
 	rootCmd.Flags().Int("worker-escalate-after", envIntOrDefault("DISPATCH_WORKER_ESCALATE_AFTER", defaultWorkerEscalateAfter), "rejected review rounds before worker model escalation")
 	rootCmd.Flags().Bool("gp", os.Getenv("DISPATCH_GP") == "1", "enable GraphPilot integration (env: DISPATCH_GP=1)")
+	rootCmd.Flags().Bool("manager", os.Getenv("DISPATCH_MANAGER") == "1", "run the human-facing manager session")
 }
 
 func main() {

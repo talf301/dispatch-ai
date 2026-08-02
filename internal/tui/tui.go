@@ -11,12 +11,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
 	"github.com/dispatch-ai/dispatch/internal/mux"
@@ -34,6 +36,7 @@ const (
 	modeBrief           // rendered what-changed digest
 	modePromote         // u - acceptance entry
 	modeRename          // e - rename selected task
+	modeUsage           // i - provider usage drill-down
 	modeHelp            // ? - scrollable key reference
 	modeRepoSelect      // choose repo before g capture
 )
@@ -87,6 +90,7 @@ type Model struct {
 	pendingThought string
 	brief          string // rendered digest
 	helpAt         int    // first visible line in the help view
+	usage          *usageView
 
 	// Commit-time cache for staleness: workdir → HEAD commit time.
 	// Refreshed every commitCacheTTL, not every 2s tick.
@@ -142,6 +146,16 @@ type briefMsg struct {
 type batchDoneMsg struct {
 	n   int
 	err error
+}
+type usageMsg struct {
+	view *usageView
+	err  error
+}
+
+type usageView struct {
+	task  *db.UsageReport
+	today db.UsageTotals
+	week  db.UsageTotals
 }
 
 func tick() tea.Cmd {
@@ -293,6 +307,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.store.MarkSeen(time.Now())
 		return m, nil
 
+	case usageMsg:
+		if msg.err != nil {
+			m.status = "Could not read usage: " + msg.err.Error()
+			return m, nil
+		}
+		m.usage, m.mode = msg.view, modeUsage
+		return m, nil
+
 	case batchDoneMsg:
 		m.busy, m.mode, m.proposal = false, modeBoard, nil
 		if msg.err != nil {
@@ -427,6 +449,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeBrief:
 		m.mode = modeBoard
 		return m, nil
+	case modeUsage:
+		m.mode = modeBoard
+		return m, nil
 	case modeHelp:
 		switch msg.String() {
 		case "esc", "q", "?":
@@ -481,6 +506,27 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			text, err := brief(m.store)
 			return briefMsg{text: text, err: err}
 		}
+	case "i":
+		if t, ok := m.current(); ok {
+			return m, func() tea.Msg {
+				report, err := m.store.Usage(t.ID)
+				if err != nil {
+					return usageMsg{err: err}
+				}
+				now := time.Now().UTC()
+				// Today/week intentionally use UTC calendar boundaries for deterministic aggregates.
+				today, err := m.store.UsageSince(time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC))
+				if err != nil {
+					return usageMsg{err: err}
+				}
+				week, err := m.store.UsageSince(now.AddDate(0, 0, -6).Truncate(24 * time.Hour))
+				if err != nil {
+					return usageMsg{err: err}
+				}
+				return usageMsg{view: &usageView{task: report, today: totals(today), week: totals(week)}}
+			}
+		}
+		return m, nil
 	case "x":
 		if t, ok := m.current(); ok {
 			m.mode = modeKill
@@ -613,6 +659,8 @@ func (m Model) View() string {
 		return b.String()
 	case modeBrief:
 		return m.brief + dimStyle.Render("\n\nAny key to return.")
+	case modeUsage:
+		return m.viewUsage()
 	case modeHelp:
 		return m.helpView()
 	case modeRepoSelect:
@@ -669,8 +717,80 @@ func (m Model) View() string {
 	if m.status != "" {
 		b.WriteString(statusStyle.Render(m.status) + "\n")
 	}
-	b.WriteString(dimStyle.Render("\n? help · a approve · d done · e rename · j/k move · ⏎ open activity · g capture · : command · q quit"))
-	return b.String()
+	b.WriteString(dimStyle.Render("\n? help · a approve · d done · e rename · j/k move · ⏎ open activity · i usage · g capture · : command · b brief · u promote · x kill · p park · r resume · z all · q quit"))
+	return boundLines(b.String(), m.width)
+}
+
+func totals(r *db.UsageReport) db.UsageTotals {
+	if r == nil {
+		return db.UsageTotals{}
+	}
+	return r.Totals
+}
+
+func (m Model) viewUsage() string {
+	if m.usage == nil || m.usage.task == nil || len(m.usage.task.Attempts) == 0 {
+		return dimStyle.Render("No usage recorded.\n\nAny key to return.")
+	}
+	r := m.usage.task
+	var b strings.Builder
+	b.WriteString(laneStyle.Render("Usage · "+r.TaskID) + "\n")
+	b.WriteString(dimStyle.Render("Provider-emitted values; duration is derived from timestamps. Missing values are not estimated.") + "\n\n")
+	b.WriteString(fmt.Sprintf("Attempts %d  ·  raw input %s  ·  cached input %s  ·  output %s  ·  turns %s\n",
+		r.Totals.Attempts, number(r.Totals.InputTokens), number(r.Totals.CachedInputTokens), number(r.Totals.OutputTokens), strconv.Itoa(r.Totals.Turns)))
+	b.WriteString(fmt.Sprintf("Today (all tasks)  %s in / %s out / %d turns    Week (all tasks)  %s in / %s out / %d turns\n\n",
+		number(m.usage.today.InputTokens), number(m.usage.today.OutputTokens), m.usage.today.Turns,
+		number(m.usage.week.InputTokens), number(m.usage.week.OutputTokens), m.usage.week.Turns))
+	for _, a := range r.Attempts {
+		model := "unknown"
+		if a.Model != nil && *a.Model != "" {
+			model = *a.Model
+		}
+		waits := "not recorded"
+		if a.WaitOnlyCount != nil {
+			waits = strconv.Itoa(*a.WaitOnlyCount) + " (detected)"
+		}
+		b.WriteString(fmt.Sprintf("%s/%s/%s  %s  %s in · %s cached · %s out · %s turns · waits %s\n",
+			a.Provider, model, a.Role, duration(a), numberPtr(a.InputTokens), numberPtr(a.CachedInputTokens),
+			numberPtr(a.OutputTokens), numberPtr(a.TurnCount), waits))
+	}
+	b.WriteString(dimStyle.Render("Any key to return."))
+	return boundLines(b.String(), m.width)
+}
+
+func number(n int64) string { return strconv.FormatInt(n, 10) }
+
+func numberPtr[T int64 | int](p *T) string {
+	if p == nil {
+		return "-"
+	}
+	return fmt.Sprint(*p)
+}
+
+func duration(a db.Attempt) string {
+	if a.EndedAt == nil {
+		return "running"
+	}
+	start, e1 := time.Parse(time.RFC3339Nano, a.StartedAt)
+	end, e2 := time.Parse(time.RFC3339Nano, *a.EndedAt)
+	if e1 != nil || e2 != nil || end.Before(start) {
+		return "duration ?"
+	}
+	return "duration " + end.Sub(start).Round(time.Millisecond).String()
+}
+
+func boundLines(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		if lipgloss.Width(line) > width {
+			line = ansi.Truncate(line, width, "…")
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }
 
 func (m Model) renderBoard(lanes []lane, idx *int, width int, title string) string {

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
@@ -22,6 +23,8 @@ type CLISpawner struct {
 	ReviewerPrompt string // contents of reviewer.md (with $TASK_ID placeholder)
 	OutputLines    int    // ring buffer size, default 100
 	SessionDir     string // path to ~/.dispatch/sessions/
+	UsageDB        *db.DB
+	Model          string
 }
 
 // Compile-time check that CLISpawner implements WorkerSpawner.
@@ -42,6 +45,7 @@ func (s *CLISpawner) argv(systemPrompt, prompt, model string) (string, []string,
 		args := []string{
 			"--print",
 			"--dangerously-skip-permissions",
+			"--output-format", "stream-json", "--verbose",
 			"--system-prompt", systemPrompt,
 		}
 		if model != "" {
@@ -52,6 +56,7 @@ func (s *CLISpawner) argv(systemPrompt, prompt, model string) (string, []string,
 		// codex exec has no system-prompt slot; prepend it to the prompt.
 		args := []string{
 			"exec",
+			"--json",
 			"--dangerously-bypass-approvals-and-sandbox",
 		}
 		if model != "" {
@@ -71,6 +76,9 @@ func (s *CLISpawner) SpawnWithModel(ctx context.Context, task db.Task, workDir s
 	lines := s.OutputLines
 	if lines == 0 {
 		lines = 100
+	}
+	if model == "" {
+		model = s.Model
 	}
 
 	prompt := fmt.Sprintf("Your task ID is %s. Run `dt show %s` to read your assignment.", task.ID, task.ID)
@@ -110,8 +118,9 @@ func (s *CLISpawner) SpawnWithModel(ctx context.Context, task db.Task, workDir s
 	}
 
 	tw := NewTeeWriter(buf, logFile)
-	cmd.Stdout = tw
-	cmd.Stderr = tw
+	cap := newUsageCapture(agentName(s.Agent), tw)
+	cmd.Stdout = cap
+	cmd.Stderr = cap
 
 	if err := cmd.Start(); err != nil {
 		if logFile != nil {
@@ -120,9 +129,25 @@ func (s *CLISpawner) SpawnWithModel(ctx context.Context, task db.Task, workDir s
 		return nil, fmt.Errorf("start %s: %w", bin, err)
 	}
 
-	h := &cliHandle{cmd: cmd, tw: tw, logFile: logFile, done: make(chan struct{})}
+	key := fmt.Sprintf("%s:%s:%d:%d", task.ID, role, cmd.Process.Pid, time.Now().UnixNano())
+	var modelPtr *string
+	if model != "" {
+		modelPtr = &model
+	}
+	if s.UsageDB != nil {
+		if err := s.UsageDB.StartAttempt(key, task.ID, string(role), agentName(s.Agent), modelPtr); err != nil { /* usage must not break lifecycle */
+		}
+	}
+	h := &cliHandle{cmd: cmd, tw: tw, capture: cap, logFile: logFile, done: make(chan struct{}), usageDB: s.UsageDB, attemptKey: key}
 	go func() {
 		h.exitErr = cmd.Wait()
+		h.capture.Flush()
+		if h.usageDB != nil {
+			a := h.capture.attempt(modelPtr)
+			status := exitStatus(h.exitErr)
+			a.ExitStatus = &status
+			_ = h.usageDB.FinishAttempt(h.attemptKey, a)
+		}
 		if h.logFile != nil {
 			h.logFile.Close()
 		}
@@ -132,12 +157,22 @@ func (s *CLISpawner) SpawnWithModel(ctx context.Context, task db.Task, workDir s
 	return h, nil
 }
 
+func agentName(agent string) string {
+	if agent == "" {
+		return "claude"
+	}
+	return agent
+}
+
 type cliHandle struct {
-	cmd     *exec.Cmd
-	tw      *TeeWriter
-	logFile *os.File
-	done    chan struct{}
-	exitErr error
+	cmd        *exec.Cmd
+	tw         *TeeWriter
+	capture    *usageCapture
+	logFile    *os.File
+	done       chan struct{}
+	exitErr    error
+	usageDB    *db.DB
+	attemptKey string
 }
 
 // Compile-time check that cliHandle implements WorkerHandle.
