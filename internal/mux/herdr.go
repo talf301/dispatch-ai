@@ -20,6 +20,9 @@ type Mux interface {
 	CreateTab(workspaceID, cwd, label string) (string, string, error)
 	// RunPane runs a command in a pane.
 	RunPane(paneID string, argv []string) error
+	// StartAgent starts a tracked agent of the given kind in a pane, waiting
+	// up to timeout for the pane to be ready.
+	StartAgent(name, kind, paneID string, timeout time.Duration, argv []string) error
 	// FocusTab focuses a tab in the herdr window.
 	FocusTab(tabID string) error
 	// RenameTab updates a tab's label.
@@ -111,8 +114,22 @@ func (h Herdr) CreateTab(workspaceID, cwd, label string) (string, string, error)
 }
 
 func (h Herdr) RunPane(paneID string, argv []string) error {
-	args := append([]string{"pane", "run", paneID}, argv...)
+	quoted := make([]string, len(argv))
+	for i, arg := range argv {
+		quoted[i] = shellQuote(arg)
+	}
+	args := append([]string{"pane", "run", paneID}, strings.Join(quoted, " "))
 	return h.run(nil, args...)
+}
+
+func (h Herdr) StartAgent(name, kind, paneID string, timeout time.Duration, argv []string) error {
+	args := []string{"agent", "start", name, "--kind", kind, "--pane", paneID,
+		"--timeout", fmt.Sprintf("%d", timeout.Milliseconds()), "--"}
+	return h.run(nil, append(args, argv...)...)
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func (h Herdr) FocusTab(tabID string) error {

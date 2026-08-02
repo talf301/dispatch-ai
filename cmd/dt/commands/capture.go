@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dispatch-ai/dispatch/internal/agentctx"
 	"github.com/dispatch-ai/dispatch/internal/daemon"
@@ -28,6 +29,14 @@ func gitToplevel(dir string) (string, error) {
 func worktreeDir(taskID string) string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".dispatch", "wt", taskID)
+}
+
+// sessionFilePath is where the session's dispatch context is written. It
+// lives outside any repo working directory (including --here captures) so
+// captures never leave a dotfile in the user's real project tree.
+func sessionFilePath(taskID string) string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".dispatch", "sessions", taskID+".md")
 }
 
 // NewGoCmd is the capture path: one command, thought to running agent.
@@ -104,10 +113,18 @@ func NewGoCmd() *cobra.Command {
 			if err := d.SetRuntime(task.ID, workdir, ws, tab, pane); err != nil {
 				exitError(cmd, err)
 			}
-			if err := h.RunPane(pane, agentctx.ClaudeArgs(task.ID, thought)); err != nil {
-				fmt.Fprintln(os.Stderr, "warning: could not start claude:", err)
-			}
 			h.FocusTab(tab)
+			sessionPath := sessionFilePath(task.ID)
+			if err := agentctx.WriteSessionPrompt(sessionPath, task.ID); err != nil {
+				fmt.Fprintln(os.Stderr, "warning: task captured, but failed to write session context:", err)
+				printTask(task)
+				return
+			}
+			if err := startAgent(h, pane, task.ID, sessionPath); err != nil {
+				fmt.Fprintln(os.Stderr, "warning: could not start claude:", err)
+			} else if err := h.PromptAgent(pane, thought); err != nil {
+				fmt.Fprintln(os.Stderr, "warning: could not send thought to claude:", err)
+			}
 
 			// The human is already typing in the pane; the label call runs
 			// after focus, so it costs the capture path nothing (M2).
@@ -125,6 +142,33 @@ func NewGoCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noDedup, "no-dedup", false, "skip the similar-closed-work check")
 	cmd.Flags().StringVarP(&repoFlag, "repo", "r", "", "repo path (default: inferred from cwd)")
 	return cmd
+}
+
+// startAgentAttemptTimeout bounds a single herdr readiness wait so the outer
+// deadline below can actually retry: at 30s the two would race, and a pane
+// that isn't ready yet would consume the whole retry budget on its first
+// attempt.
+const startAgentAttemptTimeout = 2 * time.Second
+
+func startAgent(h mux.Mux, pane, taskID, sessionPath string) error {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(30 * time.Second)
+	defer deadline.Stop()
+	args := []string{"--append-system-prompt-file", sessionPath}
+	var lastErr error
+	for {
+		if err := h.StartAgent("dispatch-"+taskID, "claude", pane, startAgentAttemptTimeout, args); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			return fmt.Errorf("pane %s was not ready: %w", pane, lastErr)
+		}
+	}
 }
 
 // checkDedup is the two-stage capture-time dedup (M3). Stage 1 is free and
@@ -384,7 +428,7 @@ func closeTaskTab(task *db.Task) {
 	}
 }
 
-// removeTaskWorktree tears down a kill'd task's worktree. Best-effort.
+// removeTaskWorktree tears down a task's worktree. Best-effort.
 func removeTaskWorktree(task *db.Task) {
 	if task.Mode == nil || *task.Mode != "worktree" ||
 		task.Workdir == nil || task.Repo == nil {

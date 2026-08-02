@@ -55,6 +55,12 @@ func init() {
 	rootCmd.AddCommand(commands.NewTuiCmd())
 	rootCmd.AddCommand(commands.NewManagerCmd())
 	rootCmd.AddCommand(commands.NewUsageCmd())
+	for _, cmd := range rootCmd.Commands() {
+		switch cmd.Name() {
+		case "block", "claim", "dep", "done", "edit", "kill", "note", "park", "promote", "release", "relabel", "reopen", "resume", "show", "undep":
+			cmd.ValidArgsFunction = commands.TaskIDCompletion
+		}
+	}
 }
 
 func main() {

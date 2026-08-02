@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -32,9 +32,11 @@ const (
 	modeKill         // x — reason entry
 	modeCommand      // : — fuzzy instruction entry
 	modeConfirm      // reviewing a proposed dt batch
+	modeDedup        // confirming similar closed work before capture
 	modeBrief        // rendered what-changed digest
 	modePromote      // u — acceptance entry
 	modeUsage        // i — provider usage drill-down
+	modeHelp         // ? — scrollable key reference
 )
 
 type lane int
@@ -67,21 +69,23 @@ type Model struct {
 	store *db.DB
 	mux   mux.Mux
 
-	mode     mode
-	rows     map[lane][]row
-	flat     []row // selectable rows in lane order
-	cursor   int
-	showAll  bool // expand parked/closed lanes
-	input    textinput.Model
-	targetID string
-	status   string
-	dtBin    string // path to the dt binary (os.Executable)
-	width    int
-	height   int
-	busy     bool     // a model call is in flight
-	proposal []string // dt batch lines awaiting confirmation
-	brief    string   // rendered digest
-	usage    *usageView
+	mode           mode
+	rows           map[lane][]row
+	flat           []row // selectable rows in lane order
+	cursor         int
+	showAll        bool // expand parked/closed lanes
+	input          textarea.Model
+	targetID       string
+	status         string
+	dtBin          string // path to the dt binary (os.Executable)
+	width          int
+	height         int
+	busy           bool     // a model call is in flight
+	proposal       []string // dt batch lines awaiting confirmation
+	pendingThought string
+	brief          string // rendered digest
+	helpAt         int    // first visible line in the help view
+	usage          *usageView
 
 	// Commit-time cache for staleness: workdir → HEAD commit time.
 	// Refreshed every commitCacheTTL, not every 2s tick.
@@ -92,8 +96,15 @@ type Model struct {
 const commitCacheTTL = time.Minute
 
 func New(store *db.DB, m mux.Mux, dtBin string) Model {
-	ti := textinput.New()
+	ti := textarea.New()
 	ti.CharLimit = 400
+	ti.Prompt = "› "
+	ti.SetHeight(3)
+	ti.ShowLineNumbers = false
+	ti.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	ti.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6adc8"))
+	ti.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("#89b4fa"))
+	ti.FocusedStyle.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4"))
 	return Model{store: store, mux: m, dtBin: dtBin, input: ti}
 }
 
@@ -229,6 +240,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.input.SetWidth(max(1, msg.Width-2))
 		return m, nil
 
 	case tickMsg:
@@ -249,9 +261,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case dtDoneMsg:
 		if msg.err != nil {
+			if msg.verb == "go" && strings.Contains(strings.ToLower(msg.err.Error()), "similar closed work") {
+				m.mode = modeDedup
+				m.status = msg.err.Error() + "\nStart anyway? y/N"
+				return m, nil
+			}
 			m.status = msg.err.Error()
 		} else {
 			m.status = msg.verb + " done."
+			if msg.verb == "go" {
+				m.pendingThought = ""
+			}
 		}
 		return m, m.refresh()
 
@@ -361,6 +381,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return proposalMsg{cmds: cmds, err: err}
 				}
 			default:
+				m.pendingThought = text
 				return m, m.runDT("go", text)
 			}
 		}
@@ -378,17 +399,42 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case modeDedup:
+		switch msg.String() {
+		case "y", "enter":
+			thought := m.pendingThought
+			m.mode = modeBoard
+			m.status = "Starting despite similar closed work."
+			return m, m.runDT("go", "--no-dedup", thought)
+		case "n", "esc", "q":
+			m.mode, m.pendingThought, m.status = modeBoard, "", "Not started."
+		}
+		return m, nil
+
 	case modeBrief:
 		m.mode = modeBoard
 		return m, nil
 	case modeUsage:
 		m.mode = modeBoard
 		return m, nil
+	case modeHelp:
+		switch msg.String() {
+		case "esc", "q", "?":
+			m.mode = modeBoard
+		case "j", "down":
+			m.helpAt++
+		case "k", "up":
+			m.helpAt = max(0, m.helpAt-1)
+		}
+		return m, nil
 	}
 
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+	case "?":
+		m.mode, m.helpAt = modeHelp, 0
+		return m, nil
 	case "j", "down":
 		if len(m.flat) > 0 {
 			m.cursor = min(m.cursor+1, len(m.flat)-1)
@@ -405,12 +451,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeCapture
 		m.input.Placeholder = "what's the thought?"
 		m.input.Focus()
-		return m, textinput.Blink
+		return m, m.input.Focus()
 	case ":":
 		m.mode = modeCommand
 		m.input.Placeholder = "e.g. park everything in sc-api until monday"
 		m.input.Focus()
-		return m, textinput.Blink
+		return m, m.input.Focus()
 	case "b":
 		m.busy = true
 		return m, func() tea.Msg {
@@ -444,11 +490,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.targetID = t.ID
 			m.input.Placeholder = "why kill " + t.ID + "?"
 			m.input.Focus()
-			return m, textinput.Blink
+			return m, m.input.Focus()
 		}
 	case "p":
 		if t, ok := m.current(); ok {
 			return m, m.runDT("park", t.ID)
+		}
+	case "a":
+		if t, ok := m.current(); ok {
+			if t.Status != "proposed" {
+				m.status = t.ID + " is " + t.Status + "; only proposed tasks approve."
+				return m, nil
+			}
+			return m, m.runDT("reopen", t.ID)
+		}
+	case "d":
+		if t, ok := m.current(); ok {
+			return m, m.runDT("done", t.ID)
 		}
 	case "u":
 		if t, ok := m.current(); ok {
@@ -460,7 +518,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.targetID = t.ID
 			m.input.Placeholder = "report <when is it done?>  or  ratchet <command that must exit 0>"
 			m.input.Focus()
-			return m, textinput.Blink
+			return m, m.input.Focus()
 		}
 	case "r":
 		if t, ok := m.current(); ok {
@@ -527,6 +585,8 @@ func (m Model) View() string {
 		return m.brief + dimStyle.Render("\n\nAny key to return.")
 	case modeUsage:
 		return m.viewUsage()
+	case modeHelp:
+		return m.helpView()
 	}
 
 	var b strings.Builder
@@ -574,7 +634,7 @@ func (m Model) View() string {
 	if m.status != "" {
 		b.WriteString(statusStyle.Render(m.status) + "\n")
 	}
-	b.WriteString(dimStyle.Render("\nj/k move · ⏎ focus · i usage · g capture · : command · b brief · u promote · x kill · p park · r resume · z all · q quit"))
+	b.WriteString(dimStyle.Render("\n? help · a approve · d done · j/k move · ⏎ focus · i usage · g capture · : command · b brief · u promote · x kill · p park · r resume · z all · q quit"))
 	return boundLines(b.String(), m.width)
 }
 
@@ -650,6 +710,38 @@ func boundLines(s string, width int) string {
 	return strings.Join(out, "\n")
 }
 
+func (m Model) helpView() string {
+	lines := []string{
+		"Dispatch board shortcuts",
+		"",
+		"j / down     move selection down",
+		"k / up       move selection up",
+		"enter        focus or resume selected task",
+		"a            approve selected proposed task",
+		"d            mark selected task done",
+		"g            capture a new thought",
+		"u            promote a live task",
+		"x            kill selected task",
+		"p            park selected task",
+		"r            resume selected task",
+		":            natural-language batch command",
+		"b            show the change brief",
+		"z            expand or collapse parked/closed",
+		"q            quit",
+		"",
+		"j/k scroll · esc or ? return to board",
+	}
+	visible := m.height - 2
+	if visible < 1 {
+		visible = 1
+	}
+	if m.helpAt > len(lines)-visible {
+		m.helpAt = max(0, len(lines)-visible)
+	}
+	end := min(len(lines), m.helpAt+visible)
+	return strings.Join(lines[m.helpAt:end], "\n") + "\n" + dimStyle.Render("? help · esc back")
+}
+
 // writeRow renders one task line; the focused row reveals the verbatim
 // thought — the label is a display cache, never authoritative.
 func (m Model) writeRow(b *strings.Builder, r row, focused bool) {
@@ -663,7 +755,7 @@ func (m Model) writeRow(b *strings.Builder, r row, focused bool) {
 	case r.badge != "":
 		badge = alertStyle.Render(r.badge)
 	case t.Status == "proposed":
-		badge = alertStyle.Render("proposed") + dimStyle.Render(" · dt reopen to approve")
+		badge = alertStyle.Render("proposed") + dimStyle.Render(" · a approve")
 	case t.Status == "killed":
 		badge = "killed"
 	case t.Status == "done":

@@ -66,11 +66,11 @@ func TestPromoteGating(t *testing.T) {
 // fakeMux scripts one watcher round: agent settles idle, then (after a
 // rejection prompt) settles idle again.
 type fakeMux struct {
-	mu       sync.Mutex
-	prompts  []string
-	waits    int
-	pane     string
-	closed   []string
+	mu      sync.Mutex
+	prompts []string
+	waits   int
+	pane    string
+	closed  []string
 }
 
 func (f *fakeMux) EnsureWorkspace(label, cwd string) (string, error) { return "w1", nil }
@@ -78,8 +78,11 @@ func (f *fakeMux) CreateTab(ws, cwd, label string) (string, string, error) {
 	return "w1:t9", "w1:p9", nil
 }
 func (f *fakeMux) RunPane(pane string, argv []string) error { return nil }
-func (f *fakeMux) FocusTab(tab string) error                { return nil }
-func (f *fakeMux) RenameTab(tab, label string) error        { return nil }
+func (f *fakeMux) StartAgent(name, kind, pane string, timeout time.Duration, argv []string) error {
+	return nil
+}
+func (f *fakeMux) FocusTab(tab string) error         { return nil }
+func (f *fakeMux) RenameTab(tab, label string) error { return nil }
 func (f *fakeMux) CloseTab(tab string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
