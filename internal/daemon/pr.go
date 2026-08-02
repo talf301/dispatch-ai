@@ -50,10 +50,16 @@ func (d *Daemon) createPR(repoPath, headBranch string, task db.Task) error {
 	ghCmd.Dir = repoPath
 	if out, err := ghCmd.CombinedOutput(); err != nil {
 		if strings.Contains(strings.ToLower(string(out)), "already exists") {
+			if err := d.db.MarkPRHandled(task.ID); err != nil {
+				return fmt.Errorf("record existing PR: %w", err)
+			}
 			d.logger.Printf("PR for %s (%s) already exists, treating as success", task.ID, headBranch)
 			return nil
 		}
 		return fmt.Errorf("gh pr create: %w\n%s", err, out)
+	}
+	if err := d.db.MarkPRHandled(task.ID); err != nil {
+		return fmt.Errorf("record created PR: %w", err)
 	}
 
 	d.logger.Printf("created PR for %s (%s)", task.ID, task.Title)

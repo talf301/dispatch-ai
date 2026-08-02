@@ -405,6 +405,9 @@ func (d *DB) PendingPRParents() ([]Task, error) {
 		    SELECT 1 FROM tasks child
 		    WHERE child.parent_id = t.id AND child.status != 'done'
 		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM meta WHERE key = 'pr.handled.' || t.id
+		  )
 		  AND t.repo IS NOT NULL
 		ORDER BY t.updated_at ASC
 	`)
@@ -413,4 +416,9 @@ func (d *DB) PendingPRParents() ([]Task, error) {
 	}
 	defer rows.Close()
 	return scanTasks(rows)
+}
+
+// MarkPRHandled removes a completed parent from the daemon's PR retry queue.
+func (d *DB) MarkPRHandled(taskID string) error {
+	return d.SetMeta("pr.handled."+taskID, "1")
 }

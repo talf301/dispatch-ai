@@ -1289,4 +1289,17 @@ func TestPendingPRParents(t *testing.T) {
 	if ids[parent3.ID] {
 		t.Errorf("expected parent3 (incomplete children) NOT in PendingPRParents")
 	}
+
+	if err := d.SetMeta("pr.handled."+parent1.ID, "1"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = d.PendingPRParents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range pending {
+		if task.ID == parent1.ID {
+			t.Errorf("handled parent %s returned to the pending PR queue", parent1.ID)
+		}
+	}
 }
