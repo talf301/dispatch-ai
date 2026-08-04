@@ -914,7 +914,9 @@ func (m Model) writeRow(b *strings.Builder, r row, focused bool, width int) {
 		if t.KillReason != nil {
 			meta = append(meta, "killed: "+*t.KillReason)
 		}
-		meta = append(meta, r.notes...)
+		for _, note := range r.notes {
+			meta = append(meta, truncate(strings.Join(strings.Fields(note), " "), 120))
+		}
 		if len(meta) > 0 {
 			b.WriteString(dimStyle.Render("  "+truncate(strings.Join(meta, " · "), max(12, width-2))) + "\n")
 		}
