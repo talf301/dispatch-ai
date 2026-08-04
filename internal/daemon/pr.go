@@ -22,14 +22,9 @@ func (d *Daemon) createPR(repoPath, headBranch string, task db.Task) error {
 		return fmt.Errorf("git push: %w\n%s", err, out)
 	}
 
-	// Detect the default branch for the PR base.
-	baseBranch := d.baseBranch
-	if baseBranch == "" {
-		var err error
-		baseBranch, err = DetectDefaultBranch(repoPath)
-		if err != nil {
-			return fmt.Errorf("detect default branch: %w", err)
-		}
+	baseBranch, err := d.baseBranchFor(&task)
+	if err != nil {
+		return fmt.Errorf("resolve PR base: %w", err)
 	}
 
 	// Fetch notes on the task for the PR body.

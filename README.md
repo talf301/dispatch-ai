@@ -126,7 +126,7 @@ Two stages, so the common case costs nothing. Stage 1 is deterministic and local
 
 | Command | Purpose |
 |---|---|
-| `dt add <title> [-d <desc>] [-p <parent>] [--after <id>] [-r <repo>]` | File a task — starts `proposed` |
+| `dt add <title> [-d <desc>] [-p <parent>] [--after <id>] [-r <repo>] [--base-branch <branch>]` | File a task - starts `proposed`; pin non-default starting branches explicitly |
 | `dt reopen <id>` | Approve a proposal (or reopen blocked/done work) |
 | `dt dep` / `undep` / `claim` / `release` / `done` / `block` / `note` / `edit` | Ledger operations |
 | `dt ready` / `dt list [--tree\|--all\|--status s]` / `dt show <id>` | Read state (all support `--json`) |

@@ -135,6 +135,7 @@ const taskSchemaV2 = `(
 	created_at  TEXT NOT NULL DEFAULT (datetime('now')),
 	updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
 	repo        TEXT,
+	base_branch TEXT,
 	thought     TEXT NOT NULL DEFAULT '',
 	label       TEXT,
 	mode        TEXT,
@@ -220,6 +221,15 @@ func (d *DB) migrate() error {
 		if !hasReviewing {
 			if _, err := d.q.Exec("ALTER TABLE tasks ADD COLUMN reviewing INTEGER NOT NULL DEFAULT 0"); err != nil {
 				return fmt.Errorf("add reviewing column: %w", err)
+			}
+		}
+		hasBaseBranch, err := d.hasTaskColumn("base_branch")
+		if err != nil {
+			return err
+		}
+		if !hasBaseBranch {
+			if _, err := d.q.Exec("ALTER TABLE tasks ADD COLUMN base_branch TEXT"); err != nil {
+				return fmt.Errorf("add base_branch column: %w", err)
 			}
 		}
 		return nil
