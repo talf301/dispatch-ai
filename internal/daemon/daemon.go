@@ -1081,6 +1081,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.shutdown()
 			return ctx.Err()
 		case <-ticker.C:
+			if err := d.db.SetMeta("daemon_heartbeat", time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+				d.logger.Printf("heartbeat: %v", err)
+			}
 			d.spawnReady()
 			d.monitorWorkers()
 			d.monitorValidations()
