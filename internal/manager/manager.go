@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
@@ -16,6 +17,7 @@ const (
 	workspaceKey = "manager.workspace"
 	tabKey       = "manager.tab"
 	paneKey      = "manager.pane"
+	tuiPaneKey   = "manager.tui_pane"
 	seenPrefix   = "manager.seen."
 )
 
@@ -44,6 +46,10 @@ func (m *Manager) Start(cwd string) error {
 	if err != nil {
 		return err
 	}
+	tuiPane, _, err := m.db.GetMeta(tuiPaneKey)
+	if err != nil {
+		return err
+	}
 	states, err := m.mux.AgentStates()
 	if err != nil {
 		return err
@@ -60,13 +66,57 @@ func (m *Manager) Start(cwd string) error {
 		if err := m.mux.RunPane(pane, []string{"claude", "--append-system-prompt", prompt}); err != nil {
 			return err
 		}
+		tuiPane, err = m.startTUI(pane)
+		if err != nil {
+			return err
+		}
 		for key, value := range map[string]string{workspaceKey: ws, tabKey: tab, paneKey: pane} {
 			if err := m.db.SetMeta(key, value); err != nil {
 				return err
 			}
 		}
+		if err := m.db.SetMeta(tuiPaneKey, tuiPane); err != nil {
+			return err
+		}
+	} else if tuiPane == "" {
+		tuiPane, err = m.startTUI(pane)
+		if err != nil {
+			return err
+		}
+		if err := m.db.SetMeta(tuiPaneKey, tuiPane); err != nil {
+			return err
+		}
+	} else {
+		valid, err := m.mux.PaneExists(tuiPane)
+		if err != nil {
+			return err
+		}
+		if !valid {
+			tuiPane, err = m.startTUI(pane)
+			if err != nil {
+				return err
+			}
+			if err := m.db.SetMeta(tuiPaneKey, tuiPane); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
+}
+
+func (m *Manager) startTUI(managerPane string) (string, error) {
+	tuiPane, err := m.mux.SplitPane(managerPane, "right")
+	if err != nil {
+		return "", err
+	}
+	dtBin, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if err := m.mux.RunPane(tuiPane, []string{dtBin, "tui"}); err != nil {
+		return "", err
+	}
+	return tuiPane, nil
 }
 
 // Run listens only to ledger transition events. The caller owns the lifetime;

@@ -31,7 +31,9 @@ func (tuiTestMux) EnsureWorkspace(string, string) (string, error) { return "", n
 func (tuiTestMux) CreateTab(string, string, string) (string, string, error) {
 	return "", "", nil
 }
-func (tuiTestMux) RunPane(string, []string) error { return nil }
+func (tuiTestMux) RunPane(string, []string) error           { return nil }
+func (tuiTestMux) SplitPane(string, string) (string, error) { return "", nil }
+func (tuiTestMux) PaneExists(string) (bool, error)          { return true, nil }
 func (tuiTestMux) StartAgent(string, string, string, time.Duration, []string) error {
 	return nil
 }

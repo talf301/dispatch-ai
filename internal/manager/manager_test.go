@@ -12,6 +12,7 @@ type fakeMux struct {
 	prompts          int
 	ensureWorkspaces int
 	createTabs       int
+	splitPanes       int
 	states           map[string]string
 }
 
@@ -24,6 +25,11 @@ func (f *fakeMux) CreateTab(string, string, string) (string, string, error) {
 	return "tab", "pane", nil
 }
 func (f *fakeMux) RunPane(string, []string) error { return nil }
+func (f *fakeMux) SplitPane(string, string) (string, error) {
+	f.splitPanes++
+	return "tui-pane", nil
+}
+func (f *fakeMux) PaneExists(string) (bool, error) { return true, nil }
 func (f *fakeMux) StartAgent(string, string, string, time.Duration, []string) error {
 	return nil
 }
@@ -105,7 +111,7 @@ func TestStartRecoversAndRecreatesDeadPane(t *testing.T) {
 	if f.createTabs != 1 {
 		t.Fatalf("first start created %d tabs, want 1", f.createTabs)
 	}
-	for key, want := range map[string]string{workspaceKey: "ws", tabKey: "tab", paneKey: "pane"} {
+	for key, want := range map[string]string{workspaceKey: "ws", tabKey: "tab", paneKey: "pane", tuiPaneKey: "tui-pane"} {
 		got, _, err := d.GetMeta(key)
 		if err != nil {
 			t.Fatal(err)
@@ -120,6 +126,9 @@ func TestStartRecoversAndRecreatesDeadPane(t *testing.T) {
 	}
 	if f.createTabs != 1 {
 		t.Fatalf("live pane recovery created %d tabs, want 1", f.createTabs)
+	}
+	if f.splitPanes != 1 {
+		t.Fatalf("live pane recovery created %d splits, want 1", f.splitPanes)
 	}
 
 	f.states = map[string]string{}

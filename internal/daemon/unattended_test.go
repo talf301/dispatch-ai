@@ -80,6 +80,8 @@ func (f *fakeMux) CreateTab(ws, cwd, label string) (string, string, error) {
 	return "w1:t9", "w1:p9", nil
 }
 func (f *fakeMux) RunPane(pane string, argv []string) error { return nil }
+func (f *fakeMux) SplitPane(string, string) (string, error) { return "w1:p10", nil }
+func (f *fakeMux) PaneExists(string) (bool, error)          { return true, nil }
 func (f *fakeMux) StartAgent(name, kind, pane string, timeout time.Duration, argv []string) error {
 	return nil
 }
