@@ -1,8 +1,13 @@
 package commands
 
 import (
+	"io"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dispatch-ai/dispatch/internal/db"
+	"github.com/spf13/cobra"
 )
 
 func TestWarnIfOrphanFromLivePlan(t *testing.T) {
@@ -42,4 +47,30 @@ func TestWarnIfOrphanFromLivePlan(t *testing.T) {
 			t.Errorf("expected no warning with a nil repo, got: %s", w)
 		}
 	})
+}
+
+func TestAddStoresBaseBranch(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "dispatch.db")
+	root := &cobra.Command{Use: "dt"}
+	root.PersistentFlags().String("db", dbPath, "")
+	root.PersistentFlags().Bool("json", false, "")
+	root.AddCommand(NewAddCmd())
+	root.SetArgs([]string{"add", "feature work", "--base-branch", "feature/source"})
+	root.SetOut(io.Discard)
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	tasks, err := database.ListTasks("proposed", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].BaseBranch == nil || *tasks[0].BaseBranch != "feature/source" {
+		t.Fatalf("stored task = %+v, want base branch feature/source", tasks)
+	}
 }

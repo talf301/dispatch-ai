@@ -127,6 +127,21 @@ func TestBatchMultilineDescription(t *testing.T) {
 	}
 }
 
+func TestBatchAddStoresBaseBranch(t *testing.T) {
+	d := openTestDB(t)
+	id, err := executeLine(d, `add "Feature work" --base-branch feature/source`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := d.GetTask(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.BaseBranch == nil || *task.BaseBranch != "feature/source" {
+		t.Fatalf("base branch = %v, want feature/source", task.BaseBranch)
+	}
+}
+
 func TestQuotesBalanced(t *testing.T) {
 	tests := []struct {
 		input string

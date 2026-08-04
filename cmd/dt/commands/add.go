@@ -45,6 +45,10 @@ func NewAddCmd() *cobra.Command {
 			desc, _ := cmd.Flags().GetString("desc")
 			parent, _ := cmd.Flags().GetString("parent")
 			after, _ := cmd.Flags().GetString("after")
+			baseBranch, _ := cmd.Flags().GetString("base-branch")
+			if parent != "" && baseBranch != "" {
+				exitError(cmd, fmt.Errorf("--base-branch cannot be used with --parent; children start from the parent plan branch"))
+			}
 
 			var repo *string
 			if cmd.Flags().Changed("repo") {
@@ -62,6 +66,12 @@ func NewAddCmd() *cobra.Command {
 			if err != nil {
 				exitError(cmd, err)
 			}
+			if baseBranch != "" {
+				task, err = d.SetBaseBranch(task.ID, baseBranch)
+				if err != nil {
+					exitError(cmd, err)
+				}
+			}
 
 			if jsonFlag(cmd) {
 				printJSON(map[string]string{"id": task.ID})
@@ -75,6 +85,7 @@ func NewAddCmd() *cobra.Command {
 	cmd.Flags().StringP("parent", "p", "", "parent task ID")
 	cmd.Flags().String("after", "", "blocker task ID (new task is blocked by this)")
 	cmd.Flags().StringP("repo", "r", "", "repository path for the task")
+	cmd.Flags().String("base-branch", "", "branch the task must start from")
 
 	return cmd
 }

@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,7 @@ type Task struct {
 	Assignee    *string `json:"assignee"`
 	ParentID    *string `json:"parent_id"`
 	Repo        *string `json:"repo"`
+	BaseBranch  *string `json:"base_branch,omitempty"`
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
 
@@ -94,9 +96,9 @@ func (d *DB) AddTaskWithStatus(title, description, parentID, afterID string, rep
 func (d *DB) GetTask(id string) (*Task, error) {
 	t := &Task{}
 	err := d.q.QueryRow(
-		`SELECT id, title, description, status, block_reason, assignee, parent_id, repo, created_at, updated_at
+		`SELECT id, title, description, status, block_reason, assignee, parent_id, repo, base_branch, created_at, updated_at
 		 FROM tasks WHERE id = ?`, id,
-	).Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.BlockReason, &t.Assignee, &t.ParentID, &t.Repo, &t.CreatedAt, &t.UpdatedAt)
+	).Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.BlockReason, &t.Assignee, &t.ParentID, &t.Repo, &t.BaseBranch, &t.CreatedAt, &t.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("task %q not found", id)
 	}
@@ -104,6 +106,26 @@ func (d *DB) GetTask(id string) (*Task, error) {
 		return nil, fmt.Errorf("get task: %w", err)
 	}
 	return t, nil
+}
+
+// SetBaseBranch records the revision a standalone task must start from and
+// eventually target with its PR. Child tasks always use their plan branch.
+func (d *DB) SetBaseBranch(id, branch string) (*Task, error) {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return nil, fmt.Errorf("base branch must not be empty")
+	}
+	task, err := d.GetTask(id)
+	if err != nil {
+		return nil, err
+	}
+	if task.ParentID != nil {
+		return nil, fmt.Errorf("task %s is a child; children start from the parent plan branch", id)
+	}
+	if _, err := d.q.Exec("UPDATE tasks SET base_branch = ? WHERE id = ?", branch, id); err != nil {
+		return nil, fmt.Errorf("set base branch: %w", err)
+	}
+	return d.GetTask(id)
 }
 
 // addSystemNote records a status-change note authored by "system".
@@ -291,7 +313,7 @@ func (d *DB) ReopenTask(id string) (*Task, error) {
 // GetChildren returns tasks whose parent_id matches the given ID, ordered by created_at ASC.
 func (d *DB) GetChildren(parentID string) ([]Task, error) {
 	rows, err := d.q.Query(
-		`SELECT id, title, description, status, block_reason, assignee, parent_id, repo, created_at, updated_at
+		`SELECT id, title, description, status, block_reason, assignee, parent_id, repo, base_branch, created_at, updated_at
 		 FROM tasks WHERE parent_id = ? ORDER BY created_at ASC`, parentID,
 	)
 	if err != nil {
@@ -306,7 +328,7 @@ func (d *DB) GetChildren(parentID string) ([]Task, error) {
 func (d *DB) ReadyTasks() ([]Task, error) {
 	rows, err := d.q.Query(`
 		SELECT t.id, t.title, t.description, t.status, t.block_reason,
-		       t.assignee, t.parent_id, t.repo, t.created_at, t.updated_at
+		       t.assignee, t.parent_id, t.repo, t.base_branch, t.created_at, t.updated_at
 		FROM tasks t
 		WHERE t.status = 'open'
 		  AND t.mode IS NULL
@@ -341,14 +363,14 @@ func (d *DB) ListTasks(status string, all bool) ([]Task, error) {
 	var args []any
 
 	if status != "" {
-		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, created_at, updated_at
+		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, base_branch, created_at, updated_at
 		         FROM tasks WHERE status = ? ORDER BY created_at ASC`
 		args = append(args, status)
 	} else if !all {
-		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, created_at, updated_at
+		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, base_branch, created_at, updated_at
 		         FROM tasks WHERE status != 'done' ORDER BY created_at ASC`
 	} else {
-		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, created_at, updated_at
+		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, base_branch, created_at, updated_at
 		         FROM tasks ORDER BY created_at ASC`
 	}
 
@@ -395,7 +417,7 @@ func (d *DB) EditTask(id string, title, description, repo *string) (*Task, error
 func (d *DB) PendingPRParents() ([]Task, error) {
 	rows, err := d.q.Query(`
 		SELECT t.id, t.title, t.description, t.status, t.block_reason,
-		       t.assignee, t.parent_id, t.repo, t.created_at, t.updated_at
+		       t.assignee, t.parent_id, t.repo, t.base_branch, t.created_at, t.updated_at
 		FROM tasks t
 		WHERE t.status = 'done'
 		  AND EXISTS (

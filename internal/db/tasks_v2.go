@@ -28,14 +28,14 @@ func TruncateLabel(thought string) string {
 }
 
 const taskColumnsV2 = `id, title, description, status, block_reason, assignee,
-	parent_id, repo, created_at, updated_at,
+	parent_id, repo, base_branch, created_at, updated_at,
 	thought, label, mode, workdir, herdr_ws, herdr_tab, herdr_pane,
 	kill_reason, last_activity, acceptance_kind, acceptance, reject_count, reviewing`
 
 func (d *DB) scanTaskV2(row interface{ Scan(...any) error }) (*Task, error) {
 	t := &Task{}
 	err := row.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.BlockReason,
-		&t.Assignee, &t.ParentID, &t.Repo, &t.CreatedAt, &t.UpdatedAt,
+		&t.Assignee, &t.ParentID, &t.Repo, &t.BaseBranch, &t.CreatedAt, &t.UpdatedAt,
 		&t.Thought, &t.Label, &t.Mode, &t.Workdir, &t.HerdrWs, &t.HerdrTab,
 		&t.HerdrPane, &t.KillReason, &t.LastActivity,
 		&t.AcceptanceKind, &t.Acceptance, &t.RejectCount, &t.Reviewing)

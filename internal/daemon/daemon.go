@@ -354,6 +354,9 @@ func (d *Daemon) baseBranchFor(task *db.Task) (string, error) {
 	if task.ParentID != nil {
 		return fmt.Sprintf("dispatch/plan-%s", *task.ParentID), nil
 	}
+	if task.BaseBranch != nil {
+		return *task.BaseBranch, nil
+	}
 	if d.baseBranch != "" {
 		return d.baseBranch, nil
 	}
@@ -435,14 +438,17 @@ func (d *Daemon) spawnReady() {
 			if task.ParentID != nil {
 				parentBranch := fmt.Sprintf("dispatch/plan-%s", *task.ParentID)
 				if !BranchExists(repoPath, parentBranch) {
-					base := d.baseBranch
-					if base == "" {
-						base, err = DetectDefaultBranch(repoPath)
-						if err != nil {
-							d.logger.Printf("spawn: task %s: %v", task.ID, err)
-							d.db.BlockTask(task.ID, fmt.Sprintf("preflight failed: %v", err))
-							continue
-						}
+					parent, parentErr := d.db.GetTask(*task.ParentID)
+					if parentErr != nil {
+						d.logger.Printf("spawn: task %s: %v", task.ID, parentErr)
+						d.db.BlockTask(task.ID, fmt.Sprintf("preflight failed: %v", parentErr))
+						continue
+					}
+					base, baseErr := d.baseBranchFor(parent)
+					if baseErr != nil {
+						d.logger.Printf("spawn: task %s: %v", task.ID, baseErr)
+						d.db.BlockTask(task.ID, fmt.Sprintf("preflight failed: %v", baseErr))
+						continue
 					}
 					cmd := exec.Command("git", "branch", parentBranch, base)
 					cmd.Dir = repoPath
