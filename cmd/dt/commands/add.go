@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 
+	"github.com/dispatch-ai/dispatch/internal/daemon"
 	"github.com/dispatch-ai/dispatch/internal/db"
 	"github.com/spf13/cobra"
 )
@@ -57,6 +58,11 @@ func NewAddCmd() *cobra.Command {
 			desc, _ := cmd.Flags().GetString("desc")
 			parent, _ := cmd.Flags().GetString("parent")
 			after, _ := cmd.Flags().GetString("after")
+			agentValue, _ := cmd.Flags().GetString("agent")
+			agent, err := daemon.ValidateAgent(agentValue)
+			if err != nil {
+				exitError(cmd, err)
+			}
 			if after != "" {
 				if warning := warnIfBlockerIsBlocked(d, after); warning != "" {
 					cmd.PrintErrln(warning)
@@ -79,7 +85,7 @@ func NewAddCmd() *cobra.Command {
 
 			// Agent-facing path: new work is proposed, never auto-dispatched.
 			// A human approves it with `dt reopen <id>`.
-			task, err := d.AddTaskWithStatus(title, desc, parent, after, repo, "proposed")
+			task, err := d.AddTaskWithAgent(title, desc, parent, after, repo, "proposed", agent)
 			if err != nil {
 				exitError(cmd, err)
 			}
@@ -102,6 +108,7 @@ func NewAddCmd() *cobra.Command {
 	cmd.Flags().StringP("parent", "p", "", "parent task ID")
 	cmd.Flags().String("after", "", "blocker task ID (new task is blocked by this)")
 	cmd.Flags().StringP("repo", "r", "", "repository path for the task")
+	cmd.Flags().String("agent", "", "agent CLI for this task: claude or codex")
 	cmd.Flags().String("base-branch", "", "branch the task must start from")
 
 	return cmd

@@ -97,7 +97,17 @@ func (s *CLISpawner) SpawnWithModel(ctx context.Context, task db.Task, workDir s
 	}
 	systemPrompt = strings.ReplaceAll(systemPrompt, "$PARENT_ID", parentID)
 
-	bin, args, err := s.argv(systemPrompt, prompt, model)
+	envKey := "DISPATCH_WORKER_AGENT"
+	if role == RoleReviewer {
+		envKey = "DISPATCH_REVIEWER_AGENT"
+	}
+	agent, err := ResolveAgent(stringValue(task.Agent), envKey, s.Agent)
+	if err != nil {
+		return nil, err
+	}
+	configured := *s
+	configured.Agent = agent
+	bin, args, err := configured.argv(systemPrompt, prompt, model)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +128,7 @@ func (s *CLISpawner) SpawnWithModel(ctx context.Context, task db.Task, workDir s
 	}
 
 	tw := NewTeeWriter(buf, logFile)
-	cap := newUsageCapture(agentName(s.Agent), tw)
+	cap := newUsageCapture(agent, tw)
 	cmd.Stdout = cap
 	cmd.Stderr = cap
 
@@ -135,7 +145,7 @@ func (s *CLISpawner) SpawnWithModel(ctx context.Context, task db.Task, workDir s
 		modelPtr = &model
 	}
 	if s.UsageDB != nil {
-		if err := s.UsageDB.StartAttempt(key, task.ID, string(role), agentName(s.Agent), modelPtr); err != nil { /* usage must not break lifecycle */
+		if err := s.UsageDB.StartAttempt(key, task.ID, string(role), agent, modelPtr); err != nil { /* usage must not break lifecycle */
 		}
 	}
 	h := &cliHandle{cmd: cmd, tw: tw, capture: cap, logFile: logFile, done: make(chan struct{}), usageDB: s.UsageDB, attemptKey: key}

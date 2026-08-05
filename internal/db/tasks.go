@@ -23,6 +23,7 @@ type Task struct {
 	Assignee    *string `json:"assignee"`
 	ParentID    *string `json:"parent_id"`
 	Repo        *string `json:"repo"`
+	Agent       *string `json:"agent,omitempty"`
 	BaseBranch  *string `json:"base_branch,omitempty"`
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
@@ -51,13 +52,17 @@ type Task struct {
 // If afterID is non-empty, creates a dependency (afterID blocks the new task).
 // repo is an optional repository path associated with the task.
 func (d *DB) AddTask(title, description, parentID, afterID string, repo *string) (*Task, error) {
-	return d.AddTaskWithStatus(title, description, parentID, afterID, repo, "open")
+	return d.AddTaskWithAgent(title, description, parentID, afterID, repo, "open", nil)
 }
 
 // AddTaskWithStatus is AddTask with an explicit initial status. The
 // agent-facing `dt add` passes "proposed": agent-discovered work never
 // auto-dispatches until a human approves it with `dt reopen`.
 func (d *DB) AddTaskWithStatus(title, description, parentID, afterID string, repo *string, status string) (*Task, error) {
+	return d.AddTaskWithAgent(title, description, parentID, afterID, repo, status, nil)
+}
+
+func (d *DB) AddTaskWithAgent(title, description, parentID, afterID string, repo *string, status string, agent *string) (*Task, error) {
 	taskID, err := d.newTaskID()
 	if err != nil {
 		return nil, err
@@ -80,9 +85,9 @@ func (d *DB) AddTaskWithStatus(title, description, parentID, afterID string, rep
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 
 	_, err = d.q.Exec(
-		`INSERT INTO tasks (id, title, description, status, parent_id, repo, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		taskID, title, description, status, parentPtr, repo, now, now,
+		`INSERT INTO tasks (id, title, description, status, parent_id, repo, agent, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		taskID, title, description, status, parentPtr, repo, agent, now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert task: %w", err)
@@ -102,9 +107,9 @@ func (d *DB) AddTaskWithStatus(title, description, parentID, afterID string, rep
 func (d *DB) GetTask(id string) (*Task, error) {
 	t := &Task{}
 	err := d.q.QueryRow(
-		`SELECT id, title, description, status, block_reason, assignee, parent_id, repo, base_branch, created_at, updated_at
+		`SELECT id, title, description, status, block_reason, assignee, parent_id, repo, agent, base_branch, created_at, updated_at
 		 FROM tasks WHERE id = ?`, id,
-	).Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.BlockReason, &t.Assignee, &t.ParentID, &t.Repo, &t.BaseBranch, &t.CreatedAt, &t.UpdatedAt)
+	).Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.BlockReason, &t.Assignee, &t.ParentID, &t.Repo, &t.Agent, &t.BaseBranch, &t.CreatedAt, &t.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("task %q not found", id)
 	}
@@ -362,7 +367,7 @@ func (d *DB) ReopenTask(id string) (*Task, error) {
 // GetChildren returns tasks whose parent_id matches the given ID, ordered by created_at ASC.
 func (d *DB) GetChildren(parentID string) ([]Task, error) {
 	rows, err := d.q.Query(
-		`SELECT id, title, description, status, block_reason, assignee, parent_id, repo, base_branch, created_at, updated_at
+		`SELECT id, title, description, status, block_reason, assignee, parent_id, repo, agent, base_branch, created_at, updated_at
 		 FROM tasks WHERE parent_id = ? ORDER BY created_at ASC`, parentID,
 	)
 	if err != nil {
@@ -377,7 +382,7 @@ func (d *DB) GetChildren(parentID string) ([]Task, error) {
 func (d *DB) ReadyTasks() ([]Task, error) {
 	rows, err := d.q.Query(`
 		SELECT t.id, t.title, t.description, t.status, t.block_reason,
-		       t.assignee, t.parent_id, t.repo, t.base_branch, t.created_at, t.updated_at
+		       t.assignee, t.parent_id, t.repo, t.agent, t.base_branch, t.created_at, t.updated_at
 		FROM tasks t
 		WHERE t.status = 'open'
 		  AND t.mode IS NULL
@@ -412,14 +417,14 @@ func (d *DB) ListTasks(status string, all bool) ([]Task, error) {
 	var args []any
 
 	if status != "" {
-		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, base_branch, created_at, updated_at
+		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, agent, base_branch, created_at, updated_at
 		         FROM tasks WHERE status = ? ORDER BY created_at ASC`
 		args = append(args, status)
 	} else if !all {
-		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, base_branch, created_at, updated_at
+		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, agent, base_branch, created_at, updated_at
 		         FROM tasks WHERE status != 'done' ORDER BY created_at ASC`
 	} else {
-		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, base_branch, created_at, updated_at
+		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, agent, base_branch, created_at, updated_at
 		         FROM tasks ORDER BY created_at ASC`
 	}
 
@@ -466,7 +471,7 @@ func (d *DB) EditTask(id string, title, description, repo *string) (*Task, error
 func (d *DB) PendingPRParents() ([]Task, error) {
 	rows, err := d.q.Query(`
 		SELECT t.id, t.title, t.description, t.status, t.block_reason,
-		       t.assignee, t.parent_id, t.repo, t.base_branch, t.created_at, t.updated_at
+		       t.assignee, t.parent_id, t.repo, t.agent, t.base_branch, t.created_at, t.updated_at
 		FROM tasks t
 		WHERE t.status = 'done'
 		  AND EXISTS (
