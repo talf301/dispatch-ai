@@ -1,0 +1,119 @@
+<title>Graph-pilot as pure interface: plan</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  :where(.grid, .flex) > * { min-width: 0; }
+  :where(p, h1, h2, h3, h4, li, dd, blockquote, figcaption, td, th, .badge, .label) { overflow-wrap: anywhere; }
+  :where(img, svg, video, canvas, iframe) { max-width: 100%; height: auto; }
+  .src { font-size: 0.7rem; color: color-mix(in oklch, currentColor 55%, transparent); }
+  .phase-card { border: 1px solid color-mix(in oklch, currentColor 10%, transparent); }
+</style>
+<div data-theme="luxury">
+<main class="mx-auto max-w-6xl p-5 lg:p-10 space-y-10">
+
+  <header class="space-y-3">
+    <div class="badge badge-soft badge-primary">Implementation plan &mdash; direction A</div>
+    <h1 class="text-3xl lg:text-4xl font-bold leading-tight">Graph-pilot as a pure interface over Linear + dispatch</h1>
+    <p class="text-base-content/70 max-w-3xl">Goal: graph-pilot stops being an independent planning source of truth and becomes a visualization/launch layer over Linear (planning) and dispatch (execution). No independent node content, no bug-tracking. Phased so the safest, most-grounded change lands first.</p>
+  </header>
+
+  <section class="space-y-3">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Current state (verified against the actual code)</h2>
+    <div class="grid md:grid-cols-2 gap-4">
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title text-base"><code class="text-xs">gp launch</code> today</h3>
+          <p class="text-sm"><code class="text-xs">graphpilot/src/cli.ts:cmdLaunch</code> resolves the node's project root, assembles context from linked nodes, then <code class="text-xs">spawn("claude", ["--dangerously-skip-permissions", prompt], &#123; cwd: projectRoot &#125;)</code> directly &mdash; in the real checkout, no worktree, no dispatch involvement, no board visibility.</p>
+        </div>
+      </div>
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title text-base"><code class="text-xs">gp dispatch</code> today &mdash; already close to "pure interface"</h3>
+          <p class="text-sm"><code class="text-xs">graphpilot/src/dispatch.ts:gpDispatch</code> already shells out to the real <code class="text-xs">dt</code> CLI (<code class="text-xs">dtExec</code> &rarr; <code class="text-xs">execFileSync("dt", [...])</code>, e.g. <code class="text-xs">dt show &lt;id&gt; --json</code>) and just mirrors the resulting task tree into vault nodes + regenerates the canvas for visualization. It does not duplicate dispatch's execution logic today.</p>
+        </div>
+      </div>
+    </div>
+    <div role="alert" class="alert alert-info text-sm">
+      <span><b>Confirmed while researching this plan:</b> dispatch's CLI already has a working <code class="text-xs">--json</code> global flag (<code class="text-xs">cmd/dt/commands/output.go</code>, used by <code class="text-xs">dt show</code>/<code class="text-xs">dt list</code> via <code class="text-xs">query.go</code>) &mdash; the earlier borrow-proposal's "fleet JSON snapshot" item may be partially redundant with what already exists; worth checking scope overlap before building that item.</span>
+    </div>
+  </section>
+
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Phase 1 &mdash; <code class="text-xl">gp launch</code> shells out to <code class="text-xl">dt go</code></h2>
+    <p class="text-sm text-base-content/70">Lowest-risk, most-grounded change. Do this first and validate it before touching anything Linear-related.</p>
+
+    <div class="phase-card rounded-box bg-base-100 p-4 space-y-2">
+      <h3 class="font-semibold">What changes</h3>
+      <p class="text-sm">Replace <code class="text-xs">cmdLaunch</code>'s direct <code class="text-xs">spawn("claude", ...)</code> with a call to <code class="text-xs">dt go "&lt;assembled context&gt;" --repo &lt;projectRoot&gt; --json</code> (via <code class="text-xs">execFileSync</code>, same pattern <code class="text-xs">gpDispatch</code> already uses for <code class="text-xs">dtExec</code>). Parse the returned task JSON (<code class="text-xs">cmd/dt/commands/capture.go:NewGoCmd</code> already supports <code class="text-xs">--repo</code> and <code class="text-xs">--json</code>, confirmed by reading it directly) and write <code class="text-xs">task.id</code>/<code class="text-xs">task.workdir</code> into the GP node's frontmatter (<code class="text-xs">session:</code> field, mirroring how <code class="text-xs">gpDispatch</code> already tracks <code class="text-xs">dispatch-task-id</code>).</p>
+      <p class="text-sm"><b>What this gains:</b> worktree isolation (currently zero for <code class="text-xs">gp launch</code>), board visibility (<code class="text-xs">dt list</code>/TUI now show launched-from-graph work), and removes a second bespoke "spawn claude" code path &mdash; graph-pilot no longer needs its own tmux/session logic for this case at all, since <code class="text-xs">dt go</code> already does herdr pane creation, focus, and prompt delivery.</p>
+    </div>
+
+    <div role="alert" class="alert alert-error alert-vertical sm:alert-horizontal text-sm">
+      <div>
+        <h3 class="font-bold">Real architectural gap this introduces &mdash; flagged, not solved here</h3>
+        <div class="mt-1">This breaks typing into a claude session from the in-canvas terminal overlay. Today, <code class="text-xs">gp launch</code>'s tmux window (spawned by <code class="text-xs">spawnWindow(node.meta.id, ...)</code> in <code class="text-xs">serve.ts</code>) directly contains the interactive claude process (<code class="text-xs">stdio: "inherit"</code>) &mdash; that's exactly what the July 29 terminal overlay (<code class="text-xs">tmux.ts</code>, <code class="text-xs">windowForNode</code>) attaches to and lets you type into. <code class="text-xs">dt go</code> runs the actual claude process inside a <b>herdr</b> pane instead &mdash; a different terminal multiplexer than graphpilot's own <code class="text-xs">"graphpilot"</code> tmux session. <code class="text-xs">dt go</code> itself returns immediately after printing the task summary; there is currently no bridge from graphpilot's tmux-based terminal viewer to a herdr pane. Routing <code class="text-xs">gp launch</code> through <code class="text-xs">dt go</code> as scoped would leave the in-canvas terminal with nothing live to show for that node. Not resolving this now &mdash; noting it as an open cost, see the "keep it in one repo?" question below.</div>
+      </div>
+    </div>
+    <div role="alert" class="alert alert-success text-sm">
+      <span><b>Resolved, not a risk:</b> permission-prompt behavior change is moot &mdash; with auto mode, no interactive claude session needs <code class="text-xs">--dangerously-skip-permissions</code> anymore. Dropped as a concern.</span>
+    </div>
+    <div role="alert" class="alert alert-warning text-sm">
+      <span><b>Confirmed need, not just a maybe:</b> <code class="text-xs">assembleContext</code> (<code class="text-xs">graphpilot/src/context.ts</code>) pulls in content from multiple linked nodes and this will need to launch with that context. <code class="text-xs">dt go</code> currently only takes the thought as a single positional CLI argument &mdash; add a way to pass a larger context blob (e.g. <code class="text-xs">--thought-file</code>, or read from stdin) as part of this same pass, not as a follow-on.</span>
+    </div>
+  </section>
+
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Phase 2 &mdash; drop Linear-shaped features, keep <code class="text-xl">gp dispatch</code> mostly as-is</h2>
+    <p class="text-sm text-base-content/70">Per feedback: do this together with Phase 1 in one pass, no gate in between &mdash; real usage is low right now, no need for careful staged validation.</p>
+    <div class="phase-card rounded-box bg-base-100 p-4 space-y-2">
+      <h3 class="font-semibold">What changes</h3>
+      <p class="text-sm">Remove the <code class="text-xs">Bug</code> node type and the dashboard bug-drawer/report form (git log <code class="text-xs">de62c2d</code>) &mdash; that's Linear's job, and keeping it is exactly the scope-creep the design conversation flagged. <code class="text-xs">gp dispatch</code> itself needs little to no change: it already treats <code class="text-xs">dt</code> as the execution source of truth and only mirrors state for visualization, which is the correct shape for a pure interface.</p>
+      <p class="text-sm"><b>Smaller follow-on:</b> since <code class="text-xs">gp dispatch</code> already depends on <code class="text-xs">dt show --json</code>, and the borrow-proposal separately considered a <code class="text-xs">dt fleet --json</code>/<code class="text-xs">dt list --json</code> whole-tree snapshot, check whether that item should be re-scoped as "extend the JSON support graph-pilot already depends on" rather than a firstmate-inspired addition from scratch.</p>
+    </div>
+  </section>
+
+  <section class="space-y-3">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Resolved: stay two repos, graph-pilot depends on dispatch directly</h2>
+    <div role="alert" class="alert alert-success alert-vertical sm:alert-horizontal shadow-sm">
+      <div>
+        <h3 class="font-bold">Decision</h3>
+        <div class="text-sm mt-1">Keep graph-pilot and dispatch as separate repos. Graph-pilot imports dispatch directly as a dependency rather than only shelling out via the <code class="text-xs">dt</code> CLI. Explicitly acknowledged: the tmux (graph-pilot) vs. herdr (dispatch) mux split still needs unifying &mdash; that's real follow-on work, not resolved by this plan, and is the concrete fix for the terminal-view gap flagged above (graph-pilot's viewer needs to speak herdr, or the two need one shared mux).</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Phase 3 &mdash; Linear as the planning source of truth (bigger, less specified, separate pass)</h2>
+    <div class="phase-card rounded-box bg-base-100 p-4 space-y-2">
+      <h3 class="font-semibold">The shape</h3>
+      <p class="text-sm">Graph-pilot's canvas/graph view renders from Linear issues (pulled via Linear's API, not the vault frontmatter) plus dispatch tasks (already working, via <code class="text-xs">dt show --json</code>). Dependencies come from Linear's own issue relations rather than graph-pilot's <code class="text-xs">depends-on</code>/<code class="text-xs">blocks</code> frontmatter fields.</p>
+    </div>
+    <div role="alert" class="alert alert-error alert-soft text-sm">
+      <span><b>Deliberately under-specified &mdash; needs its own design pass, not assumptions baked in here:</b></span>
+    </div>
+    <ul class="list-disc pl-5 text-sm space-y-1 text-base-content/80">
+      <li>Does Linear's API/relations model represent dependency graphs richly enough, or does graph-pilot end up re-deriving a graph structure Linear doesn't natively expose well?</li>
+      <li>Read-only mirror of Linear, or does graph-pilot need write access (creating/updating Linear issues from the canvas)? Different auth/scope requirements.</li>
+      <li>Does the vault go away entirely, or does it become a thin local cache for offline canvas rendering (refreshed on <code class="text-xs">gp sync</code>)?</li>
+      <li>Rate limits / caching strategy for a live Linear API dependency, given <code class="text-xs">gp serve</code>'s dashboard currently assumes fast local file reads.</li>
+    </ul>
+  </section>
+
+  <section class="space-y-3">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Sequencing</h2>
+    <ul class="steps steps-vertical lg:steps-horizontal w-full text-sm">
+      <li class="step step-primary">Phase 1+2 together: gp launch &rarr; dt go, drop bug-tracking</li>
+      <li class="step">Decide: merge into dispatch, or stay two repos?</li>
+      <li class="step">Phase 3: Linear integration (separate design pass)</li>
+    </ul>
+    <p class="text-sm text-base-content/70">Per feedback, phases 1 and 2 run together as one low-ceremony pass &mdash; no staged validation gate, since real usage is low right now. Phase 3 (Linear) stays a separate, later design pass regardless; it's the only piece that's genuinely bigger than "not being particularly careful" should apply to.</p>
+  </section>
+
+  <footer class="text-xs text-base-content/50 pt-4 border-t border-base-content/10">
+    Grounded directly against graphpilot/src/cli.ts, graphpilot/src/dispatch.ts, and dispatch-ai's cmd/dt/commands/capture.go and output.go/query.go &mdash; not assumed from the earlier design conversation alone.
+  </footer>
+
+</main>
+</div>

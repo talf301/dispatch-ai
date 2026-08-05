@@ -69,7 +69,7 @@ Approve → branch merges into the base branch, task done, tab closed, worktree 
 
 `dt add` is the agent-facing intake. Tasks it creates start as **`proposed`** and are never auto-dispatched: they surface in the board's Needs You lane and wait for `dt reopen <id>` (approve) or `dt kill` (decline). This is the guardrail that lets every agent on the machine know about `dt add` while a daemon runs unattended.
 
-Approved (`open`) tasks enter the v1 queue: `dispatchd` picks ready ones (unclaimed, dependencies met), spawns a worker agent in a fresh worktree with `prompts/worker.md`, runs the review gate on completion, merges approved work, and auto-completes parents whose children all finish. Task descriptions are the whole contract here — the worker only ever sees `dt show <id>`.
+Approved (`open`) tasks enter the v1 queue: `dispatchd` picks ready ones (unclaimed, dependencies met), spawns a worker agent in a fresh worktree with `prompts/worker.md`, runs the review gate on completion, merges approved work, and auto-completes parents whose children all finish. Automated work does not create a herdr tab unless you press Enter on its TUI row; that opens a log-only view on demand. Task descriptions are the whole contract here - the worker only ever sees `dt show <id>`.
 
 ### 5. The board — `dt tui`
 
@@ -86,7 +86,7 @@ Rows show the label; **the focused row reveals the verbatim thought**. The label
 | Key | Action |
 |---|---|
 | `j`/`k` | Move |
-| `Enter` | Focus the task's herdr tab (the board stays alive; revives a dead tab via `dt resume`) |
+| `Enter` | Focus the task's herdr tab; for active automated work, create a log-only tab on demand |
 | `g` | Capture — inline `dt go` |
 | `u` | Promote — `report <condition>` or `ratchet <command>` |
 | `a` | Approve the selected proposed task (`dt reopen`) |
@@ -98,7 +98,11 @@ Rows show the label; **the focused row reveals the verbatim thought**. The label
 | `?` | Scrollable shortcut help |
 | `q` | Quit |
 
-Mutations shell out to `dt` itself — the TUI never writes SQLite.
+Mutations shell out to `dt` itself - the TUI never writes SQLite.
+
+Press `g` to capture a task. When multiple available repositories are tracked, the TUI
+asks which repository to use and preselects the repository containing its
+current working directory.
 
 ### Dedup at capture
 
@@ -122,7 +126,7 @@ Two stages, so the common case costs nothing. Stage 1 is deterministic and local
 
 | Command | Purpose |
 |---|---|
-| `dt add <title> [-d <desc>] [-p <parent>] [--after <id>] [-r <repo>]` | File a task — starts `proposed` |
+| `dt add <title> [-d <desc>] [-p <parent>] [--after <id>] [-r <repo>] [--base-branch <branch>]` | File a task - starts `proposed`; pin non-default starting branches explicitly |
 | `dt reopen <id>` | Approve a proposal (or reopen blocked/done work) |
 | `dt dep` / `undep` / `claim` / `release` / `done` / `block` / `note` / `edit` | Ledger operations |
 | `dt ready` / `dt list [--tree\|--all\|--status s]` / `dt show <id>` | Read state (all support `--json`) |
@@ -134,12 +138,15 @@ Two stages, so the common case costs nothing. Stage 1 is deterministic and local
 ```bash
 dispatchd --worker-prompt prompts/worker.md --reviewer-prompt prompts/reviewer.md \
           [--worker-agent claude|codex] [--reviewer-agent claude|codex] \
+          [--worker-escalation-model <model>] [--worker-escalate-after 2] \
           [--repo <path>] [--base-branch <b>] [--poll-interval 5s] [--gp]
 ```
 
 One daemon runs both loops: the v1 queue (poll every 5s, spawn workers in worktrees, review gate, merge, parent auto-complete) and the unattended watchers (event-driven on the herdr socket). Without herdr on the machine, unattended dispatch disables itself and the v1 loop is unaffected.
 
 Workers and reviewers run non-interactively with permissions bypassed — the worktree is the isolation boundary and enforcement lives in the daemon, not in agent gates. `--worker-agent codex` / `--reviewer-agent codex` mix agents freely (e.g. claude writes, codex gives an independent second-opinion review).
+
+Set `--worker-escalation-model` (or `DISPATCH_WORKER_ESCALATION_MODEL`) to use a stronger worker model after the configured number of rejected review rounds. The default threshold is two; escalation is disabled unless a model is supplied.
 
 `--gp` enables GraphPilot sync: `gp sync-child <task-id>` on completion, and `dt batch` auto-wires the graph when `GRAPHPILOT_NODE` is set.
 
@@ -165,8 +172,14 @@ For sites 2, 3, and 5 the output contract is strict by design: the single permit
 | `DISPATCH_STALE_DAYS` | 4 | Stale-lane threshold |
 | `DISPATCH_LLM_BIN` / `DISPATCH_LLM_MODEL` | `claude` / `haiku` | One-shot model calls |
 | `DISPATCH_WORKER_AGENT` / `DISPATCH_REVIEWER_AGENT` | `claude` | Daemon agent CLIs |
+| `DISPATCH_WORKER_MODEL` | `gpt-5.6-luna` for Codex | Explicit baseline worker model |
+| `DISPATCH_WORKER_ESCALATION_MODEL` / `DISPATCH_WORKER_ESCALATE_AFTER` | `gpt-5.6-terra` / 2 for Codex | Worker model and rejected-review threshold for escalation |
 | `DISPATCH_BASE_BRANCH` / `--base-branch` | auto-detect | Merge target |
 | `~/.dispatch/config.toml` | — | Per-repo settings (`max_workers`) |
+
+Configured repository paths must be absolute. `dt tui` and `dispatchd` ignore
+entries that are not currently available Git repositories, so other configured
+repositories remain usable.
 
 ## Architecture
 

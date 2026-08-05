@@ -28,6 +28,7 @@ max_workers = 2
 
 [[repo]]
 path = "` + repoB + `"
+test_command = "go test ./..."
 `
 	cfgPath := filepath.Join(tmp, "config.toml")
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
@@ -47,9 +48,9 @@ path = "` + repoB + `"
 		t.Errorf("repo[0] = %+v, want path=%s maxWorkers=2 delivery_mode=%s", cfg.Repos[0], repoA, DefaultDeliveryMode)
 	}
 
-	// Default MaxWorkers applied
-	if cfg.Repos[1].Path != repoB || cfg.Repos[1].MaxWorkers != DefaultMaxWorkers || cfg.Repos[1].DeliveryMode != DefaultDeliveryMode {
-		t.Errorf("repo[1] = %+v, want path=%s maxWorkers=%d delivery_mode=%s", cfg.Repos[1], repoB, DefaultMaxWorkers, DefaultDeliveryMode)
+	// Defaults applied.
+	if cfg.Repos[1].Path != repoB || cfg.Repos[1].MaxWorkers != DefaultMaxWorkers || cfg.Repos[1].TestCommand != "go test ./..." || cfg.Repos[1].DeliveryMode != DefaultDeliveryMode {
+		t.Errorf("repo[1] = %+v, want path=%s maxWorkers=%d test command and delivery_mode=%s", cfg.Repos[1], repoB, DefaultMaxWorkers, DefaultDeliveryMode)
 	}
 }
 
@@ -106,23 +107,27 @@ path = "relative/path"
 	}
 }
 
-func TestLoadConfig_NotGitRepo(t *testing.T) {
+func TestLoadConfig_UnavailableRepoDoesNotHideValidRepos(t *testing.T) {
 	tmp := t.TempDir()
-	notRepo := filepath.Join(tmp, "notrepo")
-	os.MkdirAll(notRepo, 0o755) // no .git
+	validRepo := filepath.Join(tmp, "valid")
+	makeGitRepo(t, validRepo)
+	unavailableRepo := filepath.Join(tmp, "gone")
 
 	content := `[[repo]]
-path = "` + notRepo + `"
+path = "` + validRepo + `"
+
+[[repo]]
+path = "` + unavailableRepo + `"
 `
 	cfgPath := filepath.Join(tmp, "config.toml")
 	os.WriteFile(cfgPath, []byte(content), 0o644)
 
-	_, err := LoadConfig(cfgPath)
-	if err == nil {
-		t.Fatal("expected error for non-git repo")
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not a valid git repository") {
-		t.Errorf("error = %v, want 'not a valid git repository'", err)
+	if len(cfg.Repos) != 2 || cfg.Repos[0].Path != validRepo {
+		t.Fatalf("repos = %#v, want valid repo preserved", cfg.Repos)
 	}
 }
 

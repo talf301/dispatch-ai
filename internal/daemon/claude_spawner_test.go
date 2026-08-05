@@ -103,6 +103,22 @@ func TestCLISpawner_CodexArgv(t *testing.T) {
 	}
 }
 
+func TestCLISpawner_ExplicitModel(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeCodex := writeFakeBin(t, tmpDir, "codex", "echo \"$@\"\nexit 0\n")
+	spawner := &CLISpawner{Agent: "codex", Bin: fakeCodex, WorkerPrompt: "worker", OutputLines: 10}
+	h, err := spawner.SpawnWithModel(context.Background(), db.Task{ID: "ab15"}, tmpDir, RoleWorker, "", "gpt-5.6-terra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(h.Output(), "--model gpt-5.6-terra") {
+		t.Fatalf("explicit model missing from argv: %s", h.Output())
+	}
+}
+
 func TestCLISpawner_UnknownAgent(t *testing.T) {
 	spawner := &CLISpawner{Agent: "gemini"}
 	_, err := spawner.Spawn(context.Background(), db.Task{ID: "ab13"}, t.TempDir(), RoleWorker, "")
@@ -130,5 +146,61 @@ func TestRoleSpawner_RoutesByRole(t *testing.T) {
 		if !strings.Contains(h.Output(), want) {
 			t.Errorf("role %s ran wrong spawner: %s", role, h.Output())
 		}
+	}
+}
+
+func TestCLISpawner_PersistsProviderUsageOnce(t *testing.T) {
+	cases := []struct{ name, agent, output string }{
+		{"codex", "codex", `echo '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":2}}'`},
+		{"claude", "claude", `echo '{"type":"system","session_id":"s","model":"m"}'\necho '{"type":"result","is_error":false,"num_turns":1,"usage":{"input_tokens":3,"output_tokens":5},"result":"ok"}'`},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			d, err := db.Open(filepath.Join(t.TempDir(), "usage.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			task, err := d.AddTask("usage", "", "", "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bin := writeFakeBin(t, t.TempDir(), tt.name, tt.output+"\n")
+			s := &CLISpawner{Agent: tt.agent, Bin: bin, UsageDB: d}
+			h, err := s.Spawn(context.Background(), *task, t.TempDir(), RoleWorker, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.Wait(); err != nil {
+				t.Fatal(err)
+			}
+			r, err := d.Usage(task.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(r.Attempts) != 1 || r.Attempts[0].ExitStatus == nil {
+				t.Fatalf("attempts = %+v", r.Attempts)
+			}
+			if r.Totals.Attempts != 1 {
+				t.Fatalf("totals = %+v", r.Totals)
+			}
+		})
+	}
+}
+
+func TestCLISpawner_ReviewerVerdictSurvivesJSONCapture(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeClaude := writeFakeBin(t, tmpDir, "claude", `echo '{"type":"result","is_error":false,"num_turns":1,"result":"Checked the change.\nVERDICT: approve"}'`)
+	s := &CLISpawner{Bin: fakeClaude, ReviewerPrompt: "Review the task."}
+	h, err := s.Spawn(context.Background(), db.Task{ID: "review1"}, tmpDir, RoleReviewer, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	ok, _, err := parseVerdict(h.Output())
+	if err != nil || !ok {
+		t.Fatalf("verdict = %v, err = %v, output = %q", ok, err, h.Output())
 	}
 }

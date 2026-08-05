@@ -1,0 +1,423 @@
+<title>Firstmate vs Dispatch</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  :where(.grid, .flex) > * { min-width: 0; }
+  :where(p, h1, h2, h3, h4, li, dd, blockquote, figcaption, td, th, .badge, .label) { overflow-wrap: anywhere; }
+  :where(img, svg, video, canvas, iframe) { max-width: 100%; height: auto; }
+  .src { font-size: 0.7rem; color: color-mix(in oklch, currentColor 55%, transparent); }
+  .fm-section-card { border: 1px solid color-mix(in oklch, currentColor 10%, transparent); }
+</style>
+<div data-theme="luxury">
+<main class="mx-auto max-w-6xl p-5 lg:p-10 space-y-10">
+
+  <header class="space-y-3">
+    <div class="badge badge-soft badge-primary">Follow-up report</div>
+    <h1 class="text-3xl lg:text-4xl font-bold leading-tight">Firstmate, in depth &mdash; and can it live alongside dispatch?</h1>
+    <p class="text-base-content/70 max-w-3xl">Full feature inventory of firstmate (read directly from <code class="text-xs">upstream/main</code>, kunchenguid/firstmate), the same for dispatch/<code class="text-xs">dt</code> for fair comparison, then <b>Agent Deck</b> added as a third option, and a verdict on whether combining any of these makes sense &mdash; or whether Agent Deck is just worth switching to outright.</p>
+  </header>
+
+  <div role="alert" class="alert alert-info alert-vertical sm:alert-horizontal shadow-sm">
+    <div>
+      <h3 class="font-bold">Bottom line</h3>
+      <div class="text-sm mt-1">Firstmate and dispatch are not a clean combine &mdash; both implement the <i>same</i> core loop (watch a fleet of worktree-isolated agents, decide when to act) on opposite sides of a governance split: firstmate lets the LLM self-govern, dispatch pushes governance into Go + SQLite and reserves the LLM for five tiny calls. Agent Deck is a different animal again: a tmux-based session manager with strong deterministic plumbing and a genuinely good cost-tracking dashboard, but <b>zero merge/review gate</b> &mdash; it never tries to be firstmate's or dispatch's supervisor at all. See <a href="#verdict" class="link link-primary">the verdict</a>.</div>
+    </div>
+  </div>
+
+  <!-- PART 1: FIRSTMATE -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Part 1 &mdash; Firstmate</h2>
+
+    <div class="fm-section-card rounded-box bg-base-100 p-4">
+      <h3 class="font-semibold mb-2">What it is</h3>
+      <p class="text-sm">Not a model, harness, skill, MCP server, or CLI &mdash; an <b>"agent distro"</b>: a cloned git repo of <code class="text-xs">AGENTS.md</code> + skills + <code class="text-xs">bin/</code> scripts. You launch whatever coding CLI you already use (<code class="text-xs">claude</code>, <code class="text-xs">grok --trust</code>, <code class="text-xs">pi</code>, <code class="text-xs">codex</code>, <code class="text-xs">opencode</code>) <i>inside</i> the clone, and that session becomes "the first mate." <span class="src">README.md</span></p>
+    </div>
+
+    <pre class="mermaid">
+flowchart TD
+  Captain["Captain (you)"] -->|chat request| FM["First Mate\n(your CLI, running inside the firstmate clone)"]
+  FM -->|"resolve project + task shape"| Brief["fm-brief.sh\nwrites brief.md"]
+  Brief --> Spawn["fm-spawn.sh"]
+  Spawn --> WT["New git worktree\n(via treehouse, or Orca's own)"]
+  Spawn --> Sess["Session backend window/tab\n(tmux default; herdr/zellij/orca/cmux experimental)"]
+  WT --> Crew["Crewmate\nautonomous coding, unsupervised"]
+  Sess --> Crew
+  Crew -->|writes to state/data| Watch["fm-watch.sh\nzero-token wake classifier"]
+  Watch -->|benign wake| Watch
+  Watch -->|"actionable"| FM
+  FM -->|ship task| Merge["fm-pr-merge.sh / fm-merge-local.sh"]
+  FM -->|scout task| Report["data/&lt;id&gt;/report.md"]
+  FM -.optional.-> Second["Secondmate\npersistent, own FM_HOME, idle until routed work"]
+    </pre>
+
+    <div class="grid md:grid-cols-2 gap-4">
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title text-base">Session backends</h3>
+          <p class="text-sm">tmux is the verified reference default. herdr, zellij, orca, and cmux are all explicitly labeled <b>experimental</b>, each with its own documented limits. Selection order: per-task <code class="text-xs">--backend</code> flag &rarr; <code class="text-xs">FM_BACKEND</code> env &rarr; <code class="text-xs">config/backend</code> file &rarr; runtime auto-detection &rarr; tmux default. Treehouse supplies worktrees for tmux/herdr/zellij/cmux; Orca owns worktree + terminal lifecycle itself.</p>
+          <p class="src mt-1">docs/architecture.md, bin/fm-backend.sh, bin/backends/*.sh</p>
+        </div>
+      </div>
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title text-base">Skills: lazy-loaded, not upfront</h3>
+          <p class="text-sm">Only <code class="text-xs">AGENTS.md</code> itself (~532 lines, ~7,500 est. tokens) always loads. Internal skills (<code class="text-xs">.agents/skills/</code>) load only at named, precise triggers &mdash; per <code class="text-xs">AGENTS.md</code> §13: "load them only at their precise triggers." This is the direct mechanism keeping firstmate's baseline context bounded, similar in spirit to Pi's approach from the prior report.</p>
+          <p class="src mt-1">AGENTS.md §13, .agents/skills/*/SKILL.md, config/startup-memory-budget</p>
+        </div>
+      </div>
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title text-base">Deterministic vs. LLM turn</h3>
+          <p class="text-sm">Genuinely substantial bash/Python layer with zero model calls: <code class="text-xs">fm-watch.sh</code> (1059 lines, wake classification), <code class="text-xs">fm-guard.sh</code>, <code class="text-xs">fm-crew-state.sh</code>, busy-state classifiers, fleet snapshot/view generators, PR-check polling, worktree-tangle detection, all backend adapters. But the first mate's own dispatch decisions, brief-writing, escalation phrasing, and every crewmate's actual coding work still require an LLM turn.</p>
+          <p class="src mt-1">bin/fm-watch.sh, bin/fm-guard.sh, bin/fm-busy-lib.sh, bin/fm-classify-lib.sh, bin/fm-fleet-snapshot.sh</p>
+        </div>
+      </div>
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title text-base">State &amp; persistence</h3>
+          <p class="text-sm">All gitignored, split into <code class="text-xs">data/</code> (durable), <code class="text-xs">state/</code> (volatile), <code class="text-xs">config/</code> (local knobs). Backlog is plain Markdown (<code class="text-xs">data/backlog.md</code>), optionally driven by an external <code class="text-xs">tasks-axi</code> CLI. Per-task: <code class="text-xs">state/&lt;id&gt;.meta</code> (key=value), <code class="text-xs">state/&lt;id&gt;.status</code> (append-only wake log, <i>not</i> current-state truth). Designed "restart-proof" &mdash; disk records are authoritative over in-memory conversation state.</p>
+          <p class="src mt-1">AGENTS.md §2, .tasks.toml, docs/configuration.md</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="fm-section-card rounded-box bg-base-100 p-4 space-y-2">
+      <h3 class="font-semibold">Review/merge workflow &amp; config surface</h3>
+      <p class="text-sm">Three per-project delivery modes (<code class="text-xs">data/projects.md</code>): <b>no-mistakes</b> (full validated pipeline &rarr; PR), <b>direct-PR</b> (push + open PR, no gate), <b>local-only</b> (guarded fast-forward merge via <code class="text-xs">fm-merge-local.sh</code>, no PR). <code class="text-xs">fm-pr-merge.sh</code> is the only sanctioned merge path (never merges a red PR; requires captain approval unless a <code class="text-xs">+yolo</code> flag is set per project). <code class="text-xs">fm-teardown.sh</code> refuses to tear down a worktree with unlanded/dirty work. Dispatch-of-work rules (<code class="text-xs">config/crew-dispatch.json</code>) are natural-language, resolved by the <i>LLM itself</i> against live quota data &mdash; not by shell script.</p>
+      <p class="src">AGENTS.md §7, docs/architecture.md, bin/fm-pr-merge.sh, bin/fm-teardown.sh</p>
+    </div>
+
+    <div class="collapse collapse-arrow bg-base-100 border border-base-content/10">
+      <input type="checkbox">
+      <div class="collapse-title font-semibold text-sm">Gaps &amp; rough edges the docs admit to</div>
+      <div class="collapse-content text-sm space-y-1">
+        <ul class="list-disc pl-5 space-y-1">
+          <li><code class="text-xs">codex-app</code> &mdash; distinct from the already-supported <code class="text-xs">codex</code> CLI &mdash; would run crewmates inside <b>Codex Desktop's</b> own visible chat threads instead of a terminal session. Blocked because Codex Desktop currently exposes those host tools only to its own UI, with no shell-callable bridge for firstmate's bash scripts to create/send/read/archive a thread. Explicitly "not a runtime backend yet" until Codex Desktop ships a stable CLI/JSON-RPC/MCP transport (docs/codex-app-backend.md)</li>
+          <li>herdr/zellij/orca/cmux all self-labeled experimental; orca/cmux refuse <code class="text-xs">--secondmate</code> launches outright (not yet designed)</li>
+          <li>OpenCode's busy-queue-Enter behavior is an unhandled, documented known gap on the herdr adapter</li>
+          <li>A whole "wedge alarm" escalation subsystem exists specifically because away-mode delivery can get stuck (docs/wedge-alarm.md) &mdash; implying it's a real, recurring failure mode</li>
+          <li>Zellij's agent-liveness probe for secondmate recovery is explicitly marked "unverified"</li>
+        </ul>
+      </div>
+    </div>
+    <p class="text-xs text-base-content/50">CLI entry points: no standalone <code>firstmate</code> binary &mdash; you launch your existing agent CLI inside the clone. Chat slash-commands: <code>/afk</code>, <code>/ahoy</code>, <code>/bearings</code>, <code>/updatefirstmate</code>, <code>/stow</code> (Codex uses <code>$</code>-prefix). Over 90 <code>bin/fm-*.sh</code> scripts, catalogued in docs/scripts.md.</p>
+  </section>
+
+  <!-- PART 2: DISPATCH -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Part 2 &mdash; Dispatch (<code class="text-lg">dt</code>), for parity</h2>
+
+    <pre class="mermaid">
+flowchart TD
+  subgraph Ledger["Ledger/queue path (v1, daemon-driven)"]
+    Add["dt add\nlands as 'proposed', never auto-runs"] -->|"human: dt reopen"| Open["open"]
+    Open -->|"daemon: spawnReady, every 5s"| Claim["claim + worktree"]
+    Claim --> Worker["Worker agent\nclaude --print --dangerously-skip-permissions"]
+    Worker -->|exit 0, branch validated| Reviewer["Fresh reviewer process\nprompts/reviewer.md"]
+    Reviewer -->|"VERDICT: approve"| Done["merge branch -> done"]
+    Reviewer -->|"VERDICT: reject (cap 3)"| Open
+  end
+  subgraph Capture["Capture-first path (v2, interactive)"]
+    Go["dt go \"thought\""] --> Live["live task + worktree + herdr pane"]
+    Live --> Session["claude with session.md context\nhuman disposes: done / kill / park"]
+    Session -->|"dt promote"| Unattended["unattended"]
+    Unattended --> Gate["ratchet (shell, exit 0)\nor report (inline reviewer)"]
+    Gate -->|reject, cap 3, same session| Session
+    Gate -->|approve| Done
+  end
+    </pre>
+
+    <div class="grid md:grid-cols-2 gap-4">
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title text-base">State machine</h3>
+          <p class="text-sm">Nine statuses under a SQLite CHECK constraint: <code class="text-xs">open, active, blocked, done, live, unattended, parked, killed, proposed</code>. Every transition is Go-enforced, not agent-judgment &mdash; agent-filed work always lands <code class="text-xs">proposed</code> and needs a human <code class="text-xs">dt reopen</code> before it can run at all.</p>
+          <p class="src mt-1">internal/db/db.go (taskSchemaV2), tasks.go, tasks_v2.go</p>
+        </div>
+      </div>
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title text-base">No captain process</h3>
+          <p class="text-sm">Flatter than firstmate by design: there's no single agent doing ongoing supervision reasoning. Supervision is a Go daemon tick loop plus a prompt (<code class="text-xs">agentctx/session.md</code>) that tells a captured session to act as planner and file children via <code class="text-xs">dt add</code> &mdash; which land <code class="text-xs">proposed</code>, gated by a human either way.</p>
+          <p class="src mt-1">internal/daemon/daemon.go, internal/agentctx/session.md</p>
+        </div>
+      </div>
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title text-base">herdr &mdash; dispatch's own mux</h3>
+          <p class="text-sm">A separate binary dispatch shells out to via a small <code class="text-xs">Mux</code> interface (EnsureWorkspace, CreateTab, StartAgent, WaitAgent, AgentStates). <code class="text-xs">agent wait</code> is a blocking, event-driven socket call &mdash; explicitly built to avoid polling, after "a prior system burned 62M tokens polling a TUI." The package comment calls it "pre-1.0&hellip; the swap point": designed to be replaceable.</p>
+          <p class="src mt-1">internal/mux/herdr.go</p>
+        </div>
+      </div>
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title text-base">LLM footprint: five calls, total</h3>
+          <p class="text-sm">Worktree creation, merging, state transitions, reject caps, dependency resolution are all plain Go &mdash; zero model calls. Exactly five stateless, one-shot LLM sites exist anywhere in the machinery: label generation, dedup judge, TUI fuzzy-command, TUI brief, acceptance-report reviewer &mdash; each <code class="text-xs">claude -p --model haiku</code>, 30s timeout. Everything else costing tokens is the worker/reviewer agents actually doing the coding work itself, which is unavoidable.</p>
+          <p class="src mt-1">internal/llm</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="fm-section-card rounded-box bg-base-100 p-4 space-y-2">
+      <h3 class="font-semibold">Two distinct review gates</h3>
+      <p class="text-sm"><b>v1 (queue):</b> a brand-new reviewer process each round must end with <code class="text-xs">VERDICT: approve/reject</code>; reject increments a persisted count, reopens with prior review notes, capped at 3 before blocking. <b>v2 (unattended):</b> gate is either <code class="text-xs">ratchet</code> (shell command, must exit 0, 10-min timeout) or <code class="text-xs">report</code> (inline reviewer judging only the written acceptance condition); rejection is fed back into the <i>same live session</i> via <code class="text-xs">PromptAgent</code>, preserving context rather than starting fresh. A documented, since-fixed bug (rejected tasks reaching <code class="text-xs">done</code> because branch validation was skipped) shows this gate is actively hardened, not just designed on paper.</p>
+      <p class="src">prompts/reviewer.md, internal/daemon/unattended.go, docs/bugs/2026-03-26-review-gate-bypass.md</p>
+    </div>
+
+    <p class="text-xs text-base-content/50">CLI surface &mdash; v2 capture: <code>go, adopt, kill, park, resume, promote, relabel, tui</code>. v1 ledger: <code>add, edit, show, dep, undep, claim, release, done, block, reopen, note, ready, list, init</code>. Plus <code>batch</code> for atomic multi-verb execution from stdin.</p>
+  </section>
+
+  <!-- PART 3: AGENT DECK -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Part 3 &mdash; Agent Deck</h2>
+
+    <div role="alert" class="alert alert-warning alert-soft text-sm">
+      <span>"Agent Deck" is not one product &mdash; five distinct GitHub repos use the name. The one that actually fits this comparison is <code class="text-xs">asheshgoplani/agent-deck</code> (640&#9733;, 109 forks, 129 contributors, MIT). The rest: a hardware Stream Deck dashboard, an Electron/WSL workflow app, a monitoring-only dashboard, and a smaller macOS-native lookalike (<code class="text-xs">a-streetcoder/agent-deck</code>, 94&#9733;) built on "Pi CLI" doing the same worktree-per-session idea &mdash; noted where relevant, but the analysis below is about <code class="text-xs">asheshgoplani/agent-deck</code>.</span>
+    </div>
+
+    <div class="fm-section-card rounded-box bg-base-100 p-4">
+      <h3 class="font-semibold mb-2">What it is</h3>
+      <p class="text-sm">A Go CLI + terminal UI (Bubble Tea) built on tmux and SQLite: <b>"one TUI for Claude, Gemini, OpenCode, Codex, and more."</b> Not a captain/crew orchestrator by design &mdash; its own FAQ calls it "tmux plus AI awareness." Solo-maintained by Ashesh Goplani, 8 months old, actively recruiting co-maintainers. Free, MIT, no hosted tier &mdash; you pay only your own agent-CLI costs.</p>
+      <p class="src mt-1">github.com/asheshgoplani/agent-deck (README, gh api)</p>
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-4">
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title text-base">Broadest backend list of the three</h3>
+          <p class="text-sm">Claude Code, Gemini CLI, OpenCode, Codex, GitHub Copilot, Crush, Cursor (terminal), Hermes Agent, plus arbitrary custom tools via config &mdash; wider than firstmate's five and dispatch's two. Git worktrees are first-class: sparse-checkout inheritance, <code class="text-xs">.worktreeinclude</code> for gitignored files, setup/destroy hook scripts.</p>
+        </div>
+      </div>
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title text-base">Deterministic plumbing, real cost tracking</h3>
+          <p class="text-sm">Worktree/sparse-checkout materialization and setup/teardown run as plain shell scripts (<code class="text-xs">sh -e</code>, 60s timeout), not LLM calls; status detection ("Running"/"Waiting"/"Idle"/"Error") is structured polling, not LLM interpretation. Ships a genuine <b>Cost Tracking Dashboard</b>: per-model pricing for 14 models, automatic collection via a Claude Code transcript hook, budget limits with warnings, CSV/JSON export &mdash; directly answers the "token cost is invisible" half of the original complaint about firstmate, though Gemini/Codex/MiniMax cost collection is self-marked "untested."</p>
+        </div>
+      </div>
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title text-base">"Conductor": a looser supervisor</h3>
+          <p class="text-sm">Optional persistent session that watches for sessions needing help, auto-responds when confident, escalates to you when it can't, with Telegram/Slack remote control and a "Watchers" system (webhook/GitHub/ntfy/Slack) that wakes it on external events. Architecturally similar to firstmate's captain, but looser &mdash; it's opt-in monitoring/escalation, not a task-dispatch or decomposition layer.</p>
+        </div>
+      </div>
+      <div class="card card-border bg-base-100 border-error/40">
+        <div class="card-body">
+          <h3 class="card-title text-base text-error">No merge/review gate at all</h3>
+          <p class="text-sm"><code class="text-xs">agent-deck worktree finish "session"</code> merges the branch, removes the worktree, and deletes the session &mdash; a direct merge with no reviewer verdict, no pipeline gate, no acceptance condition. This is the one clear architectural gap versus <i>both</i> firstmate (project-mode gates) and dispatch (mandatory <code class="text-xs">ratchet</code>/<code class="text-xs">report</code> acceptance condition before <code class="text-xs">unattended</code>).</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="collapse collapse-arrow bg-base-100 border border-base-content/10">
+      <input type="checkbox">
+      <div class="collapse-title font-semibold text-sm">Known limitations (from its own public feedback thread &amp; README disclosures)</div>
+      <div class="collapse-content text-sm space-y-1">
+        <ul class="list-disc pl-5 space-y-1">
+          <li>A session-corruption bug (one session's output bleeding into another) drove at least one user to switch away, per the public Feedback Hub discussion (258 participants)</li>
+          <li>Session naming/creation UX complaints; CLI argument pass-through gaps to the underlying <code class="text-xs">claude</code> process; crashes on macOS suspend with no error logging</li>
+          <li>347 releases in ~8 months is an unusually fast cadence &mdash; consistent with heavy AI-assisted dogfooding (a contributor account literally named <code class="text-xs">claude</code> has 22 contributions), but also a signal of churn/instability risk</li>
+          <li>The claimed "85-90% MCP memory reduction" from its socket-pooling feature is a self-reported vendor number, not independently verified</li>
+          <li>No confirmed HN/Reddit discussion thread found despite direct searching &mdash; a real evidence gap on how broad non-creator usage actually is, beyond GitHub's own stars/contributors</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- PART 4: COMPARISON TABLE -->
+  <section class="space-y-3">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Part 4 &mdash; Side by side</h2>
+    <div class="overflow-x-auto rounded-box border border-base-content/10 bg-base-100">
+      <table class="table table-zebra">
+        <thead>
+          <tr><th>Axis</th><th>Firstmate</th><th>Dispatch</th><th>Agent Deck</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="font-semibold">Core philosophy</td>
+            <td>LLM self-governs: first mate makes judgment calls, <code class="text-xs">+yolo</code> and LLM-resolved dispatch rules exist</td>
+            <td>Go/SQLite structurally governs: agent permissions fully bypassed, enforcement lives outside the LLM entirely</td>
+            <td>Deterministic session/worktree plumbing, but no governance layer above it &mdash; "tmux plus AI awareness" by its own description</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Supervisor</td>
+            <td>A persistent agent (the first mate) doing ongoing reasoning, one per launched CLI session</td>
+            <td>No agent supervisor &mdash; a Go daemon tick loop + human gates (<code class="text-xs">proposed</code> default)</td>
+            <td>Optional "Conductor" &mdash; watches/escalates, but doesn't dispatch or decompose work</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Orchestration token cost</td>
+            <td>Baseline ~7.5K tokens (AGENTS.md) + lazy skills; watcher itself is zero-token, but first-mate judgment turns are frequent</td>
+            <td>Five tiny haiku calls total for all machinery; orchestration token cost is close to zero</td>
+            <td>No orchestration LLM calls by default (it's not agentic itself) &mdash; and it's the only one of the three that actually <i>measures</i> your agent spend, via a built-in cost dashboard</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Session/mux backends</td>
+            <td>5 backends (tmux default; herdr/zellij/orca/cmux experimental), wide agent-CLI support (claude/grok/pi/codex/opencode/kimi)</td>
+            <td>1 backend (herdr, dispatch's own binary &mdash; unrelated codebase to firstmate's herdr adapter despite the name), claude/codex only</td>
+            <td>tmux only, but the widest agent-CLI list of the three: Claude, Gemini, OpenCode, Codex, Copilot, Crush, Cursor, Hermes, custom</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Review/merge gate</td>
+            <td>Per-project delivery mode (no-mistakes/direct-PR/local-only) + PR-merge script guardrails</td>
+            <td>Formal VERDICT-contract reviewer, reject-capped, two gate kinds (ratchet/report), with a tracked-and-fixed bypass bug as evidence of hardening</td>
+            <td class="text-error">None &mdash; <code class="text-xs">worktree finish</code> merges directly, no verdict or acceptance condition of any kind</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">State storage</td>
+            <td>Gitignored Markdown + key=value files, human-readable, git-adjacent</td>
+            <td>Relational SQLite with a strict schema/CHECK constraint, queryable but not a plain text file</td>
+            <td>SQLite (<code class="text-xs">~/.local/share/agent-deck/&lt;profile&gt;/state.db</code>)</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Installation</td>
+            <td>Clone a directory, launch your existing CLI inside it &mdash; no new binary, no daemon</td>
+            <td>Install two Go binaries (<code class="text-xs">dt</code>, <code class="text-xs">dispatchd</code>) + herdr; daemon runs continuously</td>
+            <td>Single Go binary (Homebrew/go install/source); optional local web UI, no daemon required</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Concurrency caps</td>
+            <td>Not centrally capped; bounded by how many crewmates the first mate chooses to spawn</td>
+            <td><code class="text-xs">max_workers</code> per repo (v1, default 4); v2 unattended path uncapped, one goroutine per promoted task</td>
+            <td>Not centrally capped &mdash; bounded by how many sessions you open</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Maturity signals</td>
+            <td>26 commit authors upstream (not 1, correcting earlier third-party claim), 35 commits of active churn ahead of this fork's base, several self-documented experimental/unverified areas</td>
+            <td>Single-maintainer, but a documented-and-fixed review-gate-bypass bug and an explicit "pre-1.0, swap point" comment on the mux layer signal active hardening</td>
+            <td>~8 months old, 640&#9733;/129 contributors/347 releases (unusually fast cadence), solo-maintained and actively recruiting co-maintainers &mdash; a real bus-factor risk; a session-corruption bug has already driven at least one user away</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- PART 4: VERDICT -->
+  <section id="verdict" class="space-y-3">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Part 5 &mdash; Can you combine them? Should you just switch to Agent Deck?</h2>
+
+    <div role="alert" class="alert alert-error alert-soft alert-vertical sm:alert-horizontal">
+      <div>
+        <h3 class="font-bold">Where it's genuinely antithetical</h3>
+        <div class="text-sm mt-1">Both tools claim the same authority: "decide when a worktree's work is actionable, and merge/report on it." Firstmate's <code class="text-xs">fm-watch.sh</code> loop and dispatch's daemon tick loop would both be watching the same git worktrees, each with its own idea of task truth (firstmate's <code class="text-xs">data/&lt;id&gt;</code> Markdown vs. dispatch's SQLite row) and its own merge path (<code class="text-xs">fm-pr-merge.sh</code> vs. dispatch's <code class="text-xs">MergeBranch</code>). Running both as co-equal supervisors over the same repo is a two-writers-one-truth problem, not a feature combination.</div>
+      </div>
+    </div>
+
+    <div role="alert" class="alert alert-success alert-soft alert-vertical sm:alert-horizontal">
+      <div>
+        <h3 class="font-bold">What transplants cleanly</h3>
+        <div class="text-sm mt-1">
+          <ul class="list-disc pl-5 space-y-1">
+            <li><b>Lazy skill/prompt loading.</b> Dispatch's prompts (<code class="text-xs">session.md</code>, <code class="text-xs">worker.md</code>, <code class="text-xs">reviewer.md</code>) are currently always-loaded; firstmate's trigger-gated skill loading is a direct pattern to borrow if those prompts grow.</li>
+            <li><b>Backend abstraction as inspiration.</b> <code class="text-xs">internal/mux/herdr.go</code> already calls itself "the swap point" &mdash; firstmate's precedence order (flag &rarr; env &rarr; config file &rarr; auto-detect &rarr; default) is a reasonable template if dispatch ever adds a second mux backend.</li>
+            <li><b>Named delivery modes.</b> Firstmate's no-mistakes/direct-PR/local-only naming maps almost directly onto dispatch's own <code class="text-xs">no-mistakes</code> skill integration and could become an explicit per-repo config knob rather than an implicit one.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="card card-border bg-base-100">
+      <div class="card-body">
+        <h3 class="card-title text-base">Recommendation</h3>
+        <p class="text-sm">Don't run both as parallel supervisors on the same repo. Pick one system of record for task truth and merge authority &mdash; dispatch is the stronger fit for the exact complaint that started this thread, since it already keeps orchestration almost entirely out of the LLM (five tiny calls vs. firstmate's LLM-judgment-heavy first mate) and gates everything through a real state machine instead of chat-session memory. Treat firstmate as a source of specific implementation ideas (lazy loading, backend precedence, delivery-mode naming) to fold into dispatch, not as a co-running system.</p>
+      </div>
+    </div>
+
+    <div class="card card-border bg-base-100 border-primary/40">
+      <div class="card-body">
+        <h3 class="card-title text-base">Should you just switch to Agent Deck?</h3>
+        <p class="text-sm">Agent Deck doesn't compete with dispatch or firstmate &mdash; it competes with <b>herdr</b> and <b>tmux/session-backend plumbing</b>, one layer down. It's not trying to be a supervisor at all: no merge gate, no reviewer verdict, no task ledger. What it does well is exactly the two things firstmate feels raw and opaque on: deterministic worktree/session handling, and actual visibility into token/dollar spend via its cost dashboard &mdash; something neither firstmate nor dispatch currently offers.</p>
+        <p class="text-sm mt-2"><b>If you switch to Agent Deck "altogether"</b> in place of firstmate, you gain: broader backend support, better cost visibility, and a lighter/less raw feel &mdash; but you lose firstmate's supervised-crew model entirely; you'd be back to manually watching sessions and merging worktrees yourself, just with a nicer TUI for it. <b>In place of dispatch</b>, it's a clear step backward on the one axis this whole comparison keeps landing on: dispatch's mandatory acceptance-condition gate (<code class="text-xs">ratchet</code>/<code class="text-xs">report</code>) is precisely the deterministic safety rail Agent Deck doesn't have.</p>
+        <p class="text-sm mt-2">The actually interesting move: Agent Deck's cost-tracking dashboard and its worktree/sparse-checkout handling are things dispatch's herdr doesn't do today and could borrow, same spirit as the firstmate borrows above &mdash; not a reason to add a fourth supervisor into the mix.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer class="text-xs text-base-content/50 pt-4 border-t border-base-content/10">
+    Firstmate content read directly from <code>upstream/main</code> (kunchenguid/firstmate) via <code>git show</code>, not the stale local fork checkout. Dispatch content read from the working tree at /Users/tal/Documents/dispatch-ai. Agent Deck content verified via GitHub API (<code>gh api</code>/<code>gh repo view</code>) and direct README/discussion fetches for <code>asheshgoplani/agent-deck</code>.
+  </footer>
+
+</main>
+</div>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+  const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  const paint = document.createElement("canvas").getContext("2d");
+  function toRgba(color) {
+    paint.clearRect(0, 0, 1, 1);
+    paint.fillStyle = "#000";
+    paint.fillStyle = color;
+    paint.fillRect(0, 0, 1, 1);
+    return paint.getImageData(0, 0, 1, 1).data;
+  }
+  function compositeRgba(foreground, background) {
+    const foregroundAlpha = foreground[3] / 255;
+    const backgroundAlpha = background[3] / 255;
+    const alpha = foregroundAlpha + backgroundAlpha * (1 - foregroundAlpha);
+    if (alpha === 0) return [0, 0, 0, 0];
+    return [
+      (foreground[0] * foregroundAlpha + background[0] * backgroundAlpha * (1 - foregroundAlpha)) / alpha,
+      (foreground[1] * foregroundAlpha + background[1] * backgroundAlpha * (1 - foregroundAlpha)) / alpha,
+      (foreground[2] * foregroundAlpha + background[2] * backgroundAlpha * (1 - foregroundAlpha)) / alpha,
+      alpha * 255,
+    ];
+  }
+  function pageIsDark() {
+    const root = document.documentElement;
+    const rootBackground = toRgba(getComputedStyle(root).backgroundColor);
+    const bodyBackground = document.body ? toRgba(getComputedStyle(document.body).backgroundColor) : [0, 0, 0, 0];
+    const [r, g, b, a] = compositeRgba(bodyBackground, rootBackground);
+    if (a > 0) {
+      return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
+    }
+    const colorScheme = getComputedStyle(root).colorScheme;
+    if (colorScheme.includes("dark") && !colorScheme.includes("light")) return true;
+    if (colorScheme.includes("light") && !colorScheme.includes("dark")) return false;
+    return darkQuery.matches;
+  }
+  const diagrams = [...document.querySelectorAll(".mermaid")].map((el) => ({ el, src: el.textContent }));
+  let applied;
+  let rendering = false;
+  let queued = false;
+  function queueRender() {
+    queued = true;
+    if (rendering) return;
+    void render();
+  }
+  async function render() {
+    rendering = true;
+    try {
+      while (queued) {
+        queued = false;
+        const theme = pageIsDark() ? "dark" : "default";
+        if (theme === applied) continue;
+        mermaid.initialize({ startOnLoad: false, theme, securityLevel: "strict" });
+        for (const { el, src } of diagrams) {
+          el.removeAttribute("data-processed");
+          el.textContent = src;
+        }
+        try {
+          await mermaid.run({ nodes: diagrams.map((d) => d.el) });
+        } catch (error) {
+          console.error("Mermaid diagram render failed:", error);
+          return;
+        }
+        applied = theme;
+      }
+    } finally {
+      rendering = false;
+      if (queued) queueRender();
+    }
+  }
+  if (document.readyState === "complete") queueRender();
+  else window.addEventListener("load", queueRender, { once: true });
+  const themeObserver = new MutationObserver(queueRender);
+  for (const el of [document.documentElement, document.body]) {
+    if (!el) continue;
+    themeObserver.observe(el, { attributes: true, attributeFilter: ["data-theme", "class", "style"] });
+  }
+  document.addEventListener("change", queueRender, true);
+  document.addEventListener("transitionend", ({ propertyName }) => { if (propertyName === "background-color") queueRender(); }, true);
+  darkQuery.addEventListener("change", queueRender);
+</script>

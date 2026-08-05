@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Recover Dispatch task 6fd2</title>
+  <style>
+    :root { color-scheme: dark; --bg:#101418; --card:#192127; --text:#edf2f4; --muted:#a9b5bb; --accent:#72d6b2; --warn:#f2bd74; }
+    body { margin:0; padding:40px; background:var(--bg); color:var(--text); font:16px/1.5 system-ui,sans-serif; }
+    main { max-width:900px; margin:auto; } h1 { font-size:36px; margin:0 0 8px; } h2 { margin-top:32px; }
+    .lede { color:var(--muted); font-size:19px; } .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+    section, .card { background:var(--card); border:1px solid #2b373d; border-radius:12px; padding:20px; min-width:0; }
+    .recommended { border-color:var(--accent); } .label { color:var(--accent); font-weight:700; text-transform:uppercase; letter-spacing:.08em; font-size:12px; }
+    .risk { color:var(--warn); } code { color:#c8f0df; overflow-wrap:anywhere; }
+    @media (max-width:700px) { body { padding:20px; } .grid { grid-template-columns:1fr; } h1 { font-size:28px; } }
+  </style>
+</head>
+<body><main>
+  <div class="label">Dispatch recovery</div>
+  <h1>Task 6fd2</h1>
+  <p class="lede">Recover the partial rebase, finish it on <code>dispatch/6fd2</code>, validate it, and let the reviewer gate approve it.</p>
+
+  <h2>Current state</h2>
+  <section>
+    <p>The worker used Claude, resolved much of the planning-layer conflict, then delegated the remaining Tau Retail files to three background agents. Claude terminated after its 600-second background wait ceiling. The worktree is still on <code>rebase-16804-onto-main</code> with 24 unresolved files and no commit.</p>
+  </section>
+
+  <h2>Recommendation</h2>
+  <section class="recommended">
+    <p class="label">Recommended</p>
+    <ol>
+      <li>Keep the current worktree as a recoverable snapshot; do not reset it.</li>
+      <li>Move the completed resolution onto <code>dispatch/6fd2</code> only after all conflicts are resolved.</li>
+      <li>Run the task's pytest, ruff, and pyright checks.</li>
+      <li>Commit on <code>dispatch/6fd2</code>, then reopen the task and run a Codex reviewer.</li>
+    </ol>
+    <p class="risk">Do not commit the current tree: it still contains conflict markers.</p>
+  </section>
+
+  <h2>Worker choice</h2>
+  <div class="grid">
+    <div class="card"><p class="label">Codex</p><p>Use for the retry. Dispatch already supports <code>--worker-agent codex</code>; the new worker prompt also forbids leaving background agents running.</p></div>
+    <div class="card"><p class="label">Claude</p><p>Still viable if its background wait ceiling is raised, but it adds a timeout setting and does not solve the nested-agent lifecycle by itself.</p></div>
+  </div>
+
+  <h2>Open decision</h2>
+  <section><p>Default to the recommended Codex retry, or choose a manual conflict-resolution pass first if you want the existing partial work reviewed file by file.</p></section>
+</main></body></html>

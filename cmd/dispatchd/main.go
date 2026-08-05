@@ -4,9 +4,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -43,6 +45,44 @@ func envDurationOrDefault(key string, def time.Duration) time.Duration {
 	return def
 }
 
+func envIntOrDefault(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func loadRepos(configPath, repoPath string) (map[string]config.RepoConfig, error) {
+	repos := make(map[string]config.RepoConfig)
+	if cfg, err := config.LoadConfig(configPath); err == nil {
+		for _, repo := range cfg.Repos {
+			if _, err := os.Stat(filepath.Join(repo.Path, ".git")); err == nil {
+				repos[repo.Path] = repo
+			}
+		}
+	}
+	if len(repos) > 0 {
+		return repos, nil
+	}
+	if repoPath == "" {
+		return nil, fmt.Errorf("no repos configured: create %s or pass --repo", configPath)
+	}
+	absRepo, err := filepath.Abs(repoPath)
+	if err != nil {
+		absRepo = repoPath
+	}
+	repos[absRepo] = config.RepoConfig{Path: absRepo, MaxWorkers: config.DefaultMaxWorkers}
+	return repos, nil
+}
+
+const (
+	defaultCodexWorkerModel           = "gpt-5.6-luna"
+	defaultCodexWorkerEscalationModel = "gpt-5.6-terra"
+	defaultWorkerEscalateAfter        = 2
+)
+
 var rootCmd = &cobra.Command{
 	Use:   "dispatchd",
 	Short: "dispatch orchestration daemon",
@@ -55,7 +95,19 @@ var rootCmd = &cobra.Command{
 		reviewerPromptPath, _ := cmd.Flags().GetString("reviewer-prompt")
 		workerAgent, _ := cmd.Flags().GetString("worker-agent")
 		reviewerAgent, _ := cmd.Flags().GetString("reviewer-agent")
+		workerModel, _ := cmd.Flags().GetString("worker-model")
+		workerEscalationModel, _ := cmd.Flags().GetString("worker-escalation-model")
+		workerEscalateAfter, _ := cmd.Flags().GetInt("worker-escalate-after")
+		if workerAgent == "codex" {
+			if workerModel == "" {
+				workerModel = defaultCodexWorkerModel
+			}
+			if workerEscalationModel == "" {
+				workerEscalationModel = defaultCodexWorkerEscalationModel
+			}
+		}
 		gpEnabled, _ := cmd.Flags().GetBool("gp")
+		managerEnabled, _ := cmd.Flags().GetBool("manager")
 
 		if workerPromptPath == "" || reviewerPromptPath == "" {
 			return fmt.Errorf("--worker-prompt and --reviewer-prompt are required")
@@ -78,35 +130,26 @@ var rootCmd = &cobra.Command{
 
 		home, _ := os.UserHomeDir()
 
-		// Build repos map: load config.toml if present, fall back to --repo.
-		repos := make(map[string]config.RepoConfig)
 		configPath := config.DefaultConfigPath()
-		if cfg, err := config.LoadConfig(configPath); err == nil && len(cfg.Repos) > 0 {
-			for _, r := range cfg.Repos {
-				repos[r.Path] = r
-			}
-		} else if repoPath != "" {
-			// Single-repo mode via --repo flag.
-			absRepo, err := filepath.Abs(repoPath)
-			if err != nil {
-				absRepo = repoPath
-			}
-			repos[absRepo] = config.RepoConfig{
-				Path:       absRepo,
-				MaxWorkers: config.DefaultMaxWorkers,
-			}
-		} else {
-			return fmt.Errorf("no repos configured: create %s or pass --repo", configPath)
+		repos, err := loadRepos(configPath, repoPath)
+		if err != nil {
+			return err
 		}
 
 		cfg := daemon.Config{
-			DBPath:       dbPath,
-			Repos:        repos,
-			BaseBranch:   baseBranch,
-			PollInterval: pollInterval,
-			WorktreeBase: filepath.Join(home, ".dispatch", "worktrees"),
-			SessionDir:   filepath.Join(home, ".dispatch", "sessions"),
-			GPEnabled:    gpEnabled,
+			DBPath:                dbPath,
+			Repos:                 repos,
+			BaseBranch:            baseBranch,
+			PollInterval:          pollInterval,
+			WorktreeBase:          filepath.Join(home, ".dispatch", "worktrees"),
+			SessionDir:            filepath.Join(home, ".dispatch", "sessions"),
+			GPEnabled:             gpEnabled,
+			Mux:                   daemon.MuxIfAvailable(log.New(os.Stderr, "[dispatchd] ", log.LstdFlags)),
+			ReviewerAgent:         reviewerAgent,
+			WorkerModel:           workerModel,
+			WorkerEscalationModel: workerEscalationModel,
+			WorkerEscalateAfter:   workerEscalateAfter,
+			Manager:               managerEnabled,
 		}
 
 		newSpawner := func(agent string) *daemon.CLISpawner {
@@ -116,6 +159,7 @@ var rootCmd = &cobra.Command{
 				ReviewerPrompt: string(reviewerPrompt),
 				OutputLines:    100,
 				SessionDir:     filepath.Join(home, ".dispatch", "sessions"),
+				UsageDB:        database,
 			}
 		}
 		spawner := &daemon.RoleSpawner{
@@ -149,7 +193,11 @@ func init() {
 	rootCmd.Flags().String("reviewer-prompt", envOrDefault("DISPATCH_REVIEWER_PROMPT", ""), "path to reviewer.md prompt file (required)")
 	rootCmd.Flags().String("worker-agent", envOrDefault("DISPATCH_WORKER_AGENT", "claude"), "agent CLI for workers: claude or codex")
 	rootCmd.Flags().String("reviewer-agent", envOrDefault("DISPATCH_REVIEWER_AGENT", "claude"), "agent CLI for the review gate: claude or codex")
+	rootCmd.Flags().String("worker-model", os.Getenv("DISPATCH_WORKER_MODEL"), "explicit model for workers (optional)")
+	rootCmd.Flags().String("worker-escalation-model", os.Getenv("DISPATCH_WORKER_ESCALATION_MODEL"), "model for workers after repeated review rejection (optional)")
+	rootCmd.Flags().Int("worker-escalate-after", envIntOrDefault("DISPATCH_WORKER_ESCALATE_AFTER", defaultWorkerEscalateAfter), "rejected review rounds before worker model escalation")
 	rootCmd.Flags().Bool("gp", os.Getenv("DISPATCH_GP") == "1", "enable GraphPilot integration (env: DISPATCH_GP=1)")
+	rootCmd.Flags().Bool("manager", os.Getenv("DISPATCH_MANAGER") == "1", "run the human-facing manager session")
 }
 
 func main() {

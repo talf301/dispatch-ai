@@ -54,7 +54,11 @@ func (d *Daemon) scanUnattended(ctx context.Context) {
 }
 
 func (d *Daemon) watchUnattended(ctx context.Context, taskID string) {
+	// A daemon may have died while a reviewer was running. The new watcher is
+	// authoritative until it starts the next review.
+	_ = d.db.SetReviewing(taskID, false)
 	defer func() {
+		_ = d.db.SetReviewing(taskID, false)
 		d.mu.Lock()
 		delete(d.watchingUnattended, taskID)
 		d.mu.Unlock()
@@ -187,11 +191,16 @@ func (d *Daemon) verifyAcceptance(ctx context.Context, t *db.Task) (ok bool, rea
 		return false, fmt.Sprintf("ratchet %q failed: %v\n%s", accept, err, tail), nil
 
 	case "report":
+		if err := d.db.SetReviewing(t.ID, true); err != nil {
+			return false, "", err
+		}
+		defer d.db.SetReviewing(t.ID, false)
 		spawner := &CLISpawner{
 			Agent:          d.reviewerAgent,
 			ReviewerPrompt: acceptanceReviewerPrompt(t),
 			OutputLines:    200,
 			SessionDir:     d.sessionDir,
+			UsageDB:        d.db,
 		}
 		handle, err := spawner.Spawn(ctx, *t, *t.Workdir, RoleReviewer, "-accept-review")
 		if err != nil {

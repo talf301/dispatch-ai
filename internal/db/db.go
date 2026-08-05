@@ -95,6 +95,30 @@ func (d *DB) Rollback() error {
 	return tx.Rollback()
 }
 
+// GetMeta and SetMeta provide small durable cursors for process-local
+// surfaces such as the manager session. They intentionally do not become a
+// second task state machine.
+func (d *DB) GetMeta(key string) (string, bool, error) {
+	var value string
+	err := d.q.QueryRow("SELECT value FROM meta WHERE key = ?", key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("get meta %q: %w", key, err)
+	}
+	return value, true, nil
+}
+
+func (d *DB) SetMeta(key, value string) error {
+	_, err := d.q.Exec(`INSERT INTO meta (key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	if err != nil {
+		return fmt.Errorf("set meta %q: %w", key, err)
+	}
+	return nil
+}
+
 // taskColumnsV2 is the full v2 tasks schema. Fresh databases are created with
 // it directly; legacy databases are rebuilt into it (SQLite cannot alter a
 // CHECK constraint in place).
@@ -111,6 +135,7 @@ const taskSchemaV2 = `(
 	created_at  TEXT NOT NULL DEFAULT (datetime('now')),
 	updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
 	repo        TEXT,
+	base_branch TEXT,
 	thought     TEXT NOT NULL DEFAULT '',
 	label       TEXT,
 	mode        TEXT,
@@ -124,7 +149,8 @@ const taskSchemaV2 = `(
 	acceptance  TEXT,
 	kill_reason TEXT,
 	last_activity TEXT,
-	reject_count INTEGER NOT NULL DEFAULT 0
+	reject_count INTEGER NOT NULL DEFAULT 0,
+	reviewing     INTEGER NOT NULL DEFAULT 0
 )`
 
 const updatedAtTrigger = `CREATE TRIGGER IF NOT EXISTS tasks_updated_at
@@ -153,6 +179,25 @@ func (d *DB) migrate() error {
 			key   TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS task_attempts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			attempt_key TEXT NOT NULL UNIQUE,
+			task_id TEXT NOT NULL REFERENCES tasks(id),
+			role TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			model TEXT,
+			started_at TEXT NOT NULL,
+			ended_at TEXT,
+			exit_status INTEGER,
+			input_tokens INTEGER,
+			cached_input_tokens INTEGER,
+			output_tokens INTEGER,
+			reasoning_tokens INTEGER,
+			turn_count INTEGER,
+			tool_output_bytes INTEGER,
+			wait_only_count INTEGER,
+			raw_usage TEXT
+		)`,
 		updatedAtTrigger,
 	}
 	for _, s := range stmts {
@@ -169,6 +214,24 @@ func (d *DB) migrate() error {
 		return err
 	}
 	if hasThought {
+		hasReviewing, err := d.hasTaskColumn("reviewing")
+		if err != nil {
+			return err
+		}
+		if !hasReviewing {
+			if _, err := d.q.Exec("ALTER TABLE tasks ADD COLUMN reviewing INTEGER NOT NULL DEFAULT 0"); err != nil {
+				return fmt.Errorf("add reviewing column: %w", err)
+			}
+		}
+		hasBaseBranch, err := d.hasTaskColumn("base_branch")
+		if err != nil {
+			return err
+		}
+		if !hasBaseBranch {
+			if _, err := d.q.Exec("ALTER TABLE tasks ADD COLUMN base_branch TEXT"); err != nil {
+				return fmt.Errorf("add base_branch column: %w", err)
+			}
+		}
 		return nil
 	}
 

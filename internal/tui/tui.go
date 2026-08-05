@@ -11,12 +11,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
 	"github.com/dispatch-ai/dispatch/internal/mux"
@@ -25,15 +27,18 @@ import (
 type mode int
 
 const (
-	modeBoard   mode = iota
-	modeCapture      // g — inline dt go
-	modeKill         // x — reason entry
-	modeCommand      // : — fuzzy instruction entry
-	modeConfirm      // reviewing a proposed dt batch
-	modeDedup        // confirming similar closed work before capture
-	modeBrief        // rendered what-changed digest
-	modePromote      // u — acceptance entry
-	modeHelp         // ? — scrollable key reference
+	modeBoard      mode = iota
+	modeCapture         // g - inline dt go
+	modeKill            // x - reason entry
+	modeCommand         // : - fuzzy instruction entry
+	modeConfirm         // reviewing a proposed dt batch
+	modeDedup           // confirming similar closed work before capture
+	modeBrief           // rendered what-changed digest
+	modePromote         // u - acceptance entry
+	modeRename          // e - rename selected task
+	modeUsage           // i - provider usage drill-down
+	modeHelp            // ? - scrollable key reference
+	modeRepoSelect      // choose repo before g capture
 )
 
 type lane int
@@ -51,7 +56,7 @@ var laneLabels = map[lane]string{
 	laneStale:      "Stale · resume or kill",
 	laneNeedsYou:   "Needs you",
 	laneLive:       "Live now",
-	laneUnattended: "Unattended",
+	laneUnattended: "Automation",
 	laneParked:     "Parked",
 	laneClosed:     "Closed this week",
 }
@@ -60,6 +65,7 @@ type row struct {
 	task  db.Task
 	agent string // herdr agent state for the task's pane, "" if none
 	badge string // lane-specific badge override (e.g. "idle 6d")
+	notes []string
 }
 
 type Model struct {
@@ -67,6 +73,9 @@ type Model struct {
 	mux   mux.Mux
 
 	mode           mode
+	repos          []string
+	repoCursor     int
+	captureRepo    string
 	rows           map[lane][]row
 	flat           []row // selectable rows in lane order
 	cursor         int
@@ -82,16 +91,18 @@ type Model struct {
 	pendingThought string
 	brief          string // rendered digest
 	helpAt         int    // first visible line in the help view
+	usage          *usageView
 
 	// Commit-time cache for staleness: workdir → HEAD commit time.
 	// Refreshed every commitCacheTTL, not every 2s tick.
-	commits   map[string]time.Time
-	commitsAt time.Time
+	commits    map[string]time.Time
+	commitsAt  time.Time
+	daemonSeen time.Time
 }
 
 const commitCacheTTL = time.Minute
 
-func New(store *db.DB, m mux.Mux, dtBin string) Model {
+func New(store *db.DB, m mux.Mux, dtBin string, repos []string, currentRepo string) Model {
 	ti := textarea.New()
 	ti.CharLimit = 400
 	ti.Prompt = "› "
@@ -101,7 +112,14 @@ func New(store *db.DB, m mux.Mux, dtBin string) Model {
 	ti.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6adc8"))
 	ti.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("#89b4fa"))
 	ti.FocusedStyle.Text = lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4"))
-	return Model{store: store, mux: m, dtBin: dtBin, input: ti}
+	cursor := 0
+	for i, repo := range repos {
+		if repo == currentRepo {
+			cursor = i
+			break
+		}
+	}
+	return Model{store: store, mux: m, dtBin: dtBin, input: ti, repos: repos, repoCursor: cursor}
 }
 
 // ---------------------------------------------------------------------------
@@ -110,10 +128,11 @@ func New(store *db.DB, m mux.Mux, dtBin string) Model {
 
 type tickMsg time.Time
 type boardMsg struct {
-	rows      map[lane][]row
-	commits   map[string]time.Time
-	commitsAt time.Time
-	err       error
+	rows       map[lane][]row
+	commits    map[string]time.Time
+	commitsAt  time.Time
+	err        error
+	daemonSeen time.Time
 }
 type dtDoneMsg struct {
 	verb string
@@ -130,6 +149,16 @@ type briefMsg struct {
 type batchDoneMsg struct {
 	n   int
 	err error
+}
+type usageMsg struct {
+	view *usageView
+	err  error
+}
+
+type usageView struct {
+	task  *db.UsageReport
+	today db.UsageTotals
+	week  db.UsageTotals
 }
 
 func tick() tea.Cmd {
@@ -163,6 +192,10 @@ func (m Model) refresh() tea.Cmd {
 
 		threshold := staleAfter()
 		rows := make(map[lane][]row)
+		daemonSeen := time.Time{}
+		if value, ok, err := m.store.GetMeta("daemon_heartbeat"); err == nil && ok {
+			daemonSeen, _ = time.Parse(time.RFC3339Nano, value)
+		}
 		for _, t := range tasks {
 			agent := ""
 			if t.HerdrPane != nil {
@@ -173,6 +206,13 @@ func (m Model) refresh() tea.Cmd {
 				commit = commits[*t.Workdir]
 			}
 			r := row{task: t, agent: agent}
+			if t.Status == "unattended" {
+				if notes, err := m.store.GetNotes(t.ID); err == nil {
+					for i := max(0, len(notes)-2); i < len(notes); i++ {
+						r.notes = append(r.notes, notes[i].Content)
+					}
+				}
+			}
 			l := classify(t, agent)
 			if l == laneLive && isStale(t, agent, commit, now, threshold) {
 				l = laneStale
@@ -180,7 +220,7 @@ func (m Model) refresh() tea.Cmd {
 			}
 			rows[l] = append(rows[l], r)
 		}
-		return boardMsg{rows: rows, commits: commits, commitsAt: commitsAt}
+		return boardMsg{rows: rows, commits: commits, commitsAt: commitsAt, daemonSeen: daemonSeen}
 	}
 }
 
@@ -192,7 +232,7 @@ func classify(t db.Task, agent string) lane {
 		return laneNeedsYou
 	case t.Status == "live":
 		return laneLive
-	case t.Status == "unattended":
+	case t.Status == "open" || t.Status == "active" || t.Status == "unattended":
 		return laneUnattended
 	case t.Status == "parked":
 		return laneParked
@@ -203,13 +243,14 @@ func classify(t db.Task, agent string) lane {
 
 // runDT shells a mutation out to the dt binary itself: the TUI never writes
 // SQLite directly.
-func (m Model) runDT(verb string, args ...string) tea.Cmd {
+func (m Model) runDT(command ...string) tea.Cmd {
 	return func() tea.Msg {
-		out, err := exec.Command(m.dtBin, append([]string{verb}, args...)...).CombinedOutput()
+		out, err := exec.Command(m.dtBin, command...).CombinedOutput()
 		if err != nil {
-			err = fmt.Errorf("%s: %s", verb, strings.TrimSpace(string(out)))
+			err = fmt.Errorf("%s: %s", command[0], strings.TrimSpace(string(out)))
 		}
-		return dtDoneMsg{verb: verb, err: err}
+		auditCommand(command, "", err)
+		return dtDoneMsg{verb: command[0], err: err}
 	}
 }
 
@@ -239,6 +280,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.rows = msg.rows
 		m.commits, m.commitsAt = msg.commits, msg.commitsAt
+		m.daemonSeen = msg.daemonSeen
 		m.flat = m.selectable()
 		if m.cursor >= len(m.flat) {
 			m.cursor = max(0, len(m.flat)-1)
@@ -280,6 +322,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.store.MarkSeen(time.Now())
 		return m, nil
 
+	case usageMsg:
+		if msg.err != nil {
+			m.status = "Could not read usage: " + msg.err.Error()
+			return m, nil
+		}
+		m.usage, m.mode = msg.view, modeUsage
+		return m, nil
+
 	case batchDoneMsg:
 		m.busy, m.mode, m.proposal = false, modeBoard, nil
 		if msg.err != nil {
@@ -301,11 +351,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) runBatch(cmds []string) tea.Cmd {
 	return func() tea.Msg {
 		c := exec.Command(m.dtBin, "batch")
-		c.Stdin = strings.NewReader(strings.Join(cmds, "\n") + "\n")
+		input := strings.Join(cmds, "\n") + "\n"
+		c.Stdin = strings.NewReader(input)
 		out, err := c.CombinedOutput()
 		if err != nil {
 			err = fmt.Errorf("%s", strings.TrimSpace(string(out)))
 		}
+		auditCommand([]string{"batch"}, input, err)
 		return batchDoneMsg{n: len(cmds), err: err}
 	}
 }
@@ -326,7 +378,25 @@ func (m Model) selectable() []row {
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.mode {
-	case modeCapture, modeKill, modeCommand, modePromote:
+	case modeRepoSelect:
+		switch msg.String() {
+		case "esc":
+			m.mode = modeBoard
+		case "j", "down":
+			m.repoCursor = min(m.repoCursor+1, len(m.repos)-1)
+		case "k", "up":
+			m.repoCursor = max(m.repoCursor-1, 0)
+		case "enter":
+			if len(m.repos) > 0 {
+				m.captureRepo = m.repos[m.repoCursor]
+				m.mode = modeCapture
+				m.input.Placeholder = "what's the thought?"
+				m.input.Focus()
+				return m, m.input.Focus()
+			}
+		}
+		return m, nil
+	case modeCapture, modeKill, modeCommand, modePromote, modeRename:
 		switch msg.String() {
 		case "esc":
 			m.mode = modeBoard
@@ -352,6 +422,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				return m, m.runDT("promote", m.targetID, "-k", kind, "-a", accept)
+			case modeRename:
+				return m, m.runDT("relabel", m.targetID, text)
 			case modeCommand:
 				m.busy = true
 				return m, func() tea.Msg {
@@ -360,7 +432,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			default:
 				m.pendingThought = text
-				return m, m.runDT("go", text)
+				return m, m.runDT(m.goVerbArgs("go", text)...)
 			}
 		}
 		var cmd tea.Cmd
@@ -383,13 +455,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			thought := m.pendingThought
 			m.mode = modeBoard
 			m.status = "Starting despite similar closed work."
-			return m, m.runDT("go", "--no-dedup", thought)
+			return m, m.runDT(m.goVerbArgs("go", "--no-dedup", thought)...)
 		case "n", "esc", "q":
 			m.mode, m.pendingThought, m.status = modeBoard, "", "Not started."
 		}
 		return m, nil
 
 	case modeBrief:
+		m.mode = modeBoard
+		return m, nil
+	case modeUsage:
 		m.mode = modeBoard
 		return m, nil
 	case modeHelp:
@@ -423,6 +498,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor = max(0, len(m.flat)-1)
 		}
 	case "g":
+		if len(m.repos) > 1 {
+			m.mode = modeRepoSelect
+			return m, nil
+		}
+		m.captureRepo = ""
+		if len(m.repos) == 1 {
+			m.captureRepo = m.repos[0]
+		}
 		m.mode = modeCapture
 		m.input.Placeholder = "what's the thought?"
 		m.input.Focus()
@@ -438,11 +521,45 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			text, err := brief(m.store)
 			return briefMsg{text: text, err: err}
 		}
+	case "i":
+		if t, ok := m.current(); ok {
+			return m, func() tea.Msg {
+				report, err := m.store.Usage(t.ID)
+				if err != nil {
+					return usageMsg{err: err}
+				}
+				now := time.Now().UTC()
+				// Today/week intentionally use UTC calendar boundaries for deterministic aggregates.
+				today, err := m.store.UsageSince(time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC))
+				if err != nil {
+					return usageMsg{err: err}
+				}
+				week, err := m.store.UsageSince(now.AddDate(0, 0, -6).Truncate(24 * time.Hour))
+				if err != nil {
+					return usageMsg{err: err}
+				}
+				return usageMsg{view: &usageView{task: report, today: totals(today), week: totals(week)}}
+			}
+		}
+		return m, nil
 	case "x":
 		if t, ok := m.current(); ok {
 			m.mode = modeKill
 			m.targetID = t.ID
 			m.input.Placeholder = "why kill " + t.ID + "?"
+			m.input.Focus()
+			return m, m.input.Focus()
+		}
+	case "e":
+		if t, ok := m.current(); ok {
+			m.mode = modeRename
+			m.targetID = t.ID
+			label := t.Title
+			if t.Label != nil && *t.Label != "" {
+				label = *t.Label
+			}
+			m.input.Placeholder = "new task name"
+			m.input.SetValue(label)
 			m.input.Focus()
 			return m, m.input.Focus()
 		}
@@ -484,6 +601,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) goVerbArgs(verb string, args ...string) []string {
+	if m.captureRepo == "" {
+		return append([]string{verb}, args...)
+	}
+	return append([]string{verb, "--repo", m.captureRepo}, args...)
+}
+
 func (m Model) current() (db.Task, bool) {
 	if m.cursor < len(m.flat) {
 		return m.flat[m.cursor].task, true
@@ -506,7 +630,7 @@ func (m Model) focusCurrent() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
-	if t.Status == "live" && t.Workdir != nil && t.Repo != nil {
+	if (t.Status == "live" || t.Status == "active") && t.Workdir != nil && t.Repo != nil {
 		return m, m.runDT("resume", t.ID)
 	}
 	m.status = t.ID + " has no herdr tab."
@@ -517,12 +641,25 @@ func (m Model) focusCurrent() (tea.Model, tea.Cmd) {
 // View
 // ---------------------------------------------------------------------------
 
+// Catppuccin Frappé keeps the board legible on both dark terminal themes and
+// long-running sessions without adding a theme framework.
 var (
-	laneStyle   = lipgloss.NewStyle().Bold(true).MarginTop(1)
-	selStyle    = lipgloss.NewStyle().Reverse(true)
-	dimStyle    = lipgloss.NewStyle().Faint(true)
-	alertStyle  = lipgloss.NewStyle().Bold(true)
-	statusStyle = lipgloss.NewStyle().MarginTop(1).Faint(true)
+	base        = lipgloss.Color("#303446")
+	surface     = lipgloss.Color("#414559")
+	overlay     = lipgloss.Color("#737994")
+	text        = lipgloss.Color("#c6d0f5")
+	subtext     = lipgloss.Color("#a5adce")
+	blue        = lipgloss.Color("#8caaee")
+	green       = lipgloss.Color("#a6d189")
+	yellow      = lipgloss.Color("#e5c890")
+	red         = lipgloss.Color("#e78284")
+	mauve       = lipgloss.Color("#ca9ee6")
+	laneStyle   = lipgloss.NewStyle().Bold(true).Foreground(text)
+	selStyle    = lipgloss.NewStyle().Foreground(base).Background(blue).Bold(true)
+	dimStyle    = lipgloss.NewStyle().Foreground(subtext)
+	alertStyle  = lipgloss.NewStyle().Bold(true).Foreground(red)
+	statusStyle = lipgloss.NewStyle().MarginTop(1).Foreground(subtext)
+	cardStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(surface).Padding(0, 1)
 )
 
 func (m Model) View() string {
@@ -537,24 +674,38 @@ func (m Model) View() string {
 		return b.String()
 	case modeBrief:
 		return m.brief + dimStyle.Render("\n\nAny key to return.")
+	case modeUsage:
+		return m.viewUsage()
 	case modeHelp:
 		return m.helpView()
+	case modeRepoSelect:
+		return m.repoSelectView()
+	}
+
+	width := m.width
+	if width < 48 {
+		width = 96
+	}
+	idx := 0
+	leftWidth := width
+	rightWidth := width
+	if width >= 96 {
+		rightWidth = 40
+		leftWidth = width - rightWidth - 1
+	}
+	left := m.renderBoard([]lane{laneStale, laneNeedsYou, laneLive}, &idx, leftWidth, "Your work")
+	auto := m.renderBoard([]lane{laneUnattended}, &idx, rightWidth, "Automation  "+m.daemonStatus())
+	board := left
+	if width >= 96 {
+		board = lipgloss.JoinHorizontal(lipgloss.Top, left, " ", auto)
+	} else {
+		board = left + "\n" + auto
 	}
 
 	var b strings.Builder
-	idx := 0
-
-	for _, l := range []lane{laneStale, laneNeedsYou, laneLive, laneUnattended} {
-		rows := m.rows[l]
-		if len(rows) == 0 {
-			continue
-		}
-		b.WriteString(laneStyle.Render(fmt.Sprintf("%s (%d)", laneLabels[l], len(rows))) + "\n")
-		for _, r := range rows {
-			m.writeRow(&b, r, idx == m.cursor)
-			idx++
-		}
-	}
+	header := lipgloss.NewStyle().Bold(true).Foreground(blue).Render("dispatch") +
+		dimStyle.Render("  task ledger")
+	b.WriteString(header + "\n" + board + "\n")
 
 	for _, l := range []lane{laneParked, laneClosed} {
 		rows := m.rows[l]
@@ -562,22 +713,17 @@ func (m Model) View() string {
 			continue
 		}
 		if !m.showAll {
-			b.WriteString(laneStyle.Render(fmt.Sprintf("%s (%d)", laneLabels[l], len(rows))) +
-				dimStyle.Render("  z to expand") + "\n")
+			b.WriteString(dimStyle.Render(fmt.Sprintf("%s (%d) · z to expand\n", laneLabels[l], len(rows))))
 			continue
 		}
-		b.WriteString(laneStyle.Render(fmt.Sprintf("%s (%d)", laneLabels[l], len(rows))) + "\n")
-		for _, r := range rows {
-			m.writeRow(&b, r, idx == m.cursor)
-			idx++
-		}
+		b.WriteString(m.renderBoard([]lane{l}, &idx, width, laneLabels[l]) + "\n")
 	}
 
 	if idx == 0 && len(m.rows[laneParked]) == 0 && len(m.rows[laneClosed]) == 0 {
 		b.WriteString(dimStyle.Render("Nothing in flight. Press g and type the thought.\n"))
 	}
 
-	if m.mode == modeCapture || m.mode == modeKill || m.mode == modeCommand || m.mode == modePromote {
+	if m.mode == modeCapture || m.mode == modeKill || m.mode == modeCommand || m.mode == modePromote || m.mode == modeRename {
 		b.WriteString("\n" + m.input.View() + "\n")
 	}
 	if m.busy {
@@ -586,8 +732,102 @@ func (m Model) View() string {
 	if m.status != "" {
 		b.WriteString(statusStyle.Render(m.status) + "\n")
 	}
-	b.WriteString(dimStyle.Render("\n? help · a approve · d done · j/k move · ⏎ focus · g capture · : command · q quit"))
-	return b.String()
+	b.WriteString(dimStyle.Render("\n? help · a approve · d done · e rename · j/k move · ⏎ open activity · i usage · g capture · : command · b brief · u promote · x kill · p park · r resume · z all · q quit"))
+	return boundLines(b.String(), m.width)
+}
+
+func totals(r *db.UsageReport) db.UsageTotals {
+	if r == nil {
+		return db.UsageTotals{}
+	}
+	return r.Totals
+}
+
+func (m Model) viewUsage() string {
+	if m.usage == nil || m.usage.task == nil || len(m.usage.task.Attempts) == 0 {
+		return dimStyle.Render("No usage recorded.\n\nAny key to return.")
+	}
+	r := m.usage.task
+	var b strings.Builder
+	b.WriteString(laneStyle.Render("Usage · "+r.TaskID) + "\n")
+	b.WriteString(dimStyle.Render("Provider-emitted values; duration is derived from timestamps. Missing values are not estimated.") + "\n\n")
+	b.WriteString(fmt.Sprintf("Attempts %d  ·  raw input %s  ·  cached input %s  ·  output %s  ·  turns %s\n",
+		r.Totals.Attempts, number(r.Totals.InputTokens), number(r.Totals.CachedInputTokens), number(r.Totals.OutputTokens), strconv.Itoa(r.Totals.Turns)))
+	b.WriteString(fmt.Sprintf("Today (all tasks)  %s in / %s out / %d turns    Week (all tasks)  %s in / %s out / %d turns\n\n",
+		number(m.usage.today.InputTokens), number(m.usage.today.OutputTokens), m.usage.today.Turns,
+		number(m.usage.week.InputTokens), number(m.usage.week.OutputTokens), m.usage.week.Turns))
+	for _, a := range r.Attempts {
+		model := "unknown"
+		if a.Model != nil && *a.Model != "" {
+			model = *a.Model
+		}
+		waits := "not recorded"
+		if a.WaitOnlyCount != nil {
+			waits = strconv.Itoa(*a.WaitOnlyCount) + " (detected)"
+		}
+		b.WriteString(fmt.Sprintf("%s/%s/%s  %s  %s in · %s cached · %s out · %s turns · waits %s\n",
+			a.Provider, model, a.Role, duration(a), numberPtr(a.InputTokens), numberPtr(a.CachedInputTokens),
+			numberPtr(a.OutputTokens), numberPtr(a.TurnCount), waits))
+	}
+	b.WriteString(dimStyle.Render("Any key to return."))
+	return boundLines(b.String(), m.width)
+}
+
+func number(n int64) string { return strconv.FormatInt(n, 10) }
+
+func numberPtr[T int64 | int](p *T) string {
+	if p == nil {
+		return "-"
+	}
+	return fmt.Sprint(*p)
+}
+
+func duration(a db.Attempt) string {
+	if a.EndedAt == nil {
+		return "running"
+	}
+	start, e1 := time.Parse(time.RFC3339Nano, a.StartedAt)
+	end, e2 := time.Parse(time.RFC3339Nano, *a.EndedAt)
+	if e1 != nil || e2 != nil || end.Before(start) {
+		return "duration ?"
+	}
+	return "duration " + end.Sub(start).Round(time.Millisecond).String()
+}
+
+func boundLines(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		if lipgloss.Width(line) > width {
+			line = ansi.Truncate(line, width, "…")
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
+func (m Model) renderBoard(lanes []lane, idx *int, width int, title string) string {
+	if width < 40 {
+		width = 40
+	}
+	var b strings.Builder
+	for _, l := range lanes {
+		rows := m.rows[l]
+		if len(rows) == 0 {
+			continue
+		}
+		b.WriteString(laneStyle.Render(fmt.Sprintf("%s  %d", laneLabels[l], len(rows))) + "\n")
+		for _, r := range rows {
+			m.writeRow(&b, r, *idx == m.cursor, width-4)
+			*idx++
+		}
+	}
+	if b.Len() == 0 {
+		b.WriteString(dimStyle.Render("No tasks here."))
+	}
+	return cardStyle.Copy().Width(width).Render(lipgloss.NewStyle().Bold(true).Foreground(mauve).Render(title) + "\n" + b.String())
 }
 
 func (m Model) helpView() string {
@@ -599,6 +839,7 @@ func (m Model) helpView() string {
 		"enter        focus or resume selected task",
 		"a            approve selected proposed task",
 		"d            mark selected task done",
+		"e            rename selected task",
 		"g            capture a new thought",
 		"u            promote a live task",
 		"x            kill selected task",
@@ -622,32 +863,35 @@ func (m Model) helpView() string {
 	return strings.Join(lines[m.helpAt:end], "\n") + "\n" + dimStyle.Render("? help · esc back")
 }
 
+func (m Model) repoSelectView() string {
+	var b strings.Builder
+	b.WriteString(laneStyle.Render("Choose repository") + "\n\n")
+	for i, repo := range m.repos {
+		line := "  " + shortPath(repo)
+		if i == m.repoCursor {
+			line = selStyle.Render(line)
+		}
+		b.WriteString(line + "\n")
+	}
+	b.WriteString(dimStyle.Render("\nj/k move · enter select · esc cancel"))
+	return cardStyle.Copy().Width(max(48, m.width-4)).Render(b.String())
+}
+
 // writeRow renders one task line; the focused row reveals the verbatim
 // thought — the label is a display cache, never authoritative.
-func (m Model) writeRow(b *strings.Builder, r row, focused bool) {
+func (m Model) writeRow(b *strings.Builder, r row, focused bool, width int) {
 	t := r.task
 	label := t.Title
 	if t.Label != nil && *t.Label != "" {
 		label = *t.Label
 	}
-	badge := r.agent
-	switch {
-	case r.badge != "":
-		badge = alertStyle.Render(r.badge)
-	case t.Status == "proposed":
-		badge = alertStyle.Render("proposed") + dimStyle.Render(" · a approve")
-	case t.Status == "killed":
-		badge = "killed"
-	case t.Status == "done":
-		badge = "done"
-	case r.agent == "done":
-		badge = "done ✓ awaiting your call"
-	case r.agent == "blocked":
-		badge = alertStyle.Render("blocked")
-	case t.Status == "blocked" && t.BlockReason != nil:
-		badge = alertStyle.Render("blocked")
-	}
-	line := fmt.Sprintf("  %s  %-36s %s", t.ID, truncate(label, 36), badge)
+	badge := m.taskBadge(r)
+	badgeWidth := lipgloss.Width(badge)
+	labelWidth := max(10, width-len(t.ID)-badgeWidth-6)
+	label = truncate(label, labelWidth)
+	line := t.ID + "  " + label
+	padding := max(1, width-lipgloss.Width(line)-badgeWidth)
+	line += strings.Repeat(" ", padding) + badge
 	if focused {
 		line = selStyle.Render(line)
 	}
@@ -655,7 +899,7 @@ func (m Model) writeRow(b *strings.Builder, r row, focused bool) {
 
 	if focused {
 		if t.Thought != "" {
-			b.WriteString(dimStyle.Render(fmt.Sprintf("        %q", t.Thought)) + "\n")
+			b.WriteString(dimStyle.Render("  "+truncate(fmt.Sprintf("%q", t.Thought), max(12, width-2))) + "\n")
 		}
 		var meta []string
 		if t.Repo != nil {
@@ -670,10 +914,63 @@ func (m Model) writeRow(b *strings.Builder, r row, focused bool) {
 		if t.KillReason != nil {
 			meta = append(meta, "killed: "+*t.KillReason)
 		}
+		for _, note := range r.notes {
+			meta = append(meta, truncate(strings.Join(strings.Fields(note), " "), 120))
+		}
 		if len(meta) > 0 {
-			b.WriteString(dimStyle.Render("        "+strings.Join(meta, " · ")) + "\n")
+			b.WriteString(dimStyle.Render("  "+truncate(strings.Join(meta, " · "), max(12, width-2))) + "\n")
 		}
 	}
+}
+
+func (m Model) taskBadge(r row) string {
+	t := r.task
+	badge := r.agent
+	switch {
+	case r.badge != "":
+		return alertStyle.Render(r.badge)
+	case t.Status == "proposed":
+		return lipgloss.NewStyle().Foreground(yellow).Render("proposed · a approve")
+	case t.Status == "killed":
+		return dimStyle.Render("killed")
+	case t.Status == "done":
+		return lipgloss.NewStyle().Foreground(green).Render("done")
+	case r.agent == "done":
+		return lipgloss.NewStyle().Foreground(yellow).Render("waiting")
+	case r.agent == "blocked":
+		return alertStyle.Render("blocked")
+	case t.Status == "blocked" && t.BlockReason != nil:
+		return alertStyle.Render("blocked")
+	case t.Status == "unattended" && t.Reviewing:
+		return lipgloss.NewStyle().Foreground(mauve).Render(fmt.Sprintf("under review · %d", t.RejectCount+1))
+	case t.Status == "unattended" && r.agent == "working":
+		return lipgloss.NewStyle().Foreground(blue).Render("working")
+	case t.Status == "unattended":
+		if t.RejectCount > 0 {
+			return lipgloss.NewStyle().Foreground(yellow).Render(fmt.Sprintf("waiting · %d retries", t.RejectCount))
+		}
+		return lipgloss.NewStyle().Foreground(yellow).Render("waiting")
+	case r.agent == "working":
+		return lipgloss.NewStyle().Foreground(blue).Render("working")
+	}
+	if badge == "" {
+		return dimStyle.Render("waiting")
+	}
+	return dimStyle.Render(badge)
+}
+
+func (m Model) daemonStatus() string {
+	if m.daemonSeen.IsZero() {
+		return alertStyle.Render("daemon not running")
+	}
+	age := time.Since(m.daemonSeen)
+	if age < 0 {
+		age = 0
+	}
+	if age > 15*time.Second {
+		return alertStyle.Render("daemon not running")
+	}
+	return dimStyle.Render(fmt.Sprintf("daemon: last seen %s ago", age.Round(time.Second)))
 }
 
 func shortPath(p string) string {
@@ -706,7 +1003,7 @@ func min(a, b int) int {
 }
 
 // Run starts the board.
-func Run(store *db.DB, m mux.Mux, dtBin string) error {
-	_, err := tea.NewProgram(New(store, m, dtBin), tea.WithAltScreen()).Run()
+func Run(store *db.DB, m mux.Mux, dtBin string, repos []string, currentRepo string) error {
+	_, err := tea.NewProgram(New(store, m, dtBin, repos, currentRepo), tea.WithAltScreen()).Run()
 	return err
 }

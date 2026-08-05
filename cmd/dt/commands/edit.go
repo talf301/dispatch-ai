@@ -8,7 +8,7 @@ import (
 func NewEditCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "edit <id>",
-		Short: "Edit a task's title or description",
+		Short: "Edit a task",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			d := openDB(cmd)
@@ -34,6 +34,13 @@ func NewEditCmd() *cobra.Command {
 			if err != nil {
 				exitError(cmd, err)
 			}
+			if cmd.Flags().Changed("base-branch") {
+				baseBranch, _ := cmd.Flags().GetString("base-branch")
+				task, err = d.SetBaseBranch(id, baseBranch)
+				if err != nil {
+					exitError(cmd, err)
+				}
+			}
 
 			if jsonFlag(cmd) {
 				printJSON(task)
@@ -46,6 +53,7 @@ func NewEditCmd() *cobra.Command {
 	cmd.Flags().StringP("title", "t", "", "new title")
 	cmd.Flags().StringP("desc", "d", "", "new description")
 	cmd.Flags().StringP("repo", "r", "", "repository path")
+	cmd.Flags().String("base-branch", "", "branch the task must start from")
 
 	return cmd
 }

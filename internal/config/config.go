@@ -13,6 +13,7 @@ import (
 type RepoConfig struct {
 	Path         string `toml:"path"`
 	MaxWorkers   int    `toml:"max_workers"`
+	TestCommand  string `toml:"test_command"`
 	DeliveryMode string `toml:"delivery_mode"`
 }
 
@@ -36,8 +37,9 @@ func validDeliveryMode(mode string) bool {
 }
 
 // LoadConfig parses and validates the config file at the given path.
-// It validates that paths are absolute, exist as git repos, rejects duplicates,
-// and applies defaults where unset.
+// It validates that paths are absolute, rejects duplicates, and applies default
+// values where unset. Repository availability is checked when it is used so
+// a stale or temporarily unavailable repo cannot invalidate the whole config.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -56,16 +58,6 @@ func LoadConfig(path string) (*Config, error) {
 		// Validate absolute path.
 		if !filepath.IsAbs(r.Path) {
 			return nil, fmt.Errorf("repo path must be absolute: %q", r.Path)
-		}
-
-		// Validate path exists and is a git repo.
-		gitDir := filepath.Join(r.Path, ".git")
-		info, err := os.Stat(gitDir)
-		if err != nil {
-			return nil, fmt.Errorf("repo path %q is not a valid git repository: %w", r.Path, err)
-		}
-		if !info.IsDir() {
-			return nil, fmt.Errorf("repo path %q is not a valid git repository: .git is not a directory", r.Path)
 		}
 
 		// Reject duplicates.
@@ -127,6 +119,9 @@ func SaveRepoEntry(path string, repo RepoConfig) error {
 	}
 
 	entry := fmt.Sprintf("%s[[repo]]\npath = %q\nmax_workers = %d\ndelivery_mode = %q\n", prefix, repo.Path, repo.MaxWorkers, repo.DeliveryMode)
+	if repo.TestCommand != "" {
+		entry += fmt.Sprintf("test_command = %q\n", repo.TestCommand)
+	}
 	if _, err := f.WriteString(entry); err != nil {
 		return fmt.Errorf("writing config entry: %w", err)
 	}

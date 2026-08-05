@@ -1,0 +1,101 @@
+<title>Dispatch: secondmate design</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  :where(.grid, .flex) > * { min-width: 0; }
+  :where(p, h1, h2, h3, h4, li, dd, blockquote, figcaption, td, th, .badge, .label) { overflow-wrap: anywhere; }
+  :where(img, svg, video, canvas, iframe) { max-width: 100%; height: auto; }
+  .item-card { border: 1px solid color-mix(in oklch, currentColor 10%, transparent); }
+</style>
+<div data-theme="luxury">
+<main class="mx-auto max-w-6xl p-5 lg:p-10 space-y-10">
+
+  <header class="space-y-3">
+    <div class="badge badge-soft badge-primary">Design conversation, not a ticket</div>
+    <h1 class="text-3xl lg:text-4xl font-bold leading-tight">Secondmate-style persistent domain agents for dispatch</h1>
+    <p class="text-base-content/70 max-w-3xl">Spun out of <code class="text-xs">dispatch-borrow-proposal.html</code>'s "watch, don't build yet" list. You named two concrete candidates, so this is scoped to those two rather than the abstract idea. Goal here: agree on shape before anyone writes code.</p>
+  </header>
+
+  <!-- CURRENT STATE -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Current state</h2>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-2">
+      <h3 class="font-semibold">Dispatch has one flat manager today, and its wake is half-broken</h3>
+      <p class="text-sm"><code class="text-xs">dt manager</code> (<code class="text-xs">internal/manager/manager.go</code>, task <code class="text-xs">b837</code>) is a single conversational session meant to wake on human input <i>or</i> actionable task transitions. Just found while investigating a related question: the transition-wake half doesn't actually fire in real deployment &mdash; <code class="text-xs">dispatchd</code> and <code class="text-xs">dt manager</code> are separate processes, and the event pub/sub is in-process-only, so the daemon's real transitions never reach the manager. Filed as <code class="text-xs">1463</code>. Any secondmate design inherits this same wake-plumbing problem, so it's worth fixing once, underneath both.</p>
+    </div>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-2">
+      <h3 class="font-semibold">Firstmate's actual secondmate shape</h3>
+      <p class="text-sm">From <code class="text-xs">~/Documents/firstmate</code>'s <code class="text-xs">bin/fm-secondmate-*.sh</code> scripts: a secondmate is a <b>separate persistent session with its own home/state directory</b>, not a mode of the main captain session. When the first mate needs something from a domain a secondmate owns, it sends a marked request; the secondmate reports back on a shared status channel using a correlation token (<code class="text-xs">corr=&lt;id&gt;</code>) so the reply routes to the right waiting request. There's a dedicated liveness check (<code class="text-xs">fm-secondmate-liveness.test.sh</code>) &mdash; the architecture explicitly treats "is this secondmate actually alive" as something that needs checking, not assuming.</p>
+    </div>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-2 border-warning/50">
+      <h3 class="font-semibold">The load-bearing constraint this design must not violate</h3>
+      <p class="text-sm">Dispatch's own operating rule (stated in this repo's <code class="text-xs">CLAUDE.md</code>-equivalent guidance, and enforced on every agent working in it): tasks start <code class="text-xs">proposed</code> and <b>a human approves every reopen</b>; no agent claims, completes, kills, or promotes tasks itself. This repo's "explicitly not borrowing" list already rejects firstmate's LLM-judgment dispatch model for exactly this reason &mdash; dispatch's bet is that Go/SQLite governs, not the LLM. Any secondmate that "unblocks things" has to work within that gate, not around it.</p>
+    </div>
+  </section>
+
+  <!-- CANDIDATE 1 -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Candidate 1: PR-review digest secondmate</h2>
+    <p class="text-sm text-base-content/70">Your framing: keeps up with PRs you're tagged in as reviewer, has a breakdown ready for you.</p>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-2">
+      <h3 class="font-semibold">Proposed shape</h3>
+      <p class="text-sm">Cheap and periodic by default, not a standing LLM loop: poll <code class="text-xs">gh search prs --review-requested=@me</code> (or the equivalent GraphQL query) across whatever repos you care about, on a plain timer &mdash; no model turn spent just checking. Maintain a small durable digest (new table, or a file, following whatever the project's lightest existing pattern is) of what's open, how long it's been waiting, and any signal worth flagging (CI red, merge conflicts, a re-request after changes). Only spend a model turn to <i>write the summary language</i> when something in the digest actually changed since last time you looked, and only escalate to you (push into the manager, once its wake is fixed) for PRs that look time-sensitive or blocking someone.</p>
+      <p class="text-sm"><b>Open question:</b> does "ready for me" mean pull-on-demand (you ask the manager "what needs my review?" and it answers from the maintained digest) or push (it proactively surfaces new/aging PRs)? Both are cheap once the digest exists; picking one changes whether escalation cadence matters here at all.</p>
+    </div>
+  </section>
+
+  <!-- CANDIDATE 2 -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Candidate 2: dispatch-unblocker secondmate</h2>
+    <p class="text-sm text-base-content/70">Your framing: handles menial dispatch stuff, escalates only if something's actually important or difficult.</p>
+
+    <div role="alert" class="alert alert-warning alert-vertical sm:alert-horizontal shadow-sm">
+      <div>
+        <h3 class="font-bold">This is the one that needs a real decision, not just a design</h3>
+        <div class="text-sm mt-1">"Unblocking menial dispatch stuff" is doing a lot of work in that sentence. If it means <i>reopening proposed tasks, approving merges, or resolving blocks itself</i>, that's exactly the LLM-judgment-governs-lifecycle model this repo's own borrow-proposal already rejected, and it overrides the "human approves every reopen" rule that's currently enforced project-wide (including on me, right now, in this session). Worth being explicit about which of these you actually mean before any design gets written:</div>
+      </div>
+    </div>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-2">
+      <h3 class="font-semibold">Option A &mdash; recommends, never acts</h3>
+      <p class="text-sm">The secondmate watches the board (stuck tasks aging past a threshold, blocked tasks with a clear obvious next step, PRs sitting approved-and-unmerged &mdash; exactly the kind of thing this session just found with the graph-pilot stack), and surfaces a queued recommendation through the manager: "task X has been blocked for 3 days on Y, want me to reopen it?" You approve with a word; it never acts unilaterally. Zero change to the human-approves-every-reopen invariant.</p>
+    </div>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-2">
+      <h3 class="font-semibold">Option B &mdash; acts, but only inside a pre-approved allowlist of non-lifecycle actions</h3>
+      <p class="text-sm">A narrow, explicit list of mechanical actions that never touch task status: re-running a failed CI check, nudging a genuinely stalled worker (the kind of thing <code class="text-xs">a3db</code>'s liveness work would make detectable), re-triggering a stuck merge check. Task lifecycle (reopen/promote/kill) stays human-only; only true busywork gets automated, and the allowlist is small enough to audit at a glance.</p>
+    </div>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-2">
+      <h3 class="font-semibold">Option C &mdash; real autonomy over lifecycle decisions</h3>
+      <p class="text-sm">If this is actually what you want, it's a deliberate policy change to dispatch's core invariant, not a secondmate feature &mdash; needs its own explicit decision (and probably its own scoped trust boundary: which tasks, which repos, what "menial" means precisely) before any code gets written. Flagging it as a distinct option rather than assuming it's what "unblocking" means.</p>
+    </div>
+  </section>
+
+  <!-- ARCHITECTURE QUESTION -->
+  <section class="space-y-3">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">One architecture question that applies to both candidates</h2>
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-2">
+      <p class="text-sm">Firstmate's secondmates are separate persistent sessions with their own home/state &mdash; not a mode of the main captain. Does a dispatch secondmate need that same separation (its own herdr pane/session, its own durable state), or is it closer to a scheduled job that occasionally writes into the existing manager's conversation? The PR-digest candidate leans toward "mostly a cheap background job with occasional manager-surfaced output" &mdash; it doesn't obviously need a persistent conversational identity of its own. The unblocker candidate (especially Option A/B) is similar. If neither candidate actually needs "its own home," that's worth knowing before building toward firstmate's heavier pattern by default.</p>
+    </div>
+  </section>
+
+  <!-- OPEN QUESTIONS -->
+  <section class="space-y-3">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Open questions</h2>
+    <ul class="list-disc pl-5 text-sm space-y-1 text-base-content/80">
+      <li>Unblocker secondmate: Option A, B, or C?</li>
+      <li>PR digest: pull-on-demand, push, or both?</li>
+      <li>Does either candidate need a separate persistent session/pane, or is "occasional background job + manager surfacing" enough for both?</li>
+      <li>Should <code class="text-xs">1463</code> (manager's broken cross-process wake) land first, since both candidates' "escalate through the manager" path depends on it actually working?</li>
+    </ul>
+  </section>
+
+</main>
+</div>
