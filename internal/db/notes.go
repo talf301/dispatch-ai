@@ -1,9 +1,12 @@
 package db
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 )
+
+const lastTransitionKey = "dispatch.last_transition"
 
 // Event is a durable-ledger transition signal. It is a wakeup hint, not a
 // second source of truth; consumers must read the task from the ledger.
@@ -78,7 +81,29 @@ func (d *DB) Subscribe() (<-chan Event, func()) {
 	}
 }
 
-func (d *DB) publish(event Event) {
+// LastTransition returns the latest durable task transition. It lets a
+// separate process observe a transition without relying on an in-memory
+// subscription.
+func (d *DB) LastTransition() (Event, bool, error) {
+	value, ok, err := d.GetMeta(lastTransitionKey)
+	if err != nil || !ok {
+		return Event{}, ok, err
+	}
+	var event Event
+	if err := json.Unmarshal([]byte(value), &event); err != nil {
+		return Event{}, false, fmt.Errorf("decode last transition: %w", err)
+	}
+	return event, true, nil
+}
+
+func (d *DB) publish(event Event) error {
+	value, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("encode transition: %w", err)
+	}
+	if err := d.SetMeta(lastTransitionKey, string(value)); err != nil {
+		return err
+	}
 	eventSubscribers.Lock()
 	defer eventSubscribers.Unlock()
 	for ch := range eventSubscribers.byDB[d] {
@@ -87,6 +112,7 @@ func (d *DB) publish(event Event) {
 		default:
 		}
 	}
+	return nil
 }
 
 // GetNotes returns all notes for a task, ordered by created_at ascending.

@@ -8,10 +8,13 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
 	"github.com/dispatch-ai/dispatch/internal/mux"
 )
+
+const eventPollInterval = 250 * time.Millisecond
 
 const (
 	workspaceKey = "manager.workspace"
@@ -124,6 +127,8 @@ func (m *Manager) startTUI(managerPane string) (string, error) {
 func (m *Manager) Run(ctx context.Context) error {
 	events, cancel := m.db.Subscribe()
 	defer cancel()
+	ticker := time.NewTicker(eventPollInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -137,6 +142,17 @@ func (m *Manager) Run(ctx context.Context) error {
 			}
 			if err := m.Notify(event.TaskID); err != nil {
 				log.Printf("manager: notify %s: %v", event.TaskID, err)
+			}
+		case <-ticker.C:
+			event, ok, err := m.db.LastTransition()
+			if err != nil {
+				log.Printf("manager: read transition: %v", err)
+				continue
+			}
+			if ok && actionable(event.NewStatus) {
+				if err := m.Notify(event.TaskID); err != nil {
+					log.Printf("manager: notify %s: %v", event.TaskID, err)
+				}
 			}
 		}
 	}
