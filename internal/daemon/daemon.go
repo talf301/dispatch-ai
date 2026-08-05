@@ -22,14 +22,15 @@ import (
 
 // Config holds daemon configuration.
 type Config struct {
-	DBPath         string
-	Repos          map[string]config.RepoConfig // repoPath -> RepoConfig
-	BaseBranch     string                       // empty = auto-detect
-	PollInterval   time.Duration
-	ReviewInterval time.Duration
-	WorktreeBase   string // default ~/.dispatch/worktrees
-	SessionDir     string // path to ~/.dispatch/sessions/
-	GPEnabled      bool   // Enable GraphPilot integration (gp sync-child on task completion)
+	DBPath           string
+	Repos            map[string]config.RepoConfig // repoPath -> RepoConfig
+	BaseBranch       string                       // empty = auto-detect
+	PollInterval     time.Duration
+	PRReviewInterval time.Duration
+	ReviewInterval   time.Duration
+	WorktreeBase     string // default ~/.dispatch/worktrees
+	SessionDir       string // path to ~/.dispatch/sessions/
+	GPEnabled        bool   // Enable GraphPilot integration (gp sync-child on task completion)
 
 	// M5: unattended v2 dispatch. Nil Mux disables it (v1 loop unaffected).
 	Mux                   mux.Mux
@@ -44,11 +45,12 @@ type Config struct {
 func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
-		DBPath:         filepath.Join(home, ".dispatch", "dispatch.db"),
-		Repos:          make(map[string]config.RepoConfig),
-		PollInterval:   5 * time.Second,
-		ReviewInterval: time.Hour,
-		WorktreeBase:   filepath.Join(home, ".dispatch", "worktrees"),
+		DBPath:           filepath.Join(home, ".dispatch", "dispatch.db"),
+		Repos:            make(map[string]config.RepoConfig),
+		PollInterval:     5 * time.Second,
+		PRReviewInterval: 10 * time.Minute,
+		ReviewInterval:   time.Hour,
+		WorktreeBase:     filepath.Join(home, ".dispatch", "worktrees"),
 	}
 }
 
@@ -78,12 +80,16 @@ type Daemon struct {
 	watchingUnattended map[string]bool
 	manager            *managerpkg.Manager
 	managerCwd         string
+	lastPRReviewScan   time.Time
 	runCtx             context.Context
 	lastReviewScan     time.Time
 }
 
 // New creates a Daemon from the given config and spawner.
 func New(database *db.DB, cfg Config, spawner WorkerSpawner) *Daemon {
+	if cfg.PRReviewInterval <= 0 {
+		cfg.PRReviewInterval = 10 * time.Minute
+	}
 	if cfg.ReviewInterval <= 0 {
 		cfg.ReviewInterval = time.Hour
 	}
@@ -1151,6 +1157,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 		}()
 	}
+	if d.manager != nil {
+		d.scanPRReviews()
+		d.lastPRReviewScan = time.Now()
+	}
 	d.scanReview(time.Now())
 	d.lastReviewScan = time.Now()
 
@@ -1171,6 +1181,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.monitorWorkers()
 			d.monitorValidations()
 			d.scanUnattended(ctx)
+			if d.manager != nil && (d.cfg.PRReviewInterval <= 0 || time.Since(d.lastPRReviewScan) >= d.cfg.PRReviewInterval) {
+				d.scanPRReviews()
+				d.lastPRReviewScan = time.Now()
+			}
 			if d.cfg.ReviewInterval <= 0 || time.Since(d.lastReviewScan) >= d.cfg.ReviewInterval {
 				d.scanReview(time.Now())
 				d.lastReviewScan = time.Now()

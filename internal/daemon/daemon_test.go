@@ -49,6 +49,9 @@ func TestDaemonNew_DefaultsReviewInterval(t *testing.T) {
 	if d.cfg.ReviewInterval != time.Hour {
 		t.Errorf("ReviewInterval = %v, want 1h", d.cfg.ReviewInterval)
 	}
+	if d.cfg.PRReviewInterval != 10*time.Minute {
+		t.Errorf("PRReviewInterval = %v, want 10m", d.cfg.PRReviewInterval)
+	}
 }
 
 func TestBaseBranchForTaskOverride(t *testing.T) {

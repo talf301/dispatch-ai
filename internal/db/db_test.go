@@ -68,7 +68,7 @@ func TestTablesExist(t *testing.T) {
 	}
 	defer d.Close()
 
-	tables := []string{"tasks", "deps", "notes", "task_attempts"}
+	tables := []string{"tasks", "deps", "notes", "task_attempts", "secondmate_investigations"}
 	for _, tbl := range tables {
 		var name string
 		err := d.q.QueryRow(

@@ -56,6 +56,7 @@ func init() {
 	rootCmd.AddCommand(commands.NewReviewCmd())
 	rootCmd.AddCommand(commands.NewManagerCmd())
 	rootCmd.AddCommand(commands.NewUsageCmd())
+	rootCmd.AddCommand(commands.NewSecondmateCmd())
 	for _, cmd := range rootCmd.Commands() {
 		switch cmd.Name() {
 		case "block", "claim", "dep", "done", "edit", "kill", "note", "park", "promote", "release", "relabel", "reopen", "resume", "show", "undep":

@@ -91,6 +91,7 @@ var rootCmd = &cobra.Command{
 		baseBranch, _ := cmd.Flags().GetString("base-branch")
 		repoPath, _ := cmd.Flags().GetString("repo")
 		pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
+		prReviewInterval, _ := cmd.Flags().GetDuration("pr-review-interval")
 		workerPromptPath, _ := cmd.Flags().GetString("worker-prompt")
 		reviewerPromptPath, _ := cmd.Flags().GetString("reviewer-prompt")
 		workerAgent, _ := cmd.Flags().GetString("worker-agent")
@@ -141,6 +142,7 @@ var rootCmd = &cobra.Command{
 			Repos:                 repos,
 			BaseBranch:            baseBranch,
 			PollInterval:          pollInterval,
+			PRReviewInterval:      prReviewInterval,
 			WorktreeBase:          filepath.Join(home, ".dispatch", "worktrees"),
 			SessionDir:            filepath.Join(home, ".dispatch", "sessions"),
 			GPEnabled:             gpEnabled,
@@ -189,6 +191,7 @@ func init() {
 	rootCmd.Flags().String("base-branch", envOrDefault("DISPATCH_BASE_BRANCH", ""), "base branch for worktrees (default: auto-detect)")
 	rootCmd.Flags().String("repo", envOrDefault("DISPATCH_REPO", ""), "path to git repository (single-repo mode)")
 	rootCmd.Flags().Duration("poll-interval", envDurationOrDefault("DISPATCH_POLL_INTERVAL", 5*time.Second), "poll interval")
+	rootCmd.Flags().Duration("pr-review-interval", envDurationOrDefault("DISPATCH_PR_REVIEW_INTERVAL", 10*time.Minute), "PR review digest poll interval")
 	rootCmd.Flags().String("worker-prompt", envOrDefault("DISPATCH_WORKER_PROMPT", ""), "path to worker.md prompt file (required)")
 	rootCmd.Flags().String("reviewer-prompt", envOrDefault("DISPATCH_REVIEWER_PROMPT", ""), "path to reviewer.md prompt file (required)")
 	rootCmd.Flags().String("worker-agent", envOrDefault("DISPATCH_WORKER_AGENT", "claude"), "agent CLI for workers: claude or codex")
