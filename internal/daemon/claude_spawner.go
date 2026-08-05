@@ -79,7 +79,17 @@ func (s *CLISpawner) Spawn(ctx context.Context, task db.Task, workDir string, ro
 	}
 	systemPrompt = strings.ReplaceAll(systemPrompt, "$PARENT_ID", parentID)
 
-	bin, args, err := s.argv(systemPrompt, prompt)
+	envKey := "DISPATCH_WORKER_AGENT"
+	if role == RoleReviewer {
+		envKey = "DISPATCH_REVIEWER_AGENT"
+	}
+	agent, err := ResolveAgent(stringValue(task.Agent), envKey, s.Agent)
+	if err != nil {
+		return nil, err
+	}
+	configured := *s
+	configured.Agent = agent
+	bin, args, err := configured.argv(systemPrompt, prompt)
 	if err != nil {
 		return nil, err
 	}

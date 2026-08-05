@@ -7,6 +7,26 @@ import (
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
 
+func TestResolveAgentPrecedence(t *testing.T) {
+	t.Setenv("DISPATCH_WORKER_AGENT", "codex")
+	got, err := ResolveAgent("claude", "DISPATCH_WORKER_AGENT", "codex")
+	if err != nil || got != "claude" {
+		t.Fatalf("task agent = %q, %v; want claude", got, err)
+	}
+
+	got, err = ResolveAgent("", "DISPATCH_WORKER_AGENT", "claude")
+	if err != nil || got != "codex" {
+		t.Fatalf("env agent = %q, %v; want codex", got, err)
+	}
+
+	t.Setenv("DISPATCH_WORKER_AGENT", "")
+	got, err = ResolveAgent("", "DISPATCH_WORKER_AGENT", "claude")
+	if err != nil || got != "claude" {
+		t.Fatalf("configured agent = %q, %v; want claude", got, err)
+	}
+
+}
+
 func TestMockSpawner_Success(t *testing.T) {
 	spawner := &MockSpawner{ExitCode: 0}
 	handle, err := spawner.Spawn(context.Background(), db.Task{ID: "test"}, "/tmp", RoleWorker, "")

@@ -44,6 +44,7 @@ func NewGoCmd() *cobra.Command {
 	var here bool
 	var noDedup bool
 	var repoFlag string
+	var agentFlag string
 	cmd := &cobra.Command{
 		Use:   "go <thought>",
 		Short: "Capture a thought and start an agent on it",
@@ -77,7 +78,15 @@ func NewGoCmd() *cobra.Command {
 			if here {
 				mode = "in_place"
 			}
-			task, err := d.CaptureTask(thought, repoPath, mode)
+			agent, err := daemon.ResolveAgent(agentFlag, "DISPATCH_WORKER_AGENT", "")
+			if err != nil {
+				exitError(cmd, err)
+			}
+			var taskAgent *string
+			if agentFlag != "" {
+				taskAgent = &agentFlag
+			}
+			task, err := d.CaptureTaskWithAgent(thought, repoPath, mode, taskAgent)
 			if err != nil {
 				exitError(cmd, err)
 			}
@@ -120,7 +129,7 @@ func NewGoCmd() *cobra.Command {
 				printTask(task)
 				return
 			}
-			if err := startAgent(h, pane, task.ID, sessionPath); err != nil {
+			if err := startAgent(h, pane, task.ID, sessionPath, agent); err != nil {
 				fmt.Fprintln(os.Stderr, "warning: could not start claude:", err)
 			} else if err := h.PromptAgent(pane, thought); err != nil {
 				fmt.Fprintln(os.Stderr, "warning: could not send thought to claude:", err)
@@ -141,6 +150,7 @@ func NewGoCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&here, "here", false, "run in place (dirty tree, no worktree)")
 	cmd.Flags().BoolVar(&noDedup, "no-dedup", false, "skip the similar-closed-work check")
 	cmd.Flags().StringVarP(&repoFlag, "repo", "r", "", "repo path (default: inferred from cwd)")
+	cmd.Flags().StringVar(&agentFlag, "agent", "", "agent CLI for this task: claude or codex")
 	return cmd
 }
 
@@ -150,7 +160,7 @@ func NewGoCmd() *cobra.Command {
 // attempt.
 const startAgentAttemptTimeout = 2 * time.Second
 
-func startAgent(h mux.Mux, pane, taskID, sessionPath string) error {
+func startAgent(h mux.Mux, pane, taskID, sessionPath, agent string) error {
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	deadline := time.NewTimer(30 * time.Second)
@@ -158,7 +168,7 @@ func startAgent(h mux.Mux, pane, taskID, sessionPath string) error {
 	args := []string{"--append-system-prompt-file", sessionPath}
 	var lastErr error
 	for {
-		if err := h.StartAgent("dispatch-"+taskID, "claude", pane, startAgentAttemptTimeout, args); err == nil {
+		if err := h.StartAgent("dispatch-"+taskID, agent, pane, startAgentAttemptTimeout, args); err == nil {
 			return nil
 		} else {
 			lastErr = err

@@ -111,6 +111,7 @@ const taskSchemaV2 = `(
 	created_at  TEXT NOT NULL DEFAULT (datetime('now')),
 	updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
 	repo        TEXT,
+	agent       TEXT CHECK (agent IS NULL OR agent IN ('claude','codex')),
 	thought     TEXT NOT NULL DEFAULT '',
 	label       TEXT,
 	mode        TEXT,
@@ -169,6 +170,15 @@ func (d *DB) migrate() error {
 		return err
 	}
 	if hasThought {
+		hasAgent, err := d.hasTaskColumn("agent")
+		if err != nil {
+			return err
+		}
+		if !hasAgent {
+			if _, err := d.q.Exec("ALTER TABLE tasks ADD COLUMN agent TEXT CHECK (agent IS NULL OR agent IN ('claude','codex'))"); err != nil {
+				return fmt.Errorf("add agent column: %w", err)
+			}
+		}
 		return nil
 	}
 
