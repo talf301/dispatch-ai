@@ -153,6 +153,9 @@ func MergeBranch(repoDir, sourceBranch, targetBranch string) error {
 // FastForwardPlanBranch advances a plan branch to newBase only when every
 // commit on the plan is already reachable from newBase. Child branches are
 // advanced under the same guard; branches with unique work are left alone.
+//
+// ponytail: moving a child ref leaves a running checkout with a stale index;
+// the worker must reset or checkout before continuing, as with MergeBranch.
 func FastForwardPlanBranch(repoDir, planBranch, newBase string, childBranches []string) (bool, error) {
 	oldPlan, err := revParse(repoDir, planBranch)
 	if err != nil {

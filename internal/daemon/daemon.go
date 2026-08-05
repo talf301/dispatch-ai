@@ -268,20 +268,28 @@ func (d *Daemon) taskRepoPath(task *db.Task) (string, error) {
 	return "", fmt.Errorf("task %s has no repo set and %d repos are configured", task.ID, len(d.repos))
 }
 
-// baseBranchFor returns the branch a task's worktree branch is based on:
-// its plan branch for a child task, otherwise the configured or default branch.
+// baseBranchFor returns the ref a task's worktree branch is based on:
+// its plan branch for a child task, otherwise the configured or default branch
+// (preferring the fetched origin ref when one exists).
 func (d *Daemon) baseBranchFor(task *db.Task) (string, error) {
 	if task.ParentID != nil {
 		return fmt.Sprintf("dispatch/plan-%s", *task.ParentID), nil
-	}
-	if d.baseBranch != "" {
-		return d.baseBranch, nil
 	}
 	repoPath, err := d.taskRepoPath(task)
 	if err != nil {
 		return "", err
 	}
-	return DetectDefaultBranch(repoPath)
+	baseBranch := d.baseBranch
+	if baseBranch == "" {
+		baseBranch, err = DetectDefaultBranch(repoPath)
+		if err != nil {
+			return "", err
+		}
+	}
+	if BranchExists(repoPath, "origin/"+baseBranch) {
+		return "origin/" + baseBranch, nil
+	}
+	return baseBranch, nil
 }
 
 // spawnReady polls for ready tasks and spawns workers, enforcing per-repo max_workers.
