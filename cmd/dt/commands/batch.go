@@ -243,6 +243,9 @@ func executeLine(database *db.DB, line string) (string, error) {
 		if len(parts) != 2 {
 			return "", fmt.Errorf("reopen requires 1 argument: <id>")
 		}
+		if err := warnReopen(database, parts[1], os.Stderr); err != nil {
+			return "", err
+		}
 		_, err := database.ReopenTask(parts[1])
 		return "", err
 	case "note":

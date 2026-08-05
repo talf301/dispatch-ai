@@ -819,7 +819,7 @@ func (d *Daemon) handleReviewApproval(taskID string) {
 		if err := MergeBranch(repoPath, branchName, parentBranch); err != nil {
 			d.logger.Printf("review-done: merge %s into %s failed: %v", branchName, parentBranch, err)
 			reason := fmt.Sprintf("Merge conflict merging into plan branch:\n%v", err)
-			if _, err := d.db.BlockTask(taskID, reason); err != nil {
+			if _, err := d.db.BlockTaskWithKind(taskID, reason, db.BlockKindMergeConflict); err != nil {
 				d.logger.Printf("review-done: block task %s: %v", taskID, err)
 			}
 			return

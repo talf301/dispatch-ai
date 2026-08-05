@@ -110,7 +110,7 @@ func (d *Daemon) triggerPR(ac *db.AutoComplete) {
 			reason = reason[:4000]
 		}
 		d.logger.Printf("trigger-pr: PR creation failed for %s: %v", ac.ParentID, err)
-		if _, err := d.db.BlockTask(ac.ParentID, reason); err != nil {
+		if _, err := d.db.BlockTaskWithKind(ac.ParentID, reason, db.BlockKindPRCreateFailed); err != nil {
 			d.logger.Printf("trigger-pr: block parent %s: %v", ac.ParentID, err)
 		}
 	}
@@ -143,7 +143,7 @@ func (d *Daemon) checkPendingPRs() {
 				reason = reason[:4000]
 			}
 			d.logger.Printf("pending-prs: PR creation failed for %s: %v", parent.ID, err)
-			if _, err := d.db.BlockTask(parent.ID, reason); err != nil {
+			if _, err := d.db.BlockTaskWithKind(parent.ID, reason, db.BlockKindPRCreateFailed); err != nil {
 				d.logger.Printf("pending-prs: block parent %s: %v", parent.ID, err)
 			}
 		}
