@@ -26,7 +26,7 @@ func TestCreatePR_ZeroDiffSkipsGH(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	createPRTestBranch(t, repoDir, parent.ID)
+	createPRTestBranch(t, repoDir, parent.ID, true)
 	daemon := New(d, Config{BaseBranch: "main"}, &MockSpawner{})
 
 	if err := daemon.createPR(repoDir, *parent); err != nil {
@@ -39,7 +39,7 @@ func TestCreatePR_ZeroDiffSkipsGH(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(notes) != 1 || !contains(notes[0].Content, "no commits relative to main") {
+	if len(notes) != 1 || !contains(notes[0].Content, "no commits relative to origin/main") {
 		t.Fatalf("unexpected zero-diff note: %+v", notes)
 	}
 }
@@ -59,7 +59,7 @@ func TestCreatePR_GitCountErrorFallsThroughToGH(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	createPRTestBranch(t, repoDir, parent.ID)
+	createPRTestBranch(t, repoDir, parent.ID, false)
 	daemon := New(d, Config{BaseBranch: "missing-base"}, &MockSpawner{})
 
 	if err := daemon.createPR(repoDir, *parent); err == nil || !contains(err.Error(), "gh pr create") {
@@ -93,12 +93,35 @@ func initPRTestRepo(t *testing.T) string {
 	return repoDir
 }
 
-func createPRTestBranch(t *testing.T, repoDir, taskID string) {
+func createPRTestBranch(t *testing.T, repoDir, taskID string, mergedToRemote bool) {
 	t.Helper()
 	cmd := exec.Command("git", "checkout", "-b", "dispatch/plan-"+taskID)
 	cmd.Dir = repoDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("create plan branch: %v\n%s", err, out)
+	}
+	if !mergedToRemote {
+		return
+	}
+	cmd = exec.Command("git", "commit", "--allow-empty", "-m", "plan work")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("commit plan work: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "update-ref", "refs/heads/main", "HEAD")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("advance main: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "push", "origin", "main")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("push merged main: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "update-ref", "refs/heads/main", "HEAD~1")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("restore stale local main: %v\n%s", err, out)
 	}
 }
 

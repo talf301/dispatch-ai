@@ -23,11 +23,13 @@ func (d *Daemon) createPR(repoPath string, parentTask db.Task) error {
 		}
 	}
 
-	// A zero diff means the plan was already merged through another PR. Only
-	// trust a successful git result; errors must continue to the normal path.
-	if count, err := branchCommitCount(repoPath, baseBranch, planBranch); err == nil {
+	// Compare against the remote base, which is what GitHub uses for the PR
+	// diff. Only trust a successful git result; errors must continue to the
+	// normal path.
+	remoteBase := "origin/" + strings.TrimPrefix(baseBranch, "origin/")
+	if count, err := branchCommitCount(repoPath, remoteBase, planBranch); err == nil {
 		if count == 0 {
-			note := fmt.Sprintf("PR skipped: %s has no commits relative to %s; changes were already merged elsewhere.", planBranch, baseBranch)
+			note := fmt.Sprintf("PR skipped: %s has no commits relative to %s; changes were already merged elsewhere.", planBranch, remoteBase)
 			author := "daemon"
 			if _, err := d.db.AddNote(parentTask.ID, note, &author); err != nil {
 				return fmt.Errorf("record zero-diff PR note: %w", err)
@@ -35,11 +37,11 @@ func (d *Daemon) createPR(repoPath string, parentTask db.Task) error {
 			if err := d.db.MarkPRHandled(parentTask.ID); err != nil {
 				return fmt.Errorf("record zero-diff PR: %w", err)
 			}
-			d.logger.Printf("PR for %s (%s) skipped: no commits between %s and %s; already merged elsewhere", parentTask.ID, planBranch, baseBranch, planBranch)
+			d.logger.Printf("PR for %s (%s) skipped: no commits between %s and %s; already merged elsewhere", parentTask.ID, planBranch, remoteBase, planBranch)
 			return nil
 		}
 	} else {
-		d.logger.Printf("could not count commits between %s and %s: %v; attempting normal PR creation", baseBranch, planBranch, err)
+		d.logger.Printf("could not count commits between %s and %s: %v; attempting normal PR creation", remoteBase, planBranch, err)
 	}
 
 	// Push the plan branch to origin.
