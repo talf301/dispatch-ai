@@ -29,6 +29,8 @@ type Mux interface {
 	RenameTab(tabID, label string) error
 	// AgentStates returns pane ID → agent status (idle/working/blocked/done/unknown).
 	AgentStates() (map[string]string, error)
+	// AgentStatus returns the registered agent status for one pane.
+	AgentStatus(paneID string) (string, error)
 	// CurrentPane returns (workspaceID, tabID, paneID, cwd) of the focused pane.
 	CurrentPane() (ws, tab, pane, cwd string, err error)
 	// WaitAgent blocks until the pane's agent reaches one of the `until`
@@ -157,6 +159,18 @@ func (h Herdr) AgentStates() (map[string]string, error) {
 	return states, nil
 }
 
+func (h Herdr) AgentStatus(paneID string) (string, error) {
+	var res struct {
+		Agent struct {
+			AgentStatus string `json:"agent_status"`
+		} `json:"agent"`
+	}
+	if err := h.run(&res, "agent", "get", paneID); err != nil {
+		return "", err
+	}
+	return res.Agent.AgentStatus, nil
+}
+
 func (h Herdr) WaitAgent(paneID string, timeout time.Duration, until ...string) (string, error) {
 	var res struct {
 		Agent struct {
@@ -181,7 +195,10 @@ func (h Herdr) CloseTab(tabID string) error {
 }
 
 func (h Herdr) PromptAgent(paneID, text string) error {
-	return h.run(nil, "agent", "prompt", paneID, text)
+	// Wait for the prompt to be observed as a working turn. Without this,
+	// capture can race Claude's interactive startup and silently leave the
+	// opening thought in the ledger but not in the session.
+	return h.run(nil, "agent", "prompt", paneID, text, "--wait", "--until", "working", "--timeout", "10000")
 }
 
 func (h Herdr) CurrentPane() (string, string, string, string, error) {
