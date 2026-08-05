@@ -73,6 +73,9 @@ type Daemon struct {
 
 // New creates a Daemon from the given config and spawner.
 func New(database *db.DB, cfg Config, spawner WorkerSpawner) *Daemon {
+	if cfg.ReviewInterval <= 0 {
+		cfg.ReviewInterval = time.Hour
+	}
 	repos := cfg.Repos
 	if repos == nil {
 		repos = make(map[string]config.RepoConfig)

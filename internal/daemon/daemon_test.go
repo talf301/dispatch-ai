@@ -44,6 +44,13 @@ func TestDaemonConfig_Defaults(t *testing.T) {
 	}
 }
 
+func TestDaemonNew_DefaultsReviewInterval(t *testing.T) {
+	d := New(openTestDB(t), Config{}, nil)
+	if d.cfg.ReviewInterval != time.Hour {
+		t.Errorf("ReviewInterval = %v, want 1h", d.cfg.ReviewInterval)
+	}
+}
+
 func TestTaskRepoPath(t *testing.T) {
 	repo := "/repo/one"
 	task := &db.Task{ID: "abcd"}

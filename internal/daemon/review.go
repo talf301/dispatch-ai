@@ -93,7 +93,9 @@ func (d *Daemon) orphanWorktreeFindings(tasks []db.Task) []db.ReviewFinding {
 func (d *Daemon) orphanBranchFindings(tasks []db.Task) []db.ReviewFinding {
 	known := make(map[string]bool)
 	for _, t := range tasks {
-		known[t.ID] = true
+		if t.Status != "done" && t.Status != "killed" {
+			known[t.ID] = true
+		}
 	}
 	var out []db.ReviewFinding
 	for repo := range d.repos {
