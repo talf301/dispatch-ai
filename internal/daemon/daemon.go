@@ -22,13 +22,14 @@ import (
 
 // Config holds daemon configuration.
 type Config struct {
-	DBPath       string
-	Repos        map[string]config.RepoConfig // repoPath -> RepoConfig
-	BaseBranch   string                       // empty = auto-detect
-	PollInterval time.Duration
-	WorktreeBase string // default ~/.dispatch/worktrees
-	SessionDir   string // path to ~/.dispatch/sessions/
-	GPEnabled    bool   // Enable GraphPilot integration (gp sync-child on task completion)
+	DBPath           string
+	Repos            map[string]config.RepoConfig // repoPath -> RepoConfig
+	BaseBranch       string                       // empty = auto-detect
+	PollInterval     time.Duration
+	PRReviewInterval time.Duration
+	WorktreeBase     string // default ~/.dispatch/worktrees
+	SessionDir       string // path to ~/.dispatch/sessions/
+	GPEnabled        bool   // Enable GraphPilot integration (gp sync-child on task completion)
 
 	// M5: unattended v2 dispatch. Nil Mux disables it (v1 loop unaffected).
 	Mux                   mux.Mux
@@ -43,10 +44,11 @@ type Config struct {
 func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
-		DBPath:       filepath.Join(home, ".dispatch", "dispatch.db"),
-		Repos:        make(map[string]config.RepoConfig),
-		PollInterval: 5 * time.Second,
-		WorktreeBase: filepath.Join(home, ".dispatch", "worktrees"),
+		DBPath:           filepath.Join(home, ".dispatch", "dispatch.db"),
+		Repos:            make(map[string]config.RepoConfig),
+		PollInterval:     5 * time.Second,
+		PRReviewInterval: 10 * time.Minute,
+		WorktreeBase:     filepath.Join(home, ".dispatch", "worktrees"),
 	}
 }
 
@@ -76,6 +78,7 @@ type Daemon struct {
 	watchingUnattended map[string]bool
 	manager            *managerpkg.Manager
 	managerCwd         string
+	lastPRReviewScan   time.Time
 	runCtx             context.Context
 }
 
@@ -1145,6 +1148,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 		}()
 	}
+	if d.manager != nil {
+		d.scanPRReviews()
+		d.lastPRReviewScan = time.Now()
+	}
 
 	ticker := time.NewTicker(d.cfg.PollInterval)
 	defer ticker.Stop()
@@ -1163,6 +1170,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.monitorWorkers()
 			d.monitorValidations()
 			d.scanUnattended(ctx)
+			if d.manager != nil && (d.cfg.PRReviewInterval <= 0 || time.Since(d.lastPRReviewScan) >= d.cfg.PRReviewInterval) {
+				d.scanPRReviews()
+				d.lastPRReviewScan = time.Now()
+			}
 			d.checkPendingPRs()
 			d.cleanOrphanedWorktrees()
 			d.logSummary()

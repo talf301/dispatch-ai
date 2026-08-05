@@ -218,6 +218,28 @@ func TestNotifyDeduplicatesAcrossManagerRestart(t *testing.T) {
 	}
 }
 
+func TestNotifyMessageDeduplicatesByRevision(t *testing.T) {
+	d, err := db.Open(t.TempDir() + "/dispatch.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if err := d.SetMeta(paneKey, "pane"); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeMux{}
+	m := New(d, f)
+	if err := m.NotifyMessage("secondmate.pr.example/1.abc", "report"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.NotifyMessage("secondmate.pr.example/1.abc", "report"); err != nil {
+		t.Fatal(err)
+	}
+	if f.prompts != 1 {
+		t.Fatalf("got %d prompts, want one", f.prompts)
+	}
+}
+
 func TestStartRecoversAndRecreatesDeadPane(t *testing.T) {
 	d, err := db.Open(t.TempDir() + "/dispatch.db")
 	if err != nil {

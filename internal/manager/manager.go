@@ -197,6 +197,30 @@ func (m *Manager) Notify(taskID string) error {
 	return m.db.SetMeta(key, cursor)
 }
 
+// NotifyMessage pushes a durable, externally generated message into the
+// manager pane. key identifies the source revision so retries and restarts do
+// not duplicate a delivered report.
+func (m *Manager) NotifyMessage(key, message string) error {
+	seen, _, err := m.db.GetMeta(seenPrefix + key)
+	if err != nil {
+		return err
+	}
+	if seen == "1" {
+		return nil
+	}
+	pane, _, err := m.db.GetMeta(paneKey)
+	if err != nil {
+		return err
+	}
+	if pane == "" {
+		return fmt.Errorf("manager pane is not started")
+	}
+	if err := m.mux.PromptAgent(pane, message); err != nil {
+		return err
+	}
+	return m.db.SetMeta(seenPrefix+key, "1")
+}
+
 func (m *Manager) summary(task *db.Task) (string, error) {
 	children, err := m.db.GetChildren(task.ID)
 	if err != nil {
