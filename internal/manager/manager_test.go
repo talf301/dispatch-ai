@@ -119,6 +119,52 @@ func TestRunWakesForTransitionFromAnotherDB(t *testing.T) {
 	}
 }
 
+func TestRunWakesForMultipleTransitionsFromAnotherDB(t *testing.T) {
+	path := t.TempDir() + "/dispatch.db"
+	managerDB, err := db.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer managerDB.Close()
+	writerDB, err := db.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writerDB.Close()
+	if err := managerDB.SetMeta(paneKey, "pane"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := writerDB.AddTaskWithStatus("first", "", "", "", nil, "active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := writerDB.AddTaskWithStatus("second", "", "", "", nil, "active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writerDB.BlockTask(first.ID, "needs a decision"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writerDB.BlockTask(second.ID, "needs a decision"); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeMux{notified: make(chan struct{}, 2)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- New(managerDB, f).Run(ctx) }()
+	for range 2 {
+		select {
+		case <-f.notified:
+		case <-time.After(2 * time.Second):
+			t.Fatal("manager did not wake for both cross-DB transitions")
+		}
+	}
+	cancel()
+	if err := <-done; err != context.Canceled {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestNotifyDeduplicatesAcrossManagerRestart(t *testing.T) {
 	d, err := db.Open(t.TempDir() + "/dispatch.db")
 	if err != nil {
