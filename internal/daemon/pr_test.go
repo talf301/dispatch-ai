@@ -115,7 +115,8 @@ func TestCreatePR_AlreadyExistsIsSuccess(t *testing.T) {
 	}
 
 	binDir := t.TempDir()
-	script := "#!/bin/sh\necho 'a pull request for branch \"dispatch/abcd\" into branch \"main\" already exists:' >&2\nexit 1\n"
+	argsFile := filepath.Join(t.TempDir(), "gh-args")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\necho 'a pull request for branch \"dispatch/abcd\" into branch \"main\" already exists:' >&2\nexit 1\n"
 	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -137,6 +138,13 @@ func TestCreatePR_AlreadyExistsIsSuccess(t *testing.T) {
 	}
 	if _, ok, err := d.GetMeta("pr.handled." + task.ID); err != nil || !ok {
 		t.Fatalf("existing PR was not recorded as handled: ok=%v err=%v", ok, err)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(string(args), "--base\nmain\n") {
+		t.Errorf("gh args = %q, want --base main", args)
 	}
 }
 

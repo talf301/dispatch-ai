@@ -46,7 +46,8 @@ func (d *Daemon) createPR(repoPath, headBranch string, task db.Task) error {
 	// Create the PR via gh CLI.
 	ghCmd := exec.Command("gh", "pr", "create",
 		"--head", headBranch,
-		"--base", baseBranch,
+		// GitHub wants the branch name, not the local remote-tracking ref.
+		"--base", strings.TrimPrefix(baseBranch, "origin/"),
 		"--title", task.Title,
 		"--body", body,
 	)
