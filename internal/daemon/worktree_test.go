@@ -400,6 +400,28 @@ func TestFetchAndFastForwardPlanBranch(t *testing.T) {
 	}
 }
 
+func TestFetchOriginBranchSkipsLocalOnlyBranch(t *testing.T) {
+	repo := initTestRepo(t)
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	cmd := exec.Command("git", "clone", "--bare", repo, remote)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clone bare: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "remote", "add", "origin", remote)
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("add origin: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "branch", "local-only")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create local branch: %v\n%s", err, out)
+	}
+	if err := FetchOriginBranch(repo, "local-only"); err != nil {
+		t.Fatalf("fetch local-only branch: %v", err)
+	}
+}
+
 func TestRemoveWorktree_KeepBranch(t *testing.T) {
 	repo := initTestRepo(t)
 	wtDir := filepath.Join(t.TempDir(), "wt-keep")

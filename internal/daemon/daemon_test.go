@@ -132,6 +132,51 @@ func TestBaseBranchForUsesOriginRefWhenItIsAhead(t *testing.T) {
 	}
 }
 
+func TestBaseBranchForRespectsExplicitLocalBase(t *testing.T) {
+	repo := initTestRepo(t)
+	base, err := DetectDefaultBranch(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "branch", "wip", base)
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create wip: %v\n%s", err, out)
+	}
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	cmd = exec.Command("git", "clone", "--bare", repo, remote)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clone bare: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "remote", "add", "origin", remote)
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("add origin: %v\n%s", err, out)
+	}
+	if err := FetchOriginBranch(repo, "wip"); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("git", "checkout", "wip")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("checkout wip: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "commit", "--allow-empty", "-m", "local wip advance")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("advance wip: %v\n%s", err, out)
+	}
+
+	d := &Daemon{baseBranch: "wip", repos: testRepos(repo)}
+	ref, err := d.baseBranchFor(&db.Task{ID: "standalone", Repo: &repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref != "wip" {
+		t.Fatalf("base ref = %q, want explicit local branch wip", ref)
+	}
+}
+
 func TestAdoptedHandle_CleanExitIsNotAFailure(t *testing.T) {
 	exitedPID := func(t *testing.T) int {
 		t.Helper()

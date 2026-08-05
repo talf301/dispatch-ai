@@ -269,8 +269,9 @@ func (d *Daemon) taskRepoPath(task *db.Task) (string, error) {
 }
 
 // baseBranchFor returns the ref a task's worktree branch is based on:
-// its plan branch for a child task, otherwise the configured or default branch
-// (preferring the fetched origin ref when one exists).
+// its plan branch for a child task, otherwise the configured or default branch.
+// Auto-detected defaults use the fetched origin ref; an explicit base branch is
+// respected as a local branch, even if origin has an older branch of that name.
 func (d *Daemon) baseBranchFor(task *db.Task) (string, error) {
 	if task.ParentID != nil {
 		return fmt.Sprintf("dispatch/plan-%s", *task.ParentID), nil
@@ -279,14 +280,14 @@ func (d *Daemon) baseBranchFor(task *db.Task) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	baseBranch := d.baseBranch
-	if baseBranch == "" {
+	baseBranch, explicit := d.baseBranch, d.baseBranch != ""
+	if !explicit {
 		baseBranch, err = DetectDefaultBranch(repoPath)
 		if err != nil {
 			return "", err
 		}
 	}
-	if BranchExists(repoPath, "origin/"+baseBranch) {
+	if !explicit && BranchExists(repoPath, "origin/"+baseBranch) {
 		return "origin/" + baseBranch, nil
 	}
 	return baseBranch, nil
@@ -324,8 +325,8 @@ func (d *Daemon) spawnReady() {
 			continue
 		}
 
-		baseBranch := d.baseBranch
-		if baseBranch == "" {
+		baseBranch, explicitBase := d.baseBranch, d.baseBranch != ""
+		if !explicitBase {
 			baseBranch, err = DetectDefaultBranch(repoPath)
 			if err != nil {
 				d.logger.Printf("spawn: detect base for %s: %v, skipping", task.ID, err)
@@ -340,7 +341,7 @@ func (d *Daemon) spawnReady() {
 			fetchedRepo[repoPath] = baseBranch
 		}
 		baseRef := baseBranch
-		if BranchExists(repoPath, "origin/"+baseBranch) {
+		if !explicitBase && BranchExists(repoPath, "origin/"+baseBranch) {
 			baseRef = "origin/" + baseBranch
 		}
 

@@ -22,6 +22,17 @@ func FetchOriginBranch(repoDir, branchName string) error {
 	if err := remote.Run(); err != nil {
 		return nil
 	}
+	// A configured local-only base is valid. Do not turn its absent remote
+	// counterpart into a permanent spawn/PR failure.
+	ref := "refs/heads/" + branchName
+	check := exec.Command("git", "ls-remote", "--exit-code", "--heads", "origin", ref)
+	check.Dir = repoDir
+	if out, err := check.CombinedOutput(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 2 {
+			return nil
+		}
+		return fmt.Errorf("check origin %s: %w\n%s", branchName, err, out)
+	}
 	cmd := exec.Command("git", "fetch", "origin", branchName)
 	cmd.Dir = repoDir
 	if out, err := cmd.CombinedOutput(); err != nil {
