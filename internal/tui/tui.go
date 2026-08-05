@@ -56,7 +56,7 @@ var laneLabels = map[lane]string{
 	laneStale:      "Stale · resume or kill",
 	laneNeedsYou:   "Needs you",
 	laneLive:       "Live now",
-	laneUnattended: "Unattended",
+	laneUnattended: "Automation",
 	laneParked:     "Parked",
 	laneClosed:     "Closed this week",
 }
@@ -65,6 +65,7 @@ type row struct {
 	task  db.Task
 	agent string // herdr agent state for the task's pane, "" if none
 	badge string // lane-specific badge override (e.g. "idle 6d")
+	notes []string
 }
 
 type Model struct {
@@ -94,8 +95,9 @@ type Model struct {
 
 	// Commit-time cache for staleness: workdir → HEAD commit time.
 	// Refreshed every commitCacheTTL, not every 2s tick.
-	commits   map[string]time.Time
-	commitsAt time.Time
+	commits    map[string]time.Time
+	commitsAt  time.Time
+	daemonSeen time.Time
 }
 
 const commitCacheTTL = time.Minute
@@ -126,10 +128,11 @@ func New(store *db.DB, m mux.Mux, dtBin string, repos []string, currentRepo stri
 
 type tickMsg time.Time
 type boardMsg struct {
-	rows      map[lane][]row
-	commits   map[string]time.Time
-	commitsAt time.Time
-	err       error
+	rows       map[lane][]row
+	commits    map[string]time.Time
+	commitsAt  time.Time
+	err        error
+	daemonSeen time.Time
 }
 type dtDoneMsg struct {
 	verb string
@@ -189,6 +192,10 @@ func (m Model) refresh() tea.Cmd {
 
 		threshold := staleAfter()
 		rows := make(map[lane][]row)
+		daemonSeen := time.Time{}
+		if value, ok, err := m.store.GetMeta("daemon_heartbeat"); err == nil && ok {
+			daemonSeen, _ = time.Parse(time.RFC3339Nano, value)
+		}
 		for _, t := range tasks {
 			agent := ""
 			if t.HerdrPane != nil {
@@ -199,6 +206,13 @@ func (m Model) refresh() tea.Cmd {
 				commit = commits[*t.Workdir]
 			}
 			r := row{task: t, agent: agent}
+			if t.Status == "unattended" {
+				if notes, err := m.store.GetNotes(t.ID); err == nil {
+					for i := max(0, len(notes)-2); i < len(notes); i++ {
+						r.notes = append(r.notes, notes[i].Content)
+					}
+				}
+			}
 			l := classify(t, agent)
 			if l == laneLive && isStale(t, agent, commit, now, threshold) {
 				l = laneStale
@@ -206,7 +220,7 @@ func (m Model) refresh() tea.Cmd {
 			}
 			rows[l] = append(rows[l], r)
 		}
-		return boardMsg{rows: rows, commits: commits, commitsAt: commitsAt}
+		return boardMsg{rows: rows, commits: commits, commitsAt: commitsAt, daemonSeen: daemonSeen}
 	}
 }
 
@@ -266,6 +280,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.rows = msg.rows
 		m.commits, m.commitsAt = msg.commits, msg.commitsAt
+		m.daemonSeen = msg.daemonSeen
 		m.flat = m.selectable()
 		if m.cursor >= len(m.flat) {
 			m.cursor = max(0, len(m.flat)-1)
@@ -679,7 +694,7 @@ func (m Model) View() string {
 		leftWidth = width - rightWidth - 1
 	}
 	left := m.renderBoard([]lane{laneStale, laneNeedsYou, laneLive}, &idx, leftWidth, "Your work")
-	auto := m.renderBoard([]lane{laneUnattended}, &idx, rightWidth, "Automation")
+	auto := m.renderBoard([]lane{laneUnattended}, &idx, rightWidth, "Automation  "+m.daemonStatus())
 	board := left
 	if width >= 96 {
 		board = lipgloss.JoinHorizontal(lipgloss.Top, left, " ", auto)
@@ -899,6 +914,9 @@ func (m Model) writeRow(b *strings.Builder, r row, focused bool, width int) {
 		if t.KillReason != nil {
 			meta = append(meta, "killed: "+*t.KillReason)
 		}
+		for _, note := range r.notes {
+			meta = append(meta, truncate(strings.Join(strings.Fields(note), " "), 120))
+		}
 		if len(meta) > 0 {
 			b.WriteString(dimStyle.Render("  "+truncate(strings.Join(meta, " · "), max(12, width-2))) + "\n")
 		}
@@ -939,6 +957,20 @@ func (m Model) taskBadge(r row) string {
 		return dimStyle.Render("waiting")
 	}
 	return dimStyle.Render(badge)
+}
+
+func (m Model) daemonStatus() string {
+	if m.daemonSeen.IsZero() {
+		return alertStyle.Render("daemon not running")
+	}
+	age := time.Since(m.daemonSeen)
+	if age < 0 {
+		age = 0
+	}
+	if age > 15*time.Second {
+		return alertStyle.Render("daemon not running")
+	}
+	return dimStyle.Render(fmt.Sprintf("daemon: last seen %s ago", age.Round(time.Second)))
 }
 
 func shortPath(p string) string {
