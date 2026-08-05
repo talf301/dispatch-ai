@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
@@ -11,23 +12,41 @@ import (
 // createPR pushes headBranch and creates a GitHub PR for a completed task -
 // a plan branch (dispatch/plan-<id>) for a finished multi-child plan, or a
 // task's own branch (dispatch/<id>) for a standalone task acting as a plan
-// of one. Treating "a PR already exists for this head" as success (not an
+// of one. allowZeroDiffSuccess is only true for plan branches: a standalone
+// branch with no diff must still surface the gh error before its worktree is
+// deleted. Treating "a PR already exists for this head" as success (not an
 // error) makes this safe to call more than once for the same task, which
 // matters for both the retry queries below and daemon-restart recovery.
-func (d *Daemon) createPR(repoPath, headBranch string, task db.Task) error {
+func (d *Daemon) createPR(repoPath, headBranch string, task db.Task, allowZeroDiffSuccess bool) error {
 	baseBranch, err := d.baseBranchFor(&task)
 	if err != nil {
 		return fmt.Errorf("resolve PR base: %w", err)
 	}
-	// baseBranchFor may already return an "origin/"-prefixed ref; strip it
-	// before fetching, since FetchOriginBranch takes a plain branch name and
-	// builds refs/heads/<name> itself - passing the prefixed form would look
-	// for a (nonexistent) remote branch literally named "origin/<name>" and
-	// silently no-op instead of refreshing the real ref.
-	if err := FetchOriginBranch(repoPath, strings.TrimPrefix(baseBranch, "origin/")); err != nil {
+
+	baseName := strings.TrimPrefix(baseBranch, "origin/")
+	if err := FetchOriginBranch(repoPath, baseName); err != nil {
 		return fmt.Errorf("refresh default branch: %w", err)
 	}
-
+	// Compare against the remote base, which is what GitHub uses for the PR
+	// diff. Only trust a successful git result; errors must continue to the
+	// normal path.
+	remoteBase := "origin/" + baseName
+	if count, err := branchCommitCount(repoPath, remoteBase, headBranch); err == nil {
+		if count == 0 && allowZeroDiffSuccess {
+			note := fmt.Sprintf("PR skipped: %s has no commits relative to %s; changes were already merged elsewhere.", headBranch, remoteBase)
+			author := "daemon"
+			if _, err := d.db.AddNote(task.ID, note, &author); err != nil {
+				return fmt.Errorf("record zero-diff PR note: %w", err)
+			}
+			if err := d.db.MarkPRHandled(task.ID); err != nil {
+				return fmt.Errorf("record zero-diff PR: %w", err)
+			}
+			d.logger.Printf("PR for %s (%s) skipped: no commits between %s and %s; already merged elsewhere", task.ID, headBranch, remoteBase, headBranch)
+			return nil
+		}
+	} else {
+		d.logger.Printf("could not count commits between %s and %s: %v; attempting normal PR creation", remoteBase, headBranch, err)
+	}
 	// Push headBranch to origin.
 	pushCmd := exec.Command("git", "push", "origin", headBranch)
 	pushCmd.Dir = repoPath
@@ -68,6 +87,20 @@ func (d *Daemon) createPR(repoPath, headBranch string, task db.Task) error {
 
 	d.logger.Printf("created PR for %s (%s)", task.ID, task.Title)
 	return nil
+}
+
+func branchCommitCount(repoPath, baseBranch, headBranch string) (int, error) {
+	cmd := exec.Command("git", "rev-list", "--count", baseBranch+".."+headBranch)
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("count commits between %s and %s: %w", baseBranch, headBranch, err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("parse commit count: %w", err)
+	}
+	return n, nil
 }
 
 // formatPRBody assembles the PR body from parent task notes.
@@ -113,7 +146,7 @@ func (d *Daemon) triggerPR(ac *db.AutoComplete) {
 	}
 
 	planBranch := fmt.Sprintf("dispatch/plan-%s", ac.ParentID)
-	if err := d.createPR(repoPath, planBranch, *parent); err != nil {
+	if err := d.createPR(repoPath, planBranch, *parent, true); err != nil {
 		reason := fmt.Sprintf("pr: %v", err)
 		if len(reason) > 4000 {
 			reason = reason[:4000]
@@ -146,7 +179,7 @@ func (d *Daemon) checkPendingPRs() {
 		}
 
 		planBranch := fmt.Sprintf("dispatch/plan-%s", parent.ID)
-		if err := d.createPR(repoPath, planBranch, parent); err != nil {
+		if err := d.createPR(repoPath, planBranch, parent, true); err != nil {
 			reason := fmt.Sprintf("pr: %v", err)
 			if len(reason) > 4000 {
 				reason = reason[:4000]

@@ -915,7 +915,7 @@ func (d *Daemon) handleReviewApproval(taskID string) {
 			}
 			return
 		}
-		if err := d.createPR(repoPath, branchName, *task); err != nil {
+		if err := d.createPR(repoPath, branchName, *task, false); err != nil {
 			reason := fmt.Sprintf("pr: %v", err)
 			if len(reason) > 4000 {
 				reason = reason[:4000]

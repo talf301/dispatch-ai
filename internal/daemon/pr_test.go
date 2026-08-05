@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,171 @@ import (
 	"github.com/dispatch-ai/dispatch/internal/config"
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
+
+func TestCreatePR_ZeroDiffSkipsGH(t *testing.T) {
+	repoDir := initPRTestRepo(t)
+	marker := filepath.Join(t.TempDir(), "gh-called")
+	ghDir := t.TempDir()
+	writeFakeGH(t, ghDir, marker, 0)
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", ghDir+string(os.PathListSeparator)+oldPath)
+	t.Cleanup(func() { os.Setenv("PATH", oldPath) })
+
+	d := openTestDB(t)
+	repo := repoDir
+	parent, err := d.AddTask("already merged", "", "", "", &repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headBranch := "dispatch/plan-" + parent.ID
+	createPRTestBranch(t, repoDir, headBranch, true)
+	daemon := New(d, Config{BaseBranch: "main"}, &MockSpawner{})
+
+	if err := daemon.createPR(repoDir, headBranch, *parent, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("gh was invoked for zero-diff branch: %v", err)
+	}
+	notes, err := d.GetNotes(parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != 1 || !contains(notes[0].Content, "no commits relative to origin/main") {
+		t.Fatalf("unexpected zero-diff note: %+v", notes)
+	}
+	pending, err := d.PendingPRParents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("zero-diff task remained pending PR: %+v", pending)
+	}
+}
+
+func TestCreatePR_GitCountErrorFallsThroughToGH(t *testing.T) {
+	repoDir := initPRTestRepo(t)
+	marker := filepath.Join(t.TempDir(), "gh-called")
+	ghDir := t.TempDir()
+	writeFakeGH(t, ghDir, marker, 1)
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", ghDir+string(os.PathListSeparator)+oldPath)
+	t.Cleanup(func() { os.Setenv("PATH", oldPath) })
+
+	d := openTestDB(t)
+	repo := repoDir
+	parent, err := d.AddTask("count error", "", "", "", &repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headBranch := "dispatch/plan-" + parent.ID
+	createPRTestBranch(t, repoDir, headBranch, false)
+	daemon := New(d, Config{BaseBranch: "missing-base"}, &MockSpawner{})
+
+	if err := daemon.createPR(repoDir, headBranch, *parent, true); err == nil || !contains(err.Error(), "gh pr create") {
+		t.Fatalf("createPR error = %v, want gh failure", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("gh was not invoked after git count error: %v", err)
+	}
+}
+
+func TestCreatePR_StandaloneZeroDiffFallsThroughToGH(t *testing.T) {
+	repoDir := initPRTestRepo(t)
+	marker := filepath.Join(t.TempDir(), "gh-called")
+	ghDir := t.TempDir()
+	writeFakeGH(t, ghDir, marker, 1)
+	t.Setenv("PATH", ghDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	d := openTestDB(t)
+	repo := repoDir
+	task, err := d.AddTask("standalone already merged", "", "", "", &repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headBranch := "dispatch/" + task.ID
+	createPRTestBranch(t, repoDir, headBranch, true)
+	daemon := New(d, Config{BaseBranch: "main"}, &MockSpawner{})
+
+	if err := daemon.createPR(repoDir, headBranch, *task, false); err == nil || !contains(err.Error(), "gh pr create") {
+		t.Fatalf("createPR error = %v, want gh failure", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("gh was not invoked for standalone zero-diff branch: %v", err)
+	}
+	if _, ok, err := d.GetMeta("pr.handled." + task.ID); err != nil || ok {
+		t.Fatalf("standalone zero-diff task was marked handled: ok=%v err=%v", ok, err)
+	}
+}
+
+func initPRTestRepo(t *testing.T) string {
+	t.Helper()
+	repoDir := initTestRepo(t)
+	for _, args := range [][]string{{"git", "branch", "-M", "main"}} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v failed: %v\n%s", args, err, out)
+		}
+	}
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	cmd := exec.Command("git", "init", "--bare", remote)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("init bare repo: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "remote", "add", "origin", remote)
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("add origin: %v\n%s", err, out)
+	}
+	return repoDir
+}
+
+func createPRTestBranch(t *testing.T, repoDir, headBranch string, mergedToRemote bool) {
+	t.Helper()
+	cmd := exec.Command("git", "checkout", "-b", headBranch)
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create plan branch: %v\n%s", err, out)
+	}
+	if !mergedToRemote {
+		return
+	}
+	cmd = exec.Command("git", "commit", "--allow-empty", "-m", "plan work")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("commit plan work: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "update-ref", "refs/heads/main", "HEAD")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("advance main: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "push", "origin", "main")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("push merged main: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "update-ref", "refs/heads/main", "HEAD~1")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("restore stale local main: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "update-ref", "refs/remotes/origin/main", "HEAD~1")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("stale remote main: %v\n%s", err, out)
+	}
+}
+
+func writeFakeGH(t *testing.T, dir, marker string, exitCode int) {
+	t.Helper()
+	path := filepath.Join(dir, "gh")
+	script := fmt.Sprintf("#!/bin/sh\nprintf invoked > %q\nexit %d\n", marker, exitCode)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestFormatPRBody_WithNotes(t *testing.T) {
 	worker := "worker"
@@ -133,7 +299,7 @@ func TestCreatePR_AlreadyExistsIsSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := daemon.createPR(repoDir, "dispatch/abcd", *task); err != nil {
+	if err := daemon.createPR(repoDir, "dispatch/abcd", *task, false); err != nil {
 		t.Errorf("createPR returned an error for an already-existing PR, want nil: %v", err)
 	}
 	if _, ok, err := d.GetMeta("pr.handled." + task.ID); err != nil || !ok {
