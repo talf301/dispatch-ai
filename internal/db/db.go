@@ -198,6 +198,17 @@ func (d *DB) migrate() error {
 			wait_only_count INTEGER,
 			raw_usage TEXT
 		)`,
+		`CREATE TABLE IF NOT EXISTS secondmate_investigations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id TEXT NOT NULL REFERENCES tasks(id),
+			block_reason TEXT NOT NULL,
+			classification TEXT NOT NULL,
+			action TEXT NOT NULL,
+			outcome TEXT NOT NULL,
+			retry_key TEXT NOT NULL,
+			retry_count INTEGER NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
 		updatedAtTrigger,
 	}
 	for _, s := range stmts {

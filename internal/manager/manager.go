@@ -197,6 +197,22 @@ func (m *Manager) Notify(taskID string) error {
 	return m.db.SetMeta(key, cursor)
 }
 
+// NotifyDecision presents investigator findings to the existing manager pane.
+// It does not alter task state or create a second lifecycle path.
+func (m *Manager) NotifyDecision(taskID, message string) error {
+	if _, err := m.db.GetTask(taskID); err != nil {
+		return err
+	}
+	pane, _, err := m.db.GetMeta(paneKey)
+	if err != nil {
+		return err
+	}
+	if pane == "" {
+		return fmt.Errorf("manager pane is not started")
+	}
+	return m.mux.PromptAgent(pane, message+"\nAsk the human for a decision; do not reopen or modify the task yourself.")
+}
+
 func (m *Manager) summary(task *db.Task) (string, error) {
 	children, err := m.db.GetChildren(task.ID)
 	if err != nil {
