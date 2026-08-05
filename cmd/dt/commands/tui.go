@@ -3,6 +3,7 @@ package commands
 import (
 	"os"
 
+	"github.com/dispatch-ai/dispatch/internal/config"
 	"github.com/dispatch-ai/dispatch/internal/mux"
 	"github.com/dispatch-ai/dispatch/internal/tui"
 	"github.com/spf13/cobra"
@@ -22,7 +23,15 @@ func NewTuiCmd() *cobra.Command {
 			if err != nil {
 				dtBin = "dt"
 			}
-			if err := tui.Run(d, mux.Herdr{}, dtBin); err != nil {
+			var repos []string
+			if cfg, err := config.LoadConfig(config.DefaultConfigPath()); err == nil {
+				for _, repo := range cfg.Repos {
+					repos = append(repos, repo.Path)
+				}
+			}
+			cwd, _ := os.Getwd()
+			currentRepo, _ := gitToplevel(cwd)
+			if err := tui.Run(d, mux.Herdr{}, dtBin, repos, currentRepo); err != nil {
 				exitError(cmd, err)
 			}
 		},

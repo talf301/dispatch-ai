@@ -35,6 +35,12 @@ func printTask(t *db.Task) {
 	if t.ParentID != nil {
 		fmt.Fprintf(w, "Parent\t%s\n", *t.ParentID)
 	}
+	if t.Repo != nil {
+		fmt.Fprintf(w, "Repo\t%s\n", *t.Repo)
+	}
+	if t.BaseBranch != nil {
+		fmt.Fprintf(w, "Base Branch\t%s\n", *t.BaseBranch)
+	}
 	if t.Assignee != nil {
 		fmt.Fprintf(w, "Assignee\t%s\n", *t.Assignee)
 	}

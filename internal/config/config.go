@@ -11,8 +11,9 @@ import (
 
 // RepoConfig holds the configuration for a single repository.
 type RepoConfig struct {
-	Path       string `toml:"path"`
-	MaxWorkers int    `toml:"max_workers"`
+	Path        string `toml:"path"`
+	MaxWorkers  int    `toml:"max_workers"`
+	TestCommand string `toml:"test_command"`
 }
 
 // Config is the top-level dispatch configuration.
@@ -104,6 +105,9 @@ func SaveRepoEntry(path string, repo RepoConfig) error {
 	}
 
 	entry := fmt.Sprintf("%s[[repo]]\npath = %q\nmax_workers = %d\n", prefix, repo.Path, repo.MaxWorkers)
+	if repo.TestCommand != "" {
+		entry += fmt.Sprintf("test_command = %q\n", repo.TestCommand)
+	}
 	if _, err := f.WriteString(entry); err != nil {
 		return fmt.Errorf("writing config entry: %w", err)
 	}
