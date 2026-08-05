@@ -16,6 +16,7 @@ func NewDepCmd() *cobra.Command {
 
 			// CLI order: dep <dependent> <blocker>
 			// DB order: AddDep(blocker, blocked)
+			warnIfBlockerIsBlocked(d, args[1])
 			if err := d.AddDep(args[1], args[0]); err != nil {
 				exitError(cmd, err)
 			}

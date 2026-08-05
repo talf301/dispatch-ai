@@ -1,8 +1,24 @@
 package commands
 
 import (
+	"fmt"
+	"os"
+
+	"github.com/dispatch-ai/dispatch/internal/db"
 	"github.com/spf13/cobra"
 )
+
+func warnIfBlockerIsBlocked(database *db.DB, blockerID string) {
+	task, err := database.GetTask(blockerID)
+	if err != nil || task.Status != "blocked" {
+		return
+	}
+	reason := "unspecified"
+	if task.BlockReason != nil && *task.BlockReason != "" {
+		reason = *task.BlockReason
+	}
+	fmt.Fprintf(os.Stderr, "warning: task %s is currently blocked (reason: %s). This new task will not be schedulable until %s reaches done. If this task is meant to unblock %s, do not use --after; file it without the dependency.\n", blockerID, reason, blockerID, blockerID)
+}
 
 // NewAddCmd returns the cobra command for adding a task.
 func NewAddCmd() *cobra.Command {
@@ -18,6 +34,9 @@ func NewAddCmd() *cobra.Command {
 			desc, _ := cmd.Flags().GetString("desc")
 			parent, _ := cmd.Flags().GetString("parent")
 			after, _ := cmd.Flags().GetString("after")
+			if after != "" {
+				warnIfBlockerIsBlocked(d, after)
+			}
 
 			var repo *string
 			if cmd.Flags().Changed("repo") {
