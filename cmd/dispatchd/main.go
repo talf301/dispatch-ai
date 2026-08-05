@@ -54,6 +54,29 @@ func envIntOrDefault(key string, def int) int {
 	return def
 }
 
+func loadRepos(configPath, repoPath string) (map[string]config.RepoConfig, error) {
+	repos := make(map[string]config.RepoConfig)
+	if cfg, err := config.LoadConfig(configPath); err == nil {
+		for _, repo := range cfg.Repos {
+			if _, err := os.Stat(filepath.Join(repo.Path, ".git")); err == nil {
+				repos[repo.Path] = repo
+			}
+		}
+	}
+	if len(repos) > 0 {
+		return repos, nil
+	}
+	if repoPath == "" {
+		return nil, fmt.Errorf("no repos configured: create %s or pass --repo", configPath)
+	}
+	absRepo, err := filepath.Abs(repoPath)
+	if err != nil {
+		absRepo = repoPath
+	}
+	repos[absRepo] = config.RepoConfig{Path: absRepo, MaxWorkers: config.DefaultMaxWorkers}
+	return repos, nil
+}
+
 const (
 	defaultCodexWorkerModel           = "gpt-5.6-luna"
 	defaultCodexWorkerEscalationModel = "gpt-5.6-terra"
@@ -107,25 +130,10 @@ var rootCmd = &cobra.Command{
 
 		home, _ := os.UserHomeDir()
 
-		// Build repos map: load config.toml if present, fall back to --repo.
-		repos := make(map[string]config.RepoConfig)
 		configPath := config.DefaultConfigPath()
-		if cfg, err := config.LoadConfig(configPath); err == nil && len(cfg.Repos) > 0 {
-			for _, r := range cfg.Repos {
-				repos[r.Path] = r
-			}
-		} else if repoPath != "" {
-			// Single-repo mode via --repo flag.
-			absRepo, err := filepath.Abs(repoPath)
-			if err != nil {
-				absRepo = repoPath
-			}
-			repos[absRepo] = config.RepoConfig{
-				Path:       absRepo,
-				MaxWorkers: config.DefaultMaxWorkers,
-			}
-		} else {
-			return fmt.Errorf("no repos configured: create %s or pass --repo", configPath)
+		repos, err := loadRepos(configPath, repoPath)
+		if err != nil {
+			return err
 		}
 
 		cfg := daemon.Config{
