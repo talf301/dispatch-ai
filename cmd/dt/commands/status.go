@@ -1,6 +1,8 @@
 package commands
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
 )
 
@@ -65,6 +67,17 @@ func NewReopenCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			d := openDB(cmd)
 			defer d.Close()
+
+			kind, err := d.BlockKind(args[0])
+			if err != nil {
+				exitError(cmd, err)
+			}
+			switch kind {
+			case "merge-conflict":
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning: this block was not caused by the task's own work - reopening will re-run an already-approved worker/review cycle and very likely hit the same merge failure; the fix is a NEW task that merges the conflicting sibling's tip and resolves the conflict, not reopening this one.")
+			case "pr-create-failed":
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning: check whether this branch's work already landed via another PR (zero diff against base) or whether the base/plan branch itself has gone stale before reopening.")
+			}
 
 			task, err := d.ReopenTask(args[0])
 			if err != nil {
