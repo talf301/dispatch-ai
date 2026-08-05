@@ -8,30 +8,35 @@ import (
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
 
-// createPR pushes the plan branch and creates a GitHub PR for a completed parent task.
-func (d *Daemon) createPR(repoPath string, parentTask db.Task) error {
-	planBranch := fmt.Sprintf("dispatch/plan-%s", parentTask.ID)
-	baseBranch := d.baseBranch
-	if baseBranch == "" {
-		var err error
-		baseBranch, err = DetectDefaultBranch(repoPath)
-		if err != nil {
-			return fmt.Errorf("detect default branch: %w", err)
-		}
+// createPR pushes headBranch and creates a GitHub PR for a completed task -
+// a plan branch (dispatch/plan-<id>) for a finished multi-child plan, or a
+// task's own branch (dispatch/<id>) for a standalone task acting as a plan
+// of one. Treating "a PR already exists for this head" as success (not an
+// error) makes this safe to call more than once for the same task, which
+// matters for both the retry queries below and daemon-restart recovery.
+func (d *Daemon) createPR(repoPath, headBranch string, task db.Task) error {
+	baseBranch, err := d.baseBranchFor(&task)
+	if err != nil {
+		return fmt.Errorf("resolve PR base: %w", err)
 	}
-	if err := FetchOriginBranch(repoPath, baseBranch); err != nil {
+	// baseBranchFor may already return an "origin/"-prefixed ref; strip it
+	// before fetching, since FetchOriginBranch takes a plain branch name and
+	// builds refs/heads/<name> itself - passing the prefixed form would look
+	// for a (nonexistent) remote branch literally named "origin/<name>" and
+	// silently no-op instead of refreshing the real ref.
+	if err := FetchOriginBranch(repoPath, strings.TrimPrefix(baseBranch, "origin/")); err != nil {
 		return fmt.Errorf("refresh default branch: %w", err)
 	}
 
-	// Push the plan branch to origin.
-	pushCmd := exec.Command("git", "push", "origin", planBranch)
+	// Push headBranch to origin.
+	pushCmd := exec.Command("git", "push", "origin", headBranch)
 	pushCmd.Dir = repoPath
 	if out, err := pushCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git push: %w\n%s", err, out)
 	}
 
-	// Fetch notes on the parent task for the PR body.
-	notes, err := d.db.GetNotes(parentTask.ID)
+	// Fetch notes on the task for the PR body.
+	notes, err := d.db.GetNotes(task.ID)
 	if err != nil {
 		return fmt.Errorf("get notes: %w", err)
 	}
@@ -40,17 +45,27 @@ func (d *Daemon) createPR(repoPath string, parentTask db.Task) error {
 
 	// Create the PR via gh CLI.
 	ghCmd := exec.Command("gh", "pr", "create",
-		"--head", planBranch,
+		"--head", headBranch,
 		"--base", baseBranch,
-		"--title", parentTask.Title,
+		"--title", task.Title,
 		"--body", body,
 	)
 	ghCmd.Dir = repoPath
 	if out, err := ghCmd.CombinedOutput(); err != nil {
+		if strings.Contains(strings.ToLower(string(out)), "already exists") {
+			if err := d.db.MarkPRHandled(task.ID); err != nil {
+				return fmt.Errorf("record existing PR: %w", err)
+			}
+			d.logger.Printf("PR for %s (%s) already exists, treating as success", task.ID, headBranch)
+			return nil
+		}
 		return fmt.Errorf("gh pr create: %w\n%s", err, out)
 	}
+	if err := d.db.MarkPRHandled(task.ID); err != nil {
+		return fmt.Errorf("record created PR: %w", err)
+	}
 
-	d.logger.Printf("created PR for plan %s (%s)", parentTask.ID, parentTask.Title)
+	d.logger.Printf("created PR for %s (%s)", task.ID, task.Title)
 	return nil
 }
 
@@ -96,13 +111,14 @@ func (d *Daemon) triggerPR(ac *db.AutoComplete) {
 		return
 	}
 
-	if err := d.createPR(repoPath, *parent); err != nil {
+	planBranch := fmt.Sprintf("dispatch/plan-%s", ac.ParentID)
+	if err := d.createPR(repoPath, planBranch, *parent); err != nil {
 		reason := fmt.Sprintf("pr: %v", err)
 		if len(reason) > 4000 {
 			reason = reason[:4000]
 		}
 		d.logger.Printf("trigger-pr: PR creation failed for %s: %v", ac.ParentID, err)
-		if _, err := d.db.BlockTask(ac.ParentID, reason); err != nil {
+		if _, err := d.db.BlockTaskWithKind(ac.ParentID, reason, db.BlockKindPRCreateFailed); err != nil {
 			d.logger.Printf("trigger-pr: block parent %s: %v", ac.ParentID, err)
 		}
 	}
@@ -128,13 +144,14 @@ func (d *Daemon) checkPendingPRs() {
 			continue
 		}
 
-		if err := d.createPR(repoPath, parent); err != nil {
+		planBranch := fmt.Sprintf("dispatch/plan-%s", parent.ID)
+		if err := d.createPR(repoPath, planBranch, parent); err != nil {
 			reason := fmt.Sprintf("pr: %v", err)
 			if len(reason) > 4000 {
 				reason = reason[:4000]
 			}
 			d.logger.Printf("pending-prs: PR creation failed for %s: %v", parent.ID, err)
-			if _, err := d.db.BlockTask(parent.ID, reason); err != nil {
+			if _, err := d.db.BlockTaskWithKind(parent.ID, reason, db.BlockKindPRCreateFailed); err != nil {
 				d.logger.Printf("pending-prs: block parent %s: %v", parent.ID, err)
 			}
 		}

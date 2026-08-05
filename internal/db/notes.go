@@ -2,7 +2,16 @@ package db
 
 import (
 	"fmt"
+	"sync"
 )
+
+// Event is a durable-ledger transition signal. It is a wakeup hint, not a
+// second source of truth; consumers must read the task from the ledger.
+type Event struct {
+	TaskID    string
+	OldStatus string
+	NewStatus string
+}
 
 // Note represents a row in the notes table.
 type Note struct {
@@ -41,6 +50,43 @@ func (d *DB) AddNote(taskID, content string, author *string) (*Note, error) {
 		return nil, fmt.Errorf("get note: %w", err)
 	}
 	return n, nil
+}
+
+var eventSubscribers struct {
+	sync.Mutex
+	byDB map[*DB]map[chan Event]struct{}
+}
+
+// Subscribe returns an event stream and a cancellation function. Delivery is
+// best effort: a slow conversational surface must never block task writes.
+func (d *DB) Subscribe() (<-chan Event, func()) {
+	eventSubscribers.Lock()
+	if eventSubscribers.byDB == nil {
+		eventSubscribers.byDB = make(map[*DB]map[chan Event]struct{})
+	}
+	if eventSubscribers.byDB[d] == nil {
+		eventSubscribers.byDB[d] = make(map[chan Event]struct{})
+	}
+	ch := make(chan Event, 16)
+	eventSubscribers.byDB[d][ch] = struct{}{}
+	eventSubscribers.Unlock()
+	return ch, func() {
+		eventSubscribers.Lock()
+		delete(eventSubscribers.byDB[d], ch)
+		close(ch)
+		eventSubscribers.Unlock()
+	}
+}
+
+func (d *DB) publish(event Event) {
+	eventSubscribers.Lock()
+	defer eventSubscribers.Unlock()
+	for ch := range eventSubscribers.byDB[d] {
+		select {
+		case ch <- event:
+		default:
+		}
+	}
 }
 
 // GetNotes returns all notes for a task, ordered by created_at ascending.

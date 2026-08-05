@@ -96,6 +96,16 @@ func TestMigrateLegacyToV2(t *testing.T) {
 		t.Fatalf("second open: %v", err)
 	}
 	defer d2.Close()
+	if _, err := d2.q.Exec("UPDATE tasks SET status = 'open' WHERE id = ?", captured.ID); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := d2.ResumeTask(captured.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.Status != "live" {
+		t.Errorf("released capture task status = %q, want live", repaired.Status)
+	}
 
 	// Lifecycle: park/resume/kill.
 	if _, err := d2.ParkTask(captured.ID); err != nil {
@@ -115,13 +125,19 @@ func TestMigrateLegacyToV2(t *testing.T) {
 		t.Errorf("kill wrong: %+v", killed)
 	}
 
-	// Board shows the killed task (closed this week) but not legacy rows
-	// without a thought.
+	// Board shows daemon-managed legacy work as well as v2 work.
+	if _, err := d2.ClaimTask("aa11", "dispatchd-aa11"); err != nil {
+		t.Fatal(err)
+	}
 	board, err := d2.BoardTasks()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(board) != 1 || board[0].ID != captured.ID {
+	ids := make(map[string]bool, len(board))
+	for _, task := range board {
+		ids[task.ID] = true
+	}
+	if len(board) != 2 || !ids[captured.ID] || !ids["aa11"] {
 		t.Errorf("board wrong: %+v", board)
 	}
 }

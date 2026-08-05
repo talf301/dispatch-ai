@@ -243,6 +243,9 @@ func executeLine(database *db.DB, line string) (string, error) {
 		if len(parts) != 2 {
 			return "", fmt.Errorf("reopen requires 1 argument: <id>")
 		}
+		if err := warnReopen(database, parts[1], os.Stderr); err != nil {
+			return "", err
+		}
 		_, err := database.ReopenTask(parts[1])
 		return "", err
 	case "note":
@@ -289,6 +292,7 @@ func batchAdd(database *db.DB, args []string) (string, error) {
 	desc := ""
 	parent := ""
 	after := ""
+	baseBranch := ""
 	var repo *string
 
 	// First non-flag argument is the title.
@@ -320,6 +324,12 @@ func batchAdd(database *db.DB, args []string) (string, error) {
 			}
 			after = args[i+1]
 			i += 2
+		case "--base-branch":
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("flag --base-branch requires a value")
+			}
+			baseBranch = args[i+1]
+			i += 2
 		default:
 			if title == "" {
 				title = args[i]
@@ -333,10 +343,22 @@ func batchAdd(database *db.DB, args []string) (string, error) {
 	if title == "" {
 		return "", fmt.Errorf("add requires a title")
 	}
+	if parent != "" && baseBranch != "" {
+		return "", fmt.Errorf("--base-branch cannot be used with -p; children start from the parent plan branch")
+	}
+
+	if w := warnIfOrphanFromLivePlan(database, repo, parent); w != "" {
+		fmt.Fprintln(os.Stderr, w)
+	}
 
 	task, err := database.AddTaskWithStatus(title, desc, parent, after, repo, "proposed")
 	if err != nil {
 		return "", err
+	}
+	if baseBranch != "" {
+		if _, err := database.SetBaseBranch(task.ID, baseBranch); err != nil {
+			return "", err
+		}
 	}
 	return task.ID, nil
 }
@@ -428,7 +450,7 @@ func quotesBalanced(s string) bool {
 	inDouble := false
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
-		case '\'' :
+		case '\'':
 			if !inDouble {
 				inSingle = !inSingle
 			}

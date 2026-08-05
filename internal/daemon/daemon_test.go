@@ -44,6 +44,15 @@ func TestDaemonConfig_Defaults(t *testing.T) {
 	}
 }
 
+func TestBaseBranchForTaskOverride(t *testing.T) {
+	base := "feature/source"
+	d := &Daemon{baseBranch: "main"}
+	got, err := d.baseBranchFor(&db.Task{BaseBranch: &base})
+	if err != nil || got != base {
+		t.Fatalf("baseBranchFor = (%q, %v), want (%q, nil)", got, err, base)
+	}
+}
+
 func TestTaskRepoPath(t *testing.T) {
 	repo := "/repo/one"
 	task := &db.Task{ID: "abcd"}
@@ -174,6 +183,21 @@ func TestBaseBranchForRespectsExplicitLocalBase(t *testing.T) {
 	}
 	if ref != "wip" {
 		t.Fatalf("base ref = %q, want explicit local branch wip", ref)
+	}
+}
+
+func TestTaskRepoPathMapsDispatchWorktree(t *testing.T) {
+	repo := initTestRepo(t)
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	cmd := exec.Command("git", "-C", repo, "worktree", "add", "-b", "dispatch/test", worktree)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create worktree: %v\n%s", err, out)
+	}
+	d := &Daemon{repos: testRepos(repo)}
+	task := &db.Task{ID: "abcd", Repo: &worktree}
+	got, err := d.taskRepoPath(task)
+	if err != nil || got != repo {
+		t.Fatalf("worktree repo: got (%q, %v), want (%q, nil)", got, err, repo)
 	}
 }
 
@@ -338,9 +362,12 @@ func TestDaemon_SpawnWorker(t *testing.T) {
 	task, _ := d.AddTask("spawn test", "", "", "", nil)
 
 	spawner := &MockSpawner{ExitCode: 0}
+	fm := &fakeMux{}
 	daemon := New(d, Config{
 		Repos:        testRepos(repoDir),
 		WorktreeBase: worktreeBase,
+		SessionDir:   t.TempDir(),
+		Mux:          fm,
 	}, spawner)
 
 	daemon.spawnReady()
@@ -348,6 +375,16 @@ func TestDaemon_SpawnWorker(t *testing.T) {
 	updated, _ := d.GetTask(task.ID)
 	if updated.Status != "active" {
 		t.Errorf("status = %s, want active", updated.Status)
+	}
+	runtime, err := d.GetTaskV2(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Workdir == nil || *runtime.Workdir != filepath.Join(worktreeBase, task.ID) {
+		t.Fatalf("workdir = %v, want spawned worktree", runtime.Workdir)
+	}
+	if fm.created != 0 || (runtime.HerdrTab != nil && *runtime.HerdrTab != "") {
+		t.Fatalf("automated spawn created herdr runtime: tabs=%d tab=%v", fm.created, runtime.HerdrTab)
 	}
 
 	if len(spawner.Spawned) != 1 {
@@ -444,6 +481,49 @@ func TestDaemon_SpawnChildUsesParentBranch(t *testing.T) {
 	parentBranch := fmt.Sprintf("dispatch/plan-%s", parent.ID)
 	if !BranchExists(repoDir, parentBranch) {
 		t.Errorf("parent branch %s should exist", parentBranch)
+	}
+}
+
+func TestDaemon_SpawnChildUsesParentExplicitBaseBranch(t *testing.T) {
+	database := openTestDB(t)
+	repoDir := initTestRepo(t)
+	defaultBranch, err := DetectDefaultBranch(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"checkout", "-b", "feature/source"},
+		{"commit", "--allow-empty", "-m", "feature base"},
+		{"checkout", defaultBranch},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	parent, _ := database.AddTask("parent plan", "", "", "", nil)
+	if _, err := database.SetBaseBranch(parent.ID, "feature/source"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = database.AddTask("child", "", parent.ID, "", nil)
+	daemon := New(database, Config{
+		Repos:        testRepos(repoDir),
+		WorktreeBase: filepath.Join(t.TempDir(), "worktrees"),
+	}, &MockSpawner{})
+
+	daemon.spawnReady()
+	parentTip, err := revParse(repoDir, "dispatch/plan-"+parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	featureTip, err := revParse(repoDir, "feature/source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parentTip != featureTip {
+		t.Fatalf("parent plan starts at %s, want feature base %s", parentTip, featureTip)
 	}
 }
 

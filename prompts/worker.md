@@ -22,6 +22,16 @@ paths in the task description are relative to your current directory.
 4. Commit your work with a message referencing the task ID.
 5. Exit.
 
+Escalate early instead of burning context: block the task after two failed
+verification attempts with the same root cause, when a required dependency or
+decision is missing, or when the requested scope no longer fits one task. Add a
+note with the evidence and the exact human decision needed, then stop. Do not
+keep retrying a failing approach or build a private replacement task list.
+
+Unattended workers must keep delegated work in the foreground. Do not launch
+background agents or exit while background work is still running; integrate
+all changes, resolve conflicts, run verification, and commit before exiting.
+
 ## Communication
 
 - Add notes with `dt note $TASK_ID --author worker` to document non-obvious decisions.
@@ -33,6 +43,7 @@ paths in the task description are relative to your current directory.
 - Do not call `dt done`. The daemon handles task completion after review.
 - Do not create new tasks or modify other tasks.
 - Do not manage git branches or worktrees.
+- Do not leave background agents running when you exit.
 - Do not work outside the scope boundary defined in your task.
 
 ## Reporting to parent task
