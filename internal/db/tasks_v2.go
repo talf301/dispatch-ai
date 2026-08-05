@@ -28,17 +28,17 @@ func TruncateLabel(thought string) string {
 }
 
 const taskColumnsV2 = `id, title, description, status, block_reason, assignee,
-	parent_id, repo, agent, created_at, updated_at,
+	parent_id, repo, agent, base_branch, created_at, updated_at,
 	thought, label, mode, workdir, herdr_ws, herdr_tab, herdr_pane,
-	kill_reason, last_activity, acceptance_kind, acceptance, reject_count`
+	kill_reason, last_activity, acceptance_kind, acceptance, reject_count, reviewing`
 
 func (d *DB) scanTaskV2(row interface{ Scan(...any) error }) (*Task, error) {
 	t := &Task{}
 	err := row.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.BlockReason,
-		&t.Assignee, &t.ParentID, &t.Repo, &t.Agent, &t.CreatedAt, &t.UpdatedAt,
+		&t.Assignee, &t.ParentID, &t.Repo, &t.Agent, &t.BaseBranch, &t.CreatedAt, &t.UpdatedAt,
 		&t.Thought, &t.Label, &t.Mode, &t.Workdir, &t.HerdrWs, &t.HerdrTab,
 		&t.HerdrPane, &t.KillReason, &t.LastActivity,
-		&t.AcceptanceKind, &t.Acceptance, &t.RejectCount)
+		&t.AcceptanceKind, &t.Acceptance, &t.RejectCount, &t.Reviewing)
 	if err != nil {
 		return nil, err
 	}
@@ -88,6 +88,15 @@ func (d *DB) SetRuntime(taskID, workdir, ws, tab, pane string) error {
 	return nil
 }
 
+// SetWorkdir records an automated task's worktree without creating or
+// overwriting optional herdr runtime coordinates.
+func (d *DB) SetWorkdir(taskID, workdir string) error {
+	if _, err := d.q.Exec(`UPDATE tasks SET workdir = ? WHERE id = ?`, workdir, taskID); err != nil {
+		return fmt.Errorf("set workdir: %w", err)
+	}
+	return nil
+}
+
 // GetTaskV2 retrieves a task including the v2 columns.
 func (d *DB) GetTaskV2(taskID string) (*Task, error) {
 	t, err := d.scanTaskV2(d.q.QueryRow(
@@ -96,6 +105,24 @@ func (d *DB) GetTaskV2(taskID string) (*Task, error) {
 		return nil, fmt.Errorf("get task %q: %w", taskID, err)
 	}
 	return t, nil
+}
+
+// ReviewTasks returns every task with the v2 fields needed by the daemon scan.
+func (d *DB) ReviewTasks() ([]Task, error) {
+	rows, err := d.q.Query(`SELECT ` + taskColumnsV2 + ` FROM tasks ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("review tasks: %w", err)
+	}
+	defer rows.Close()
+	var out []Task
+	for rows.Next() {
+		t, err := d.scanTaskV2(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan review task: %w", err)
+		}
+		out = append(out, *t)
+	}
+	return out, rows.Err()
 }
 
 // SetLabel updates the display label. The label is a cache: it never feeds
@@ -148,9 +175,20 @@ func (d *DB) ParkTask(taskID string) (*Task, error) {
 	return d.transition(taskID, "live", "parked")
 }
 
-// ResumeTask brings a parked task back to live.
+// ResumeTask brings a parked task back to live. It also repairs a capture-first
+// task that a legacy daemon incorrectly released to open.
 func (d *DB) ResumeTask(taskID string) (*Task, error) {
-	return d.transition(taskID, "parked", "live")
+	t, err := d.GetTaskV2(taskID)
+	if err != nil {
+		return nil, err
+	}
+	if t.Status == "parked" {
+		return d.transition(taskID, "parked", "live")
+	}
+	if t.Status == "open" && t.Mode != nil {
+		return d.transition(taskID, "open", "live")
+	}
+	return nil, fmt.Errorf("task %s is %s; only parked tasks or released capture tasks resume", taskID, t.Status)
 }
 
 func (d *DB) transition(taskID, from, to string) (*Task, error) {
@@ -223,6 +261,18 @@ func (d *DB) UnattendedTasks() ([]Task, error) {
 	return out, rows.Err()
 }
 
+// GetRejectCount reads the persisted reviewer-rejection counter. Unlike an
+// in-memory round counter, this survives a daemon restart and a human
+// `dt reopen` on a blocked task - the count is the task's, not the process's.
+func (d *DB) GetRejectCount(taskID string) (int, error) {
+	var n int
+	if err := d.q.QueryRow(
+		"SELECT reject_count FROM tasks WHERE id = ?", taskID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("read reject count: %w", err)
+	}
+	return n, nil
+}
+
 // IncrementRejectCount bumps the reviewer-rejection counter and returns the
 // new value. The daemon blocks the task at the cap rather than burning
 // tokens on an unbounded reject/redo loop overnight.
@@ -239,12 +289,22 @@ func (d *DB) IncrementRejectCount(taskID string) (int, error) {
 	return n, nil
 }
 
-// BoardTasks returns everything the board renders: all open v2 work plus
+// SetReviewing records the brief report-review window so other processes can
+// show it without guessing from ephemeral daemon state.
+func (d *DB) SetReviewing(taskID string, reviewing bool) error {
+	_, err := d.q.Exec("UPDATE tasks SET reviewing = ? WHERE id = ?", reviewing, taskID)
+	if err != nil {
+		return fmt.Errorf("set reviewing: %w", err)
+	}
+	return nil
+}
+
+// BoardTasks returns everything the board renders: all in-flight work plus
 // tasks closed within the last week (shown collapsed).
 func (d *DB) BoardTasks() ([]Task, error) {
 	rows, err := d.q.Query(
 		`SELECT ` + taskColumnsV2 + ` FROM tasks
-		 WHERE status IN ('live','unattended','blocked','parked','proposed')
+		 WHERE status IN ('open','active','live','unattended','blocked','parked','proposed')
 		    OR (status IN ('done','killed')
 		        AND updated_at >= datetime('now','-7 days')
 		        AND thought != '')

@@ -20,6 +20,10 @@ type Mux interface {
 	CreateTab(workspaceID, cwd, label string) (string, string, error)
 	// RunPane runs a command in a pane.
 	RunPane(paneID string, argv []string) error
+	// SplitPane splits paneID and returns the new pane.
+	SplitPane(paneID, direction string) (string, error)
+	// PaneExists reports whether paneID is still present.
+	PaneExists(paneID string) (bool, error)
 	// StartAgent starts a tracked agent of the given kind in a pane, waiting
 	// up to timeout for the pane to be ready.
 	StartAgent(name, kind, paneID string, timeout time.Duration, argv []string) error
@@ -29,6 +33,8 @@ type Mux interface {
 	RenameTab(tabID, label string) error
 	// AgentStates returns pane ID → agent status (idle/working/blocked/done/unknown).
 	AgentStates() (map[string]string, error)
+	// AgentStatus returns the registered agent status for one pane.
+	AgentStatus(paneID string) (string, error)
 	// CurrentPane returns (workspaceID, tabID, paneID, cwd) of the focused pane.
 	CurrentPane() (ws, tab, pane, cwd string, err error)
 	// WaitAgent blocks until the pane's agent reaches one of the `until`
@@ -122,6 +128,35 @@ func (h Herdr) RunPane(paneID string, argv []string) error {
 	return h.run(nil, args...)
 }
 
+func (h Herdr) SplitPane(paneID, direction string) (string, error) {
+	var pane struct {
+		Pane struct {
+			PaneID string `json:"pane_id"`
+		} `json:"pane"`
+	}
+	if err := h.run(&pane, "pane", "split", paneID, "--direction", direction, "--no-focus"); err != nil {
+		return "", err
+	}
+	return pane.Pane.PaneID, nil
+}
+
+func (h Herdr) PaneExists(paneID string) (bool, error) {
+	var list struct {
+		Panes []struct {
+			PaneID string `json:"pane_id"`
+		} `json:"panes"`
+	}
+	if err := h.run(&list, "pane", "list"); err != nil {
+		return false, err
+	}
+	for _, pane := range list.Panes {
+		if pane.PaneID == paneID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (h Herdr) StartAgent(name, kind, paneID string, timeout time.Duration, argv []string) error {
 	args := []string{"agent", "start", name, "--kind", kind, "--pane", paneID,
 		"--timeout", fmt.Sprintf("%d", timeout.Milliseconds()), "--"}
@@ -157,6 +192,18 @@ func (h Herdr) AgentStates() (map[string]string, error) {
 	return states, nil
 }
 
+func (h Herdr) AgentStatus(paneID string) (string, error) {
+	var res struct {
+		Agent struct {
+			AgentStatus string `json:"agent_status"`
+		} `json:"agent"`
+	}
+	if err := h.run(&res, "agent", "get", paneID); err != nil {
+		return "", err
+	}
+	return res.Agent.AgentStatus, nil
+}
+
 func (h Herdr) WaitAgent(paneID string, timeout time.Duration, until ...string) (string, error) {
 	var res struct {
 		Agent struct {
@@ -181,7 +228,10 @@ func (h Herdr) CloseTab(tabID string) error {
 }
 
 func (h Herdr) PromptAgent(paneID, text string) error {
-	return h.run(nil, "agent", "prompt", paneID, text)
+	// Wait for the prompt to be observed as a working turn. Without this,
+	// capture can race Claude's interactive startup and silently leave the
+	// opening thought in the ledger but not in the session.
+	return h.run(nil, "agent", "prompt", paneID, text, "--wait", "--until", "working", "--timeout", "10000")
 }
 
 func (h Herdr) CurrentPane() (string, string, string, string, error) {

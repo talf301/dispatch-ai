@@ -1,0 +1,224 @@
+<title>Dispatch: what to borrow</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  :where(.grid, .flex) > * { min-width: 0; }
+  :where(p, h1, h2, h3, h4, li, dd, blockquote, figcaption, td, th, .badge, .label) { overflow-wrap: anywhere; }
+  :where(img, svg, video, canvas, iframe) { max-width: 100%; height: auto; }
+  .src { font-size: 0.7rem; color: color-mix(in oklch, currentColor 55%, transparent); }
+  .item-card { border: 1px solid color-mix(in oklch, currentColor 10%, transparent); }
+</style>
+<div data-theme="luxury">
+<main class="mx-auto max-w-6xl p-5 lg:p-10 space-y-10">
+
+  <header class="space-y-3">
+    <div class="badge badge-soft badge-primary">Implementation proposal</div>
+    <h1 class="text-3xl lg:text-4xl font-bold leading-tight">What dispatch should borrow from firstmate and Agent Deck</h1>
+    <p class="text-base-content/70 max-w-3xl">A concrete, scoped pull-list from the two prior comparison reports &mdash; specific mechanisms to fold into dispatch, where they hook in, and what order to do them in. Written to be handed to an implementing agent as-is.</p>
+  </header>
+
+  <div role="alert" class="alert alert-error alert-vertical sm:alert-horizontal shadow-sm">
+    <div>
+      <h3 class="font-bold">Re-audit, 2026-08-04: two items are done, and graph-pilot's whole Linear stack is approved but stuck unmerged</h3>
+      <div class="text-sm mt-1">Re-checked both repos' actual code and GitHub state (not just dispatch's ledger). Headline: dispatch's ledger marks <code class="text-xs">9980</code>/<code class="text-xs">bff7</code>/<code class="text-xs">fa63</code>/<code class="text-xs">9986</code>/<code class="text-xs">6fed</code> all <span class="badge badge-soft badge-success badge-xs">done</span>, but graph-pilot's GitHub shows PRs <a class="link" href="#gp-stack">#7&ndash;#11 still OPEN</a> against <code class="text-xs">main</code> &mdash; <code class="text-xs">main</code>'s <code class="text-xs">cli.ts</code> still runs the old direct <code class="text-xs">spawn("claude", ...)</code> path. "Done" here means dispatch-reviewer-approved, not merged. See the GraphPilot section below for the verified merge order. Separately, items <b>#1</b> and <b>#6</b> in this list are superseded by unrelated work filed and shipped after this doc &mdash; updated in place below rather than left stale.</div>
+    </div>
+  </div>
+
+  <!-- QUICK WINS -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Quick wins</h2>
+    <p class="text-sm text-base-content/70">Small, isolated, high value-per-effort. Good first batch regardless of the in-flight changes above.</p>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-2 border-success/50">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <h3 class="font-semibold">1. Cost/token tracking per task <span class="text-base-content/50 font-normal">&mdash; done, drop from backlog</span></h3>
+        <div class="flex gap-1"><span class="badge badge-soft badge-secondary badge-sm">from Agent Deck</span><span class="badge badge-soft badge-success badge-sm">shipped</span></div>
+      </div>
+      <p class="text-sm"><b>Superseded by:</b> plan <code class="text-xs">8a84</code> ("token-sane Firstmate-style Dispatch manager and usage tracking") shipped exactly this via children <code class="text-xs">e167</code>/<code class="text-xs">2520</code>/<code class="text-xs">4ed5</code>, all <span class="badge badge-soft badge-success badge-xs">done</span> and merged. <code class="text-xs">2520</code> added a per-attempt <code class="text-xs">task_attempts</code> ledger (provider, model, role, raw/cached/output tokens, turns) captured at the CLI process boundary, plus <code class="text-xs">dt usage [task-id] --json</code>. <code class="text-xs">4ed5</code> surfaced it in the TUI with today/week rollups. Deliberately does <i>not</i> do budget limits or dollar-cost accounting (provider facts only, by design) &mdash; if you want those, that's new scope, not a gap in what shipped.</p>
+      <p class="text-sm"><b>One unfiled residual:</b> the approving review on <code class="text-xs">2520</code> flagged that <code class="text-xs">recoverActive()</code>'s re-adoption path (<code class="text-xs">newAdoptedHandle</code>, <code class="text-xs">internal/daemon/daemon.go</code> ~line 174) never gets an <code class="text-xs">attemptKey</code>/<code class="text-xs">UsageDB</code> wired in &mdash; confirmed still true by reading the current code. An attempt in flight across a daemon restart shows "running" forever in <code class="text-xs">dt usage</code> with its usage lost. Small, worth a standalone filing.</p>
+    </div>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-2">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <h3 class="font-semibold">2. Named delivery modes as an explicit per-repo config</h3>
+        <div class="flex gap-1"><span class="badge badge-soft badge-accent badge-sm">from firstmate</span><span class="badge badge-soft badge-success badge-sm">unblocked &mdash; pr.go has landed</span></div>
+      </div>
+      <p class="text-sm"><b>Why:</b> firstmate names its three merge paths explicitly &mdash; <code class="text-xs">no-mistakes</code> (full pipeline), <code class="text-xs">direct-PR</code>, <code class="text-xs">local-only</code> &mdash; as a per-project config value. Dispatch already has the equivalent behavior implicitly (ratchet/report gates, PR vs. local merge), but no single named knob a user sets once per repo. Mostly a config/naming tidy-up, not new logic.</p>
+      <p class="text-sm"><b>Where it hooks in:</b> <code class="text-xs">~/.dispatch/config.toml</code> alongside the existing per-repo <code class="text-xs">max_workers</code>; consumed in <code class="text-xs">internal/daemon/pr.go</code> where merge/PR decisions already happen &mdash; that file's previous in-flight changes are now committed, so this is safe to scope against the current shape.</p>
+      <p class="text-sm"><b>Effort:</b> small.</p>
+    </div>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-2">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <h3 class="font-semibold">3. Explicit agent-selection precedence</h3>
+        <div class="flex gap-1"><span class="badge badge-soft badge-accent badge-sm">from firstmate</span><span class="badge badge-soft badge-success badge-sm">safe to start now</span></div>
+      </div>
+      <p class="text-sm"><b>Why:</b> firstmate's backend selection order &mdash; per-task flag &rarr; env &rarr; config file &rarr; auto-detect &rarr; default &mdash; is a clean, documented pattern. Dispatch has the pieces (<code class="text-xs">DISPATCH_WORKER_AGENT</code> env, <code class="text-xs">RoleSpawner</code> mixing claude/codex per role) but no per-task CLI override and no single documented precedence order.</p>
+      <p class="text-sm"><b>Where it hooks in:</b> <code class="text-xs">cmd/dt/commands/add.go</code>/<code class="text-xs">capture.go</code> (add a <code class="text-xs">--agent</code> flag), consumed wherever <code class="text-xs">RoleSpawner</code> currently resolves env vars.</p>
+      <p class="text-sm"><b>Effort:</b> small.</p>
+    </div>
+  </section>
+
+  <!-- BIGGER BETS -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Bigger bets</h2>
+    <p class="text-sm text-base-content/70">More architectural, more effort, or genuinely dependent on the in-flight changes landing first.</p>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-2">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <h3 class="font-semibold">4. General periodic cleanup/audit pass &mdash; and this is already M6</h3>
+        <div class="flex gap-1"><span class="badge badge-soft badge-accent badge-sm">from firstmate's wedge-alarm</span><span class="badge badge-soft badge-success badge-sm">unblocked &mdash; unattended.go has landed</span></div>
+      </div>
+      <p class="text-sm"><b>Reframed per feedback:</b> not just stale <code class="text-xs">unattended</code> tasks &mdash; a general periodic pass across the fleet that surfaces anything wrong (stuck tasks, tangled worktrees, orphaned branches) without you having to notice it yourself. Explicitly cheap: a scan job, not a standing LLM loop &mdash; firstmate's <code class="text-xs">fm-watch.sh</code> proves this can be done as zero-token bash, and that's the model here too, not an "obnoxiously expensive" always-on agent.</p>
+      <p class="text-sm"><b>This turns out to already be planned:</b> <code class="text-xs">dispatch-prd_2.md</code> §15 names <b>M6 &mdash; "PM cadence": <code class="text-xs">dt review</code> digest, orphan detection against GraphPilot</b>, and its own open question #7 asks "Is GraphPilot orphan detection v1?" So this item isn't a new firstmate-inspired bolt-on &mdash; it's the same milestone already on the roadmap. Firstmate's wedge-alarm is useful as a reference for the escalation-cadence <i>shape</i> (surface once, then back off unless it recurs). <b>Resolved below:</b> the open question about the cross-reference target is settled now &mdash; GraphPilot's Linear migration (see the GraphPilot section) means the target is Linear directly, not a <code class="text-xs">gp_node</code>, once that stack merges.</p>
+      <p class="text-sm"><b>Where it hooks in:</b> <code class="text-xs">internal/daemon/unattended.go</code> for the live/unattended half (that file's prior in-flight changes have landed); the cross-reference target is the open question above, not a new file.</p>
+      <p class="text-sm"><b>Effort:</b> medium &mdash; but scope it as M6, not as a separate firstmate-inspired feature.</p>
+    </div>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-2">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <h3 class="font-semibold">5. External event-driven wake (webhook/CI/Slack) <span class="text-base-content/50 font-normal">&mdash; re-scoped, narrower than before</span></h3>
+        <div class="flex gap-1"><span class="badge badge-soft badge-secondary badge-sm">from Agent Deck's "Watchers"</span><span class="badge badge-soft badge-success badge-sm">safe to start now</span></div>
+      </div>
+      <p class="text-sm"><b>Why, narrowed:</b> Agent Deck's "Watchers" cover two different things &mdash; internal task-transition notification, and external-event wake. The <i>internal</i> half was believed shipped via <code class="text-xs">b837</code> ("Add a thin event-driven Dispatch manager session," done) &mdash; but see the correction directly below, its wake mechanism doesn't actually fire in real deployment. What's left, regardless, is genuinely external: a GitHub-webhook-triggered wake (CI finished, review comment posted) to cut review-gate latency below the daemon's <code class="text-xs">PollInterval</code> tick.</p>
+      <p class="text-sm"><b>Where it hooks in:</b> <code class="text-xs">internal/daemon/daemon.go</code>'s tick loop is stable now; a webhook receiver would need its own listener process/port, which is new infrastructure this repo doesn't have yet (no HTTP server anywhere in dispatchd today) &mdash; confirm that's wanted before starting, since it's a bigger footprint than the rest of this list.</p>
+      <p class="text-sm"><b>Effort:</b> large.</p>
+    </div>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-2 border-error/50">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <h3 class="font-semibold">Correction, from investigating why the manager feels slower than firstmate: <code class="text-xs">b837</code>'s wake mechanism doesn't fire across processes</h3>
+        <div class="flex gap-1"><span class="badge badge-soft badge-error badge-sm">bug, filed as 1463</span></div>
+      </div>
+      <p class="text-sm">Traced it end to end. <code class="text-xs">internal/db/notes.go</code>'s <code class="text-xs">Subscribe()</code>/<code class="text-xs">publish()</code> pair is an in-process Go channel registry keyed by <code class="text-xs">*DB</code> pointer. <code class="text-xs">dispatchd</code> (the daemon, which drives real task transitions) and <code class="text-xs">dt manager</code> (which runs <code class="text-xs">Manager.Run()</code>) are separate OS processes, each with their own <code class="text-xs">*DB</code> from a separate <code class="text-xs">db.Open()</code> call &mdash; confirmed <code class="text-xs">dispatchd</code> never even imports <code class="text-xs">internal/manager</code>. So the daemon's <code class="text-xs">publish()</code> calls can never reach the manager process's <code class="text-xs">Subscribe()</code> channel. <code class="text-xs">manager_test.go</code>'s tests all open one shared <code class="text-xs">db.Open()</code> per test and drive both sides through it, which is exactly the case that doesn't happen in real deployment &mdash; so the gap passed review invisibly.</p>
+      <p class="text-sm">This is a real answer, not a vibe, to "why does our thin layer struggle to feel as fast/parallel as firstmate": firstmate's watcher (<code class="text-xs">fm-watch.sh</code>) is a bash classifier that genuinely spans process/session boundaries (it reads real state files and pane status independent of which process is asking), so it reliably absorbs benign wakes and only spends a model turn on actionable ones. Dispatch's manager's equivalent wake path is in-memory-only and, as shipped, silently never fires from the daemon's real transitions &mdash; it currently only ever wakes on human input.</p>
+    </div>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-2">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <h3 class="font-semibold">6. Fleet state as a scriptable JSON snapshot <span class="text-base-content/50 font-normal">&mdash; task list done, fleet health is the remaining gap</span></h3>
+        <div class="flex gap-1"><span class="badge badge-soft badge-accent badge-sm">from firstmate</span><span class="badge badge-soft badge-warning badge-sm">narrowed &mdash; in progress (a3db)</span></div>
+      </div>
+      <p class="text-sm"><b>Why:</b> firstmate's <code class="text-xs">fm-fleet-snapshot.sh --json</code> gives a scriptable, deterministic view of the whole fleet &mdash; task list <i>and</i> daemon/worker liveness &mdash; for external tooling.</p>
+      <p class="text-sm"><b>Status update:</b> the task-list half is done: <code class="text-xs">--json</code> is a persistent root flag (<code class="text-xs">cmd/dt/main.go</code>), and <code class="text-xs">dt list --json</code>/<code class="text-xs">dt show &lt;id&gt; --json</code> (<code class="text-xs">cmd/dt/commands/query.go</code>) both already exist and are in real use. What firstmate's snapshot has that dispatch still doesn't: <b>daemon/worker liveness</b> &mdash; no heartbeat, no PID file, no DB row for "is dispatchd alive right now." That gap is exactly what <code class="text-xs">a3db</code> (open, <span class="badge badge-soft badge-warning badge-xs">active</span>) is building: a daemon heartbeat via <code class="text-xs">db.SetMeta</code> plus TUI display of last-seen. Once that lands, the meta key it writes is trivially exposed under <code class="text-xs">dt list --json</code>/a small <code class="text-xs">dt fleet --json</code> too.</p>
+      <p class="text-sm"><b>Where it hooks in:</b> once <code class="text-xs">a3db</code>'s heartbeat meta key exists, surface it via the JSON output path already in <code class="text-xs">query.go</code> &mdash; no new command needed.</p>
+      <p class="text-sm"><b>Effort:</b> small, and mostly done via a3db already &mdash; just needs the JSON surface added once that heartbeat key lands.</p>
+    </div>
+  </section>
+
+  <!-- WATCH, DON'T BUILD YET -->
+  <section class="space-y-3">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Watch, don't build yet</h2>
+    <div class="card card-border bg-base-100">
+      <div class="card-body">
+        <h3 class="card-title text-base">Worktree sparse-checkout / gitignored-file inheritance <span class="badge badge-soft badge-secondary badge-sm ml-1">from Agent Deck</span></h3>
+        <p class="text-sm">Agent Deck's <code class="text-xs">.worktreeinclude</code> mechanism copies specific gitignored files (<code class="text-xs">.env</code>, local config, cached deps) into a fresh worktree, plus setup/destroy hook scripts. <b>Watch until you actually run into it</b> &mdash; no confirmed case yet of a dispatch worktree breaking because it's missing an untracked local file. Revisit if/when that happens.</p>
+      </div>
+    </div>
+    <div class="card card-border bg-base-100">
+      <div class="card-body">
+        <h3 class="card-title text-base">Broader agent-CLI backend support <span class="badge badge-soft badge-secondary badge-sm ml-1">from Agent Deck</span></h3>
+        <p class="text-sm">Agent Deck supports Claude, Gemini, OpenCode, Codex, Copilot, Crush, Cursor, Hermes, plus custom tools via config. <b>Backburner</b> &mdash; Codex and Claude are the only agents actually available/in use right now, so generalizing <code class="text-xs">RoleSpawner</code> into a config-driven multi-backend spawner has no near-term driver. Revisit only if a third agent CLI becomes something you'd actually run.</p>
+      </div>
+    </div>
+    <div class="card card-border bg-base-100">
+      <div class="card-body">
+        <h3 class="card-title text-base">MCP Socket Pool (Agent Deck)</h3>
+        <p class="text-sm">Agent Deck shares MCP server processes across sessions via Unix sockets, claiming an 85-90% memory reduction (self-reported, not independently verified). Only relevant once dispatch's workers actually spin up MCP servers with meaningful per-session overhead &mdash; no evidence that's a real cost today. Revisit if/when it becomes one.</p>
+      </div>
+    </div>
+    <div class="card card-border bg-base-100">
+      <div class="card-body">
+        <h3 class="card-title text-base">Secondmate-style persistent domain agent (firstmate) <span class="badge badge-soft badge-info badge-sm ml-1">partial analog now exists</span></h3>
+        <p class="text-sm">Firstmate's secondmates &mdash; a persistent sub-supervisor with its own home, owning a whole slice of work (e.g. "issue triage") &mdash; is still a genuinely bigger architectural idea than anything else on this list. Since this doc was written, <code class="text-xs">b837</code> shipped a single conversational Dispatch manager session (wakes on transitions, ends idle, no polling). That's a narrower thing than secondmates &mdash; one flat manager, not domain-sliced sub-supervisors with their own hierarchy &mdash; but it's real lived experience with the "persistent low-idle-cost supervisor" shape now, which should inform rather than replace that dedicated design conversation if/when it happens.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- GRAPHPILOT / REDUNDANCY -->
+  <section class="space-y-3" id="gp-stack">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Where does GraphPilot fit? Is this getting redundant?</h2>
+    <div role="alert" class="alert alert-error alert-vertical sm:alert-horizontal shadow-sm">
+      <div>
+        <h3 class="font-bold">Correction: "done (fa63)" was premature &mdash; the whole Linear-migration stack is approved but unmerged</h3>
+        <div class="text-sm mt-1">Checked directly against <code class="text-xs">~/Documents/graph-pilot</code>'s GitHub state, not just dispatch's ledger. <code class="text-xs">main</code>'s <code class="text-xs">cli.ts</code> still runs the old <code class="text-xs">spawn("claude", ["--dangerously-skip-permissions", prompt], &#123;cwd: projectRoot&#125;)</code> path, <b>directly in the main checkout, no worktree</b> &mdash; because PRs <code class="text-xs">#7</code> (<code class="text-xs">9980</code>), <code class="text-xs">#8</code> (<code class="text-xs">bff7</code>), <code class="text-xs">#9</code> (<code class="text-xs">fa63</code>), <code class="text-xs">#10</code> (<code class="text-xs">9986</code>), and <code class="text-xs">#11</code> (<code class="text-xs">6fed</code>) are all still <b>OPEN</b> against <code class="text-xs">main</code>. Dispatch's "done" means reviewer-approved, not merged &mdash; these five have been sitting approved-and-idle since 2026-08-02.</div>
+      </div>
+    </div>
+    <div class="card card-border bg-base-100">
+      <div class="card-body">
+        <h3 class="card-title text-base">Reference note: merge order, for whoever sits down to actually do it <span class="badge badge-soft badge-ghost badge-sm">not blocking &mdash; per feedback, assume this lands</span></h3>
+        <p class="text-sm">Per feedback: treat the merge as a given rather than a gate &mdash; don't hold other work waiting on it. Keeping the mechanics here anyway since someone will need them. The five branches share intent but not commit SHAs (e.g. <code class="text-xs">feat(bff7)</code> exists as three different commits across PRs #8/#10/#11), verified in a scratch worktree with <code class="text-xs">git merge --no-commit --no-ff</code>:</p>
+        <ul class="list-disc pl-5 text-sm space-y-1">
+          <li><code class="text-xs">#7</code> (9980) &rarr; <code class="text-xs">#8</code> (bff7) &rarr; <code class="text-xs">#9</code> (fa63), merged in that sequence: <span class="badge badge-soft badge-success badge-xs">clean, no conflicts</span></li>
+          <li><code class="text-xs">#10</code> (9986) on top of that base: <span class="badge badge-soft badge-error badge-xs">conflicts</span> &mdash; add/add on <code class="text-xs">correlations.ts</code>, <code class="text-xs">linear.ts</code>, <code class="text-xs">linearGraph.ts</code>, plus content conflict in <code class="text-xs">serve.ts</code></li>
+          <li><code class="text-xs">#11</code> (6fed) on that same base: <span class="badge badge-soft badge-error badge-xs">conflicts</span> too (<code class="text-xs">linearGraph.ts</code>, <code class="text-xs">serve.ts</code>) &mdash; and #10/#11 will also conflict with <i>each other</i> since both touch the same files, so it's manual reconciliation, not a clean fast-forward, whenever it happens.</li>
+        </ul>
+      </div>
+    </div>
+    <div role="alert" class="alert alert-info alert-vertical sm:alert-horizontal shadow-sm">
+      <div>
+        <h3 class="font-bold">Checked: does merging this stack break dispatch's existing GraphPilot hook?</h3>
+        <div class="text-sm mt-1">Dispatch's <code class="text-xs">--gp</code> flag calls <code class="text-xs">gp sync-child &lt;task-id&gt;</code> on completion (<code class="text-xs">internal/daemon/daemon.go</code>). Confirmed via <code class="text-xs">git grep</code> on the <code class="text-xs">bff7</code> branch: <code class="text-xs">sync-child</code>/<code class="text-xs">cmdSyncChild</code> are still wired in <code class="text-xs">cli.ts</code> after the Linear-rendering swap. No breakage &mdash; safe to merge on that front.</div>
+      </div>
+    </div>
+    <div class="card card-border bg-base-100">
+      <div class="card-body">
+        <h3 class="card-title text-base">Item #4 (cleanup/orphan detection) &mdash; scope now, assuming the stack above merges</h3>
+        <p class="text-sm">The PRD plans <b>M6 &mdash; "PM cadence": <code class="text-xs">dt review</code> digest, orphan detection against GraphPilot</b>, and its own open question asked whether it depends on "<code class="text-xs">gp_node</code> discipline that may not exist yet." That's now answered: GraphPilot's graph is becoming Linear-backed, not vault/<code class="text-xs">gp_node</code>-backed &mdash; so M6's cross-reference target should be <b>Linear directly</b> (via graph-pilot's new correlation store from <code class="text-xs">9980</code>), not a <code class="text-xs">gp_node</code>. Still fold this into M6, not a standalone feature. Filed as a dispatch-ai task below, written against the assumption the stack is merged.</p>
+      </div>
+    </div>
+    <div class="card card-border bg-base-100">
+      <div class="card-body">
+        <h3 class="card-title text-base">A second, smaller point of alignment</h3>
+        <p class="text-sm">The PRD's own risk table (&sect;16) already independently flags: <i>"the one thing worth borrowing from firstmate's backend abstraction"</i> &mdash; keeping a tmux implementation as an escape hatch behind the thin <code class="text-xs">internal/mux</code> interface, given herdr is pre-1.0 and API churn is likely. That's the same idea this proposal's earlier comparison report surfaced independently, which is a good sign the two analyses converge rather than diverge &mdash; no new item needed here, it's already tracked.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- EXPLICITLY NOT BORROWING -->
+  <section class="space-y-3">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Explicitly not borrowing</h2>
+    <div role="alert" class="alert alert-error alert-soft text-sm">
+      <span>
+        <ul class="list-disc pl-5 space-y-1">
+          <li><b>Firstmate's LLM-judgment dispatch model</b> (the first mate deciding routing/escalation itself, <code class="text-xs">+yolo</code>) &mdash; the opposite of dispatch's core bet that Go/SQLite should govern, not the LLM.</li>
+          <li><b>Agent Deck's no-merge-gate pattern</b> &mdash; obviously don't remove dispatch's mandatory <code class="text-xs">ratchet</code>/<code class="text-xs">report</code> acceptance condition. That gate is dispatch's actual differentiator versus both other tools.</li>
+        </ul>
+      </span>
+    </div>
+  </section>
+
+  <!-- NEXT STEPS -->
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Recommended next steps</h2>
+    <p class="text-sm text-base-content/70">Per review: the graph-pilot merge is assumed to happen and isn't gating anything below. Four items filed as dispatch-ai tasks; two items need the user's own product-scoping questions answered before they're worth filing.</p>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-1 border-success/50">
+      <div class="flex items-center gap-2"><span class="badge badge-success badge-sm">filed</span><h3 class="font-semibold">Four tasks filed against dispatch-ai, proposed for approval</h3></div>
+      <p class="text-sm">(1) <code class="text-xs">7d42</code> &mdash; the <code class="text-xs">newAdoptedHandle</code>/<code class="text-xs">attemptKey</code>/<code class="text-xs">UsageDB</code> restart bug. (2) <code class="text-xs">15f6</code> &mdash; item #2, named delivery modes. (3) <code class="text-xs">c510</code> &mdash; item #3, agent-selection precedence. (4) <code class="text-xs">784b</code> &mdash; item #4, M6 periodic audit (scoped to dispatch's own generic ledger only, per the "dispatch stays generic" boundary from 9980/9986 &mdash; any GraphPilot/Linear cross-referencing is graph-pilot's side to build). (5) <code class="text-xs">1463</code> &mdash; fix the manager's cross-process wake bug found while investigating the firstmate-speed question below. All <span class="badge badge-soft badge-warning badge-xs">proposed</span>, awaiting approval.</p>
+    </div>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-1 border-warning/50">
+      <div class="flex items-center gap-2"><span class="badge badge-warning badge-sm">pending</span><h3 class="font-semibold">Item #5 (webhook wake) &mdash; not filed, the "why" is still an open question</h3></div>
+      <p class="text-sm">Flagged directly on the artifact: what's the actual use case for wanting this? It's the one item that grows dispatchd's surface area (a new HTTP listener) rather than just wiring up data that already exists &mdash; not worth filing until there's a concrete scenario it solves.</p>
+    </div>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-1 border-warning/50">
+      <div class="flex items-center gap-2"><span class="badge badge-warning badge-sm">pending</span><h3 class="font-semibold">Item #6's remaining follow-up &mdash; not filed, shape depends on an answer</h3></div>
+      <p class="text-sm">Flagged directly on the artifact: is the fleet-liveness data (once <code class="text-xs">a3db</code> lands) meant to feed the TUI, or to report outward to something else? Those are different follow-ups &mdash; not filing the JSON-surface task until that's answered.</p>
+    </div>
+
+    <div class="item-card rounded-box bg-base-100 p-4 space-y-1">
+      <div class="flex items-center gap-2"><span class="badge badge-info badge-sm">next session</span><h3 class="font-semibold">Secondmate-style persistent domain agent &mdash; design conversation, not a ticket</h3></div>
+      <p class="text-sm">Flagged as worth starting to plan. Bigger than anything else on this doc (pushes dispatch's flat model toward hierarchy) &mdash; deserves its own dedicated design session rather than a line item here.</p>
+    </div>
+  </section>
+
+  <footer class="text-xs text-base-content/50 pt-4 border-t border-base-content/10">
+    Built from the firstmate-vs-dispatch-vs-Agent-Deck comparison report, 2026-07-31. Re-audited against live code and GitHub state in both dispatch-ai and graph-pilot, 2026-08-04.
+  </footer>
+
+</main>
+</div>

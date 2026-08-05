@@ -28,6 +28,7 @@ max_workers = 2
 
 [[repo]]
 path = "` + repoB + `"
+test_command = "go test ./..."
 `
 	cfgPath := filepath.Join(tmp, "config.toml")
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
@@ -43,13 +44,49 @@ path = "` + repoB + `"
 		t.Fatalf("expected 2 repos, got %d", len(cfg.Repos))
 	}
 
-	if cfg.Repos[0].Path != repoA || cfg.Repos[0].MaxWorkers != 2 {
-		t.Errorf("repo[0] = %+v, want path=%s maxWorkers=2", cfg.Repos[0], repoA)
+	if cfg.Repos[0].Path != repoA || cfg.Repos[0].MaxWorkers != 2 || cfg.Repos[0].DeliveryMode != DefaultDeliveryMode {
+		t.Errorf("repo[0] = %+v, want path=%s maxWorkers=2 delivery_mode=%s", cfg.Repos[0], repoA, DefaultDeliveryMode)
 	}
 
-	// Default MaxWorkers applied
-	if cfg.Repos[1].Path != repoB || cfg.Repos[1].MaxWorkers != DefaultMaxWorkers {
-		t.Errorf("repo[1] = %+v, want path=%s maxWorkers=%d", cfg.Repos[1], repoB, DefaultMaxWorkers)
+	// Defaults applied.
+	if cfg.Repos[1].Path != repoB || cfg.Repos[1].MaxWorkers != DefaultMaxWorkers || cfg.Repos[1].TestCommand != "go test ./..." || cfg.Repos[1].DeliveryMode != DefaultDeliveryMode {
+		t.Errorf("repo[1] = %+v, want path=%s maxWorkers=%d test command and delivery_mode=%s", cfg.Repos[1], repoB, DefaultMaxWorkers, DefaultDeliveryMode)
+	}
+}
+
+func TestLoadConfig_DeliveryModes(t *testing.T) {
+	tmp := t.TempDir()
+	var entries strings.Builder
+	for _, mode := range []string{DeliveryModeNoMistakes, DeliveryModeDirectPR, DeliveryModeLocalOnly} {
+		repo := filepath.Join(tmp, mode)
+		makeGitRepo(t, repo)
+		entries.WriteString(`[[repo]]` + "\npath = \"" + repo + "\"\ndelivery_mode = \"" + mode + "\"\n")
+	}
+	path := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(path, []byte(entries.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, mode := range []string{DeliveryModeNoMistakes, DeliveryModeDirectPR, DeliveryModeLocalOnly} {
+		if cfg.Repos[i].DeliveryMode != mode {
+			t.Errorf("repo[%d] delivery_mode = %q, want %q", i, cfg.Repos[i].DeliveryMode, mode)
+		}
+	}
+}
+
+func TestLoadConfig_InvalidDeliveryMode(t *testing.T) {
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	makeGitRepo(t, repo)
+	path := filepath.Join(tmp, "config.toml")
+	os.WriteFile(path, []byte(`[[repo]]
+path = "`+repo+`"
+delivery_mode = "fast-forward"`), 0o644)
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "invalid delivery_mode") {
+		t.Fatalf("LoadConfig error = %v, want invalid delivery_mode", err)
 	}
 }
 
@@ -70,23 +107,27 @@ path = "relative/path"
 	}
 }
 
-func TestLoadConfig_NotGitRepo(t *testing.T) {
+func TestLoadConfig_UnavailableRepoDoesNotHideValidRepos(t *testing.T) {
 	tmp := t.TempDir()
-	notRepo := filepath.Join(tmp, "notrepo")
-	os.MkdirAll(notRepo, 0o755) // no .git
+	validRepo := filepath.Join(tmp, "valid")
+	makeGitRepo(t, validRepo)
+	unavailableRepo := filepath.Join(tmp, "gone")
 
 	content := `[[repo]]
-path = "` + notRepo + `"
+path = "` + validRepo + `"
+
+[[repo]]
+path = "` + unavailableRepo + `"
 `
 	cfgPath := filepath.Join(tmp, "config.toml")
 	os.WriteFile(cfgPath, []byte(content), 0o644)
 
-	_, err := LoadConfig(cfgPath)
-	if err == nil {
-		t.Fatal("expected error for non-git repo")
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not a valid git repository") {
-		t.Errorf("error = %v, want 'not a valid git repository'", err)
+	if len(cfg.Repos) != 2 || cfg.Repos[0].Path != validRepo {
+		t.Fatalf("repos = %#v, want valid repo preserved", cfg.Repos)
 	}
 }
 
@@ -170,6 +211,9 @@ func TestSaveRepoEntry_NewFile(t *testing.T) {
 	}
 	if !strings.Contains(got, `max_workers = 3`) {
 		t.Errorf("missing max_workers in:\n%s", got)
+	}
+	if !strings.Contains(got, `delivery_mode = "direct-PR"`) {
+		t.Errorf("missing default delivery_mode in:\n%s", got)
 	}
 }
 

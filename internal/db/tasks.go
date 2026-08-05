@@ -3,7 +3,14 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"os/exec"
+	"strings"
 	"time"
+)
+
+const (
+	BlockKindMergeConflict  = "merge-conflict"
+	BlockKindPRCreateFailed = "pr-create-failed"
 )
 
 // Task represents a row in the tasks table.
@@ -17,6 +24,7 @@ type Task struct {
 	ParentID    *string `json:"parent_id"`
 	Repo        *string `json:"repo"`
 	Agent       *string `json:"agent,omitempty"`
+	BaseBranch  *string `json:"base_branch,omitempty"`
 	CreatedAt   string  `json:"created_at"`
 	UpdatedAt   string  `json:"updated_at"`
 
@@ -36,6 +44,7 @@ type Task struct {
 	AcceptanceKind *string `json:"acceptance_kind,omitempty"` // report | ratchet
 	Acceptance     *string `json:"acceptance,omitempty"`
 	RejectCount    int     `json:"reject_count,omitempty"`
+	Reviewing      bool    `json:"reviewing,omitempty"`
 }
 
 // AddTask creates an open task with a unique 4-char hex ID.
@@ -98,9 +107,9 @@ func (d *DB) AddTaskWithAgent(title, description, parentID, afterID string, repo
 func (d *DB) GetTask(id string) (*Task, error) {
 	t := &Task{}
 	err := d.q.QueryRow(
-		`SELECT id, title, description, status, block_reason, assignee, parent_id, repo, agent, created_at, updated_at
+		`SELECT id, title, description, status, block_reason, assignee, parent_id, repo, agent, base_branch, created_at, updated_at
 		 FROM tasks WHERE id = ?`, id,
-	).Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.BlockReason, &t.Assignee, &t.ParentID, &t.Repo, &t.Agent, &t.CreatedAt, &t.UpdatedAt)
+	).Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.BlockReason, &t.Assignee, &t.ParentID, &t.Repo, &t.Agent, &t.BaseBranch, &t.CreatedAt, &t.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("task %q not found", id)
 	}
@@ -110,11 +119,41 @@ func (d *DB) GetTask(id string) (*Task, error) {
 	return t, nil
 }
 
+// SetBaseBranch records the revision a standalone task must start from and
+// eventually target with its PR. Child tasks always use their plan branch.
+func (d *DB) SetBaseBranch(id, branch string) (*Task, error) {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return nil, fmt.Errorf("base branch must not be empty")
+	}
+	task, err := d.GetTask(id)
+	if err != nil {
+		return nil, err
+	}
+	if task.ParentID != nil {
+		return nil, fmt.Errorf("task %s is a child; children start from the parent plan branch", id)
+	}
+	if task.Repo != nil {
+		cmd := exec.Command("git", "rev-parse", "--verify", branch)
+		cmd.Dir = *task.Repo
+		if err := cmd.Run(); err != nil {
+			return nil, fmt.Errorf("base branch %q does not exist in repository %q", branch, *task.Repo)
+		}
+	}
+	if _, err := d.q.Exec("UPDATE tasks SET base_branch = ? WHERE id = ?", branch, id); err != nil {
+		return nil, fmt.Errorf("set base branch: %w", err)
+	}
+	return d.GetTask(id)
+}
+
 // addSystemNote records a status-change note authored by "system".
 func (d *DB) addSystemNote(taskID, oldStatus, newStatus string) error {
 	author := "system"
 	content := fmt.Sprintf("Status changed: %s → %s", oldStatus, newStatus)
 	_, err := d.AddNote(taskID, content, &author)
+	if err == nil {
+		d.publish(Event{TaskID: taskID, OldStatus: oldStatus, NewStatus: newStatus})
+	}
 	return err
 }
 
@@ -129,7 +168,7 @@ func (d *DB) ClaimTask(id, assignee string) (*Task, error) {
 	// Conditional update: the claim must be decided by the database, not by a
 	// read-then-write in the caller — two processes both see a NULL assignee.
 	res, err := d.q.Exec(
-		"UPDATE tasks SET status = 'active', assignee = ? WHERE id = ? AND assignee IS NULL",
+		"UPDATE tasks SET status = 'active', assignee = ? WHERE id = ? AND assignee IS NULL AND mode IS NULL",
 		assignee, id,
 	)
 	if err != nil {
@@ -253,6 +292,15 @@ func (d *DB) doneTask(id string) (transitioned bool, acs []AutoComplete, err err
 
 // BlockTask marks a task as blocked with a reason and clears the assignee.
 func (d *DB) BlockTask(id, reason string) (*Task, error) {
+	return d.blockTask(id, reason, "")
+}
+
+// BlockTaskWithKind marks a task as blocked and records a stable reason kind.
+func (d *DB) BlockTaskWithKind(id, reason, kind string) (*Task, error) {
+	return d.blockTask(id, reason, kind)
+}
+
+func (d *DB) blockTask(id, reason, kind string) (*Task, error) {
 	task, err := d.GetTask(id)
 	if err != nil {
 		return nil, err
@@ -263,12 +311,36 @@ func (d *DB) BlockTask(id, reason string) (*Task, error) {
 	if err != nil {
 		return nil, fmt.Errorf("block task: %w", err)
 	}
+	if kind == "" {
+		_, err = d.q.Exec("DELETE FROM meta WHERE key = ?", blockKindKey(id))
+	} else {
+		_, err = d.q.Exec(`INSERT INTO meta (key, value) VALUES (?, ?)
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value`, blockKindKey(id), kind)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("set block kind: %w", err)
+	}
 
 	if err := d.addSystemNote(id, oldStatus, "blocked"); err != nil {
 		return nil, err
 	}
 	return d.GetTask(id)
 }
+
+// BlockKind returns the machine-readable kind recorded for a task's block.
+func (d *DB) BlockKind(id string) (string, error) {
+	var kind string
+	err := d.q.QueryRow("SELECT value FROM meta WHERE key = ?", blockKindKey(id)).Scan(&kind)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get block kind: %w", err)
+	}
+	return kind, nil
+}
+
+func blockKindKey(id string) string { return "block.kind." + id }
 
 // ReopenTask sets a task back to open, clearing block_reason and assignee.
 func (d *DB) ReopenTask(id string) (*Task, error) {
@@ -282,6 +354,9 @@ func (d *DB) ReopenTask(id string) (*Task, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reopen task: %w", err)
 	}
+	if _, err := d.q.Exec("DELETE FROM meta WHERE key = ?", blockKindKey(id)); err != nil {
+		return nil, fmt.Errorf("clear block kind: %w", err)
+	}
 
 	if err := d.addSystemNote(id, oldStatus, "open"); err != nil {
 		return nil, err
@@ -292,7 +367,7 @@ func (d *DB) ReopenTask(id string) (*Task, error) {
 // GetChildren returns tasks whose parent_id matches the given ID, ordered by created_at ASC.
 func (d *DB) GetChildren(parentID string) ([]Task, error) {
 	rows, err := d.q.Query(
-		`SELECT id, title, description, status, block_reason, assignee, parent_id, repo, agent, created_at, updated_at
+		`SELECT id, title, description, status, block_reason, assignee, parent_id, repo, agent, base_branch, created_at, updated_at
 		 FROM tasks WHERE parent_id = ? ORDER BY created_at ASC`, parentID,
 	)
 	if err != nil {
@@ -307,9 +382,10 @@ func (d *DB) GetChildren(parentID string) ([]Task, error) {
 func (d *DB) ReadyTasks() ([]Task, error) {
 	rows, err := d.q.Query(`
 		SELECT t.id, t.title, t.description, t.status, t.block_reason,
-		       t.assignee, t.parent_id, t.repo, t.agent, t.created_at, t.updated_at
+		       t.assignee, t.parent_id, t.repo, t.agent, t.base_branch, t.created_at, t.updated_at
 		FROM tasks t
 		WHERE t.status = 'open'
+		  AND t.mode IS NULL
 		  AND t.assignee IS NULL
 		  AND NOT EXISTS (
 		    SELECT 1 FROM deps d
@@ -341,14 +417,14 @@ func (d *DB) ListTasks(status string, all bool) ([]Task, error) {
 	var args []any
 
 	if status != "" {
-		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, agent, created_at, updated_at
+		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, agent, base_branch, created_at, updated_at
 		         FROM tasks WHERE status = ? ORDER BY created_at ASC`
 		args = append(args, status)
 	} else if !all {
-		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, agent, created_at, updated_at
+		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, agent, base_branch, created_at, updated_at
 		         FROM tasks WHERE status != 'done' ORDER BY created_at ASC`
 	} else {
-		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, agent, created_at, updated_at
+		query = `SELECT id, title, description, status, block_reason, assignee, parent_id, repo, agent, base_branch, created_at, updated_at
 		         FROM tasks ORDER BY created_at ASC`
 	}
 
@@ -395,7 +471,7 @@ func (d *DB) EditTask(id string, title, description, repo *string) (*Task, error
 func (d *DB) PendingPRParents() ([]Task, error) {
 	rows, err := d.q.Query(`
 		SELECT t.id, t.title, t.description, t.status, t.block_reason,
-		       t.assignee, t.parent_id, t.repo, t.agent, t.created_at, t.updated_at
+		       t.assignee, t.parent_id, t.repo, t.agent, t.base_branch, t.created_at, t.updated_at
 		FROM tasks t
 		WHERE t.status = 'done'
 		  AND EXISTS (
@@ -420,10 +496,5 @@ func (d *DB) PendingPRParents() ([]Task, error) {
 
 // MarkPRHandled removes a completed parent from the daemon's PR retry queue.
 func (d *DB) MarkPRHandled(taskID string) error {
-	_, err := d.q.Exec(`INSERT INTO meta (key, value) VALUES (?, ?)
-		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, "pr.handled."+taskID, "1")
-	if err != nil {
-		return fmt.Errorf("mark PR handled: %w", err)
-	}
-	return nil
+	return d.SetMeta("pr.handled."+taskID, "1")
 }

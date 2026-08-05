@@ -90,6 +90,37 @@ func TestBatchBackReferences(t *testing.T) {
 	}
 }
 
+func TestWarnReopen(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		kind string
+		want string
+	}{
+		{name: "no kind"},
+		{name: "merge conflict", kind: db.BlockKindMergeConflict, want: "not caused by the task's own work"},
+		{name: "pr create failed", kind: db.BlockKindPRCreateFailed, want: "already landed via another PR"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := openTestDB(t)
+			task, err := d.AddTask("reopen", "", "", "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.BlockTaskWithKind(task.ID, "reason", tt.kind); err != nil {
+				t.Fatal(err)
+			}
+
+			var stderr bytes.Buffer
+			if err := warnReopen(d, task.ID, &stderr); err != nil {
+				t.Fatal(err)
+			}
+			if got := stderr.String(); (got == "") != (tt.want == "") || (tt.want != "" && !strings.Contains(got, tt.want)) {
+				t.Errorf("warning = %q, want substring %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBatchBackReference_InvalidIndex(t *testing.T) {
 	// $99 when only 1 task exists
 	_, err := substituteRefs(`add "x" -p $99`, []string{"abc123"})
@@ -124,6 +155,21 @@ func TestBatchMultilineDescription(t *testing.T) {
 	want := "line one\nline two\nline three"
 	if task.Description != want {
 		t.Errorf("description = %q, want %q", task.Description, want)
+	}
+}
+
+func TestBatchAddStoresBaseBranch(t *testing.T) {
+	d := openTestDB(t)
+	id, err := executeLine(d, `add "Feature work" --base-branch feature/source`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := d.GetTask(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.BaseBranch == nil || *task.BaseBranch != "feature/source" {
+		t.Fatalf("base branch = %v, want feature/source", task.BaseBranch)
 	}
 }
 
