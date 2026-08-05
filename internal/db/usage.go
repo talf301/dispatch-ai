@@ -67,6 +67,22 @@ func (d *DB) FinishAttempt(key string, a Attempt) error {
 	return err
 }
 
+// ActiveAttemptKey returns the newest unfinished attempt for a task role.
+// A daemon restart can re-adopt that process and finish the same row.
+func (d *DB) ActiveAttemptKey(taskID, role string) (string, error) {
+	var key string
+	err := d.q.QueryRow(`SELECT attempt_key FROM task_attempts
+		WHERE task_id=? AND role=? AND ended_at IS NULL
+		ORDER BY id DESC LIMIT 1`, taskID, role).Scan(&key)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("active attempt for task %q: %w", taskID, err)
+	}
+	return key, nil
+}
+
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
 func (d *DB) Usage(taskID string) (*UsageReport, error) {
