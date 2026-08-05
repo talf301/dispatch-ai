@@ -122,12 +122,16 @@ func (m *Manager) startTUI(managerPane string) (string, error) {
 	return tuiPane, nil
 }
 
-// Run listens for local ledger events and checks durable task state for events
-// written by other processes. The caller owns the lifetime; unchanged periods
-// produce no model activity.
+// Run listens for local ledger events and polls durable transition notes from
+// other processes. The caller owns the lifetime; unchanged periods produce no
+// model activity.
 func (m *Manager) Run(ctx context.Context) error {
 	events, cancel := m.db.Subscribe()
 	defer cancel()
+	wakeCursor, err := m.db.LatestNoteID()
+	if err != nil {
+		return err
+	}
 	ticker := time.NewTicker(eventPollInterval)
 	defer ticker.Stop()
 	for {
@@ -145,14 +149,15 @@ func (m *Manager) Run(ctx context.Context) error {
 				log.Printf("manager: notify %s: %v", event.TaskID, err)
 			}
 		case <-ticker.C:
-			tasks, err := m.db.ActionableTasks()
+			transitions, nextCursor, err := m.db.ActionableTransitionsAfter(wakeCursor)
 			if err != nil {
-				log.Printf("manager: read actionable tasks: %v", err)
+				log.Printf("manager: read actionable transitions: %v", err)
 				continue
 			}
-			for _, task := range tasks {
-				if err := m.Notify(task.ID); err != nil {
-					log.Printf("manager: notify %s: %v", task.ID, err)
+			wakeCursor = nextCursor
+			for _, event := range transitions {
+				if err := m.Notify(event.TaskID); err != nil {
+					log.Printf("manager: notify %s: %v", event.TaskID, err)
 				}
 			}
 		}

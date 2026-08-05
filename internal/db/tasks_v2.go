@@ -239,25 +239,6 @@ func (d *DB) UnattendedTasks() ([]Task, error) {
 	return out, rows.Err()
 }
 
-// ActionableTasks returns tasks whose current state warrants a manager wake.
-func (d *DB) ActionableTasks() ([]Task, error) {
-	rows, err := d.q.Query(`SELECT ` + taskColumnsV2 + ` FROM tasks
-		WHERE status IN ('blocked', 'done', 'killed', 'proposed')`)
-	if err != nil {
-		return nil, fmt.Errorf("actionable tasks: %w", err)
-	}
-	defer rows.Close()
-	var out []Task
-	for rows.Next() {
-		t, err := d.scanTaskV2(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan actionable task: %w", err)
-		}
-		out = append(out, *t)
-	}
-	return out, rows.Err()
-}
-
 // GetRejectCount reads the persisted reviewer-rejection counter. Unlike an
 // in-memory round counter, this survives a daemon restart and a human
 // `dt reopen` on a blocked task - the count is the task's, not the process's.

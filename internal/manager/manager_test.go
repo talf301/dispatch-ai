@@ -142,16 +142,17 @@ func TestRunWakesForMultipleTransitionsFromAnotherDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	f := &fakeMux{notified: make(chan struct{}, 2)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- New(managerDB, f).Run(ctx) }()
+	time.Sleep(2 * eventPollInterval)
 	if _, err := writerDB.BlockTask(first.ID, "needs a decision"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := writerDB.BlockTask(second.ID, "needs a decision"); err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeMux{notified: make(chan struct{}, 2)}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- New(managerDB, f).Run(ctx) }()
 	for range 2 {
 		select {
 		case <-f.notified:
@@ -162,6 +163,32 @@ func TestRunWakesForMultipleTransitionsFromAnotherDB(t *testing.T) {
 	cancel()
 	if err := <-done; err != context.Canceled {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestRunSkipsExistingActionableTasks(t *testing.T) {
+	d, err := db.Open(t.TempDir() + "/dispatch.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if _, err := d.AddTaskWithStatus("already blocked", "", "", "", nil, "blocked"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetMeta(paneKey, "pane"); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeMux{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- New(d, f).Run(ctx) }()
+	time.Sleep(2 * eventPollInterval)
+	cancel()
+	if err := <-done; err != context.Canceled {
+		t.Fatalf("got %v", err)
+	}
+	if f.prompts != 0 {
+		t.Fatalf("got %d prompts for existing task, want none", f.prompts)
 	}
 }
 
