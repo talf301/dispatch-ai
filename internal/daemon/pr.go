@@ -26,7 +26,13 @@ func (d *Daemon) createPR(repoPath, headBranch string, task db.Task, allowZeroDi
 	// Compare against the remote base, which is what GitHub uses for the PR
 	// diff. Only trust a successful git result; errors must continue to the
 	// normal path.
-	remoteBase := "origin/" + strings.TrimPrefix(baseBranch, "origin/")
+	baseName := strings.TrimPrefix(baseBranch, "origin/")
+	remoteBase := "origin/" + baseName
+	fetchCmd := exec.Command("git", "fetch", "origin", baseName+":refs/remotes/"+remoteBase)
+	fetchCmd.Dir = repoPath
+	if out, err := fetchCmd.CombinedOutput(); err != nil {
+		d.logger.Printf("could not fetch %s: %v\n%s; attempting normal PR creation", remoteBase, err, out)
+	}
 	if count, err := branchCommitCount(repoPath, remoteBase, headBranch); err == nil {
 		if count == 0 && allowZeroDiffSuccess {
 			note := fmt.Sprintf("PR skipped: %s has no commits relative to %s; changes were already merged elsewhere.", headBranch, remoteBase)

@@ -160,6 +160,11 @@ func createPRTestBranch(t *testing.T, repoDir, headBranch string, mergedToRemote
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("restore stale local main: %v\n%s", err, out)
 	}
+	cmd = exec.Command("git", "update-ref", "refs/remotes/origin/main", "HEAD~1")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("stale remote main: %v\n%s", err, out)
+	}
 }
 
 func writeFakeGH(t *testing.T, dir, marker string, exitCode int) {
