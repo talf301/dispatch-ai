@@ -27,6 +27,7 @@ type Config struct {
 	BaseBranch       string                       // empty = auto-detect
 	PollInterval     time.Duration
 	PRReviewInterval time.Duration
+	ReviewInterval   time.Duration
 	WorktreeBase     string // default ~/.dispatch/worktrees
 	SessionDir       string // path to ~/.dispatch/sessions/
 	GPEnabled        bool   // Enable GraphPilot integration (gp sync-child on task completion)
@@ -48,6 +49,7 @@ func DefaultConfig() Config {
 		Repos:            make(map[string]config.RepoConfig),
 		PollInterval:     5 * time.Second,
 		PRReviewInterval: 10 * time.Minute,
+		ReviewInterval:   time.Hour,
 		WorktreeBase:     filepath.Join(home, ".dispatch", "worktrees"),
 	}
 }
@@ -80,10 +82,17 @@ type Daemon struct {
 	managerCwd         string
 	lastPRReviewScan   time.Time
 	runCtx             context.Context
+	lastReviewScan     time.Time
 }
 
 // New creates a Daemon from the given config and spawner.
 func New(database *db.DB, cfg Config, spawner WorkerSpawner) *Daemon {
+	if cfg.PRReviewInterval <= 0 {
+		cfg.PRReviewInterval = 10 * time.Minute
+	}
+	if cfg.ReviewInterval <= 0 {
+		cfg.ReviewInterval = time.Hour
+	}
 	repos := cfg.Repos
 	if repos == nil {
 		repos = make(map[string]config.RepoConfig)
@@ -1152,6 +1161,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.scanPRReviews()
 		d.lastPRReviewScan = time.Now()
 	}
+	d.scanReview(time.Now())
+	d.lastReviewScan = time.Now()
 
 	ticker := time.NewTicker(d.cfg.PollInterval)
 	defer ticker.Stop()
@@ -1173,6 +1184,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 			if d.manager != nil && (d.cfg.PRReviewInterval <= 0 || time.Since(d.lastPRReviewScan) >= d.cfg.PRReviewInterval) {
 				d.scanPRReviews()
 				d.lastPRReviewScan = time.Now()
+			}
+			if d.cfg.ReviewInterval <= 0 || time.Since(d.lastReviewScan) >= d.cfg.ReviewInterval {
+				d.scanReview(time.Now())
+				d.lastReviewScan = time.Now()
 			}
 			d.checkPendingPRs()
 			d.cleanOrphanedWorktrees()

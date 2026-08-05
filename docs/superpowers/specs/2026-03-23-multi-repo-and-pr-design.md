@@ -37,7 +37,8 @@ max_workers = 2
 
 ### Notes
 
-- `path` must be an absolute path to a valid git repo (daemon validates on startup).
+- See the [README configuration section](../../../README.md#configuration) for
+  the current path validation and repository availability behavior.
 - Duplicate paths are rejected at parse time.
 - Global settings (poll interval, DB path, session dir) remain daemon CLI flags / env vars — they are process-level, not per-repo.
 - Future per-repo fields (e.g. `setup_command`, `test_command`) can be added without schema changes.
@@ -114,9 +115,8 @@ Added to ~/.dispatch/config.toml:
 ### With config.toml
 
 1. Parse `~/.dispatch/config.toml`.
-2. Validate each repo path is an absolute path to a valid git repo.
-3. If any repo is invalid, log a warning and skip it (don't fail the whole daemon).
-4. Proceed with valid repos.
+2. Apply the current config validation and availability behavior documented in
+   the [README](../../../README.md#configuration).
 
 ### Without config.toml (backwards compat)
 

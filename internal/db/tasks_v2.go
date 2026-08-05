@@ -28,14 +28,14 @@ func TruncateLabel(thought string) string {
 }
 
 const taskColumnsV2 = `id, title, description, status, block_reason, assignee,
-	parent_id, repo, base_branch, created_at, updated_at,
+	parent_id, repo, agent, base_branch, created_at, updated_at,
 	thought, label, mode, workdir, herdr_ws, herdr_tab, herdr_pane,
 	kill_reason, last_activity, acceptance_kind, acceptance, reject_count, reviewing`
 
 func (d *DB) scanTaskV2(row interface{ Scan(...any) error }) (*Task, error) {
 	t := &Task{}
 	err := row.Scan(&t.ID, &t.Title, &t.Description, &t.Status, &t.BlockReason,
-		&t.Assignee, &t.ParentID, &t.Repo, &t.BaseBranch, &t.CreatedAt, &t.UpdatedAt,
+		&t.Assignee, &t.ParentID, &t.Repo, &t.Agent, &t.BaseBranch, &t.CreatedAt, &t.UpdatedAt,
 		&t.Thought, &t.Label, &t.Mode, &t.Workdir, &t.HerdrWs, &t.HerdrTab,
 		&t.HerdrPane, &t.KillReason, &t.LastActivity,
 		&t.AcceptanceKind, &t.Acceptance, &t.RejectCount, &t.Reviewing)
@@ -49,6 +49,10 @@ func (d *DB) scanTaskV2(row interface{ Scan(...any) error }) (*Task, error) {
 // "worktree" or "in_place". The herdr coordinates are filled in afterwards
 // with SetRuntime, once the tab exists.
 func (d *DB) CaptureTask(thought, repo, mode string) (*Task, error) {
+	return d.CaptureTaskWithAgent(thought, repo, mode, nil)
+}
+
+func (d *DB) CaptureTaskWithAgent(thought, repo, mode string, agent *string) (*Task, error) {
 	if strings.TrimSpace(thought) == "" {
 		return nil, fmt.Errorf("thought must not be empty")
 	}
@@ -59,10 +63,10 @@ func (d *DB) CaptureTask(thought, repo, mode string) (*Task, error) {
 	label := TruncateLabel(thought)
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	_, err = d.q.Exec(
-		`INSERT INTO tasks (id, title, status, repo, thought, label, mode,
+		`INSERT INTO tasks (id, title, status, repo, agent, thought, label, mode,
 			created_at, updated_at, last_activity)
-		 VALUES (?, ?, 'live', ?, ?, ?, ?, ?, ?, ?)`,
-		taskID, label, repo, thought, label, mode, now, now, now,
+		 VALUES (?, ?, 'live', ?, ?, ?, ?, ?, ?, ?, ?)`,
+		taskID, label, repo, agent, thought, label, mode, now, now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert captured task: %w", err)
@@ -101,6 +105,24 @@ func (d *DB) GetTaskV2(taskID string) (*Task, error) {
 		return nil, fmt.Errorf("get task %q: %w", taskID, err)
 	}
 	return t, nil
+}
+
+// ReviewTasks returns every task with the v2 fields needed by the daemon scan.
+func (d *DB) ReviewTasks() ([]Task, error) {
+	rows, err := d.q.Query(`SELECT ` + taskColumnsV2 + ` FROM tasks ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("review tasks: %w", err)
+	}
+	defer rows.Close()
+	var out []Task
+	for rows.Next() {
+		t, err := d.scanTaskV2(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan review task: %w", err)
+		}
+		out = append(out, *t)
+	}
+	return out, rows.Err()
 }
 
 // SetLabel updates the display label. The label is a cache: it never feeds

@@ -44,6 +44,16 @@ func TestDaemonConfig_Defaults(t *testing.T) {
 	}
 }
 
+func TestDaemonNew_DefaultsReviewInterval(t *testing.T) {
+	d := New(openTestDB(t), Config{}, nil)
+	if d.cfg.ReviewInterval != time.Hour {
+		t.Errorf("ReviewInterval = %v, want 1h", d.cfg.ReviewInterval)
+	}
+	if d.cfg.PRReviewInterval != 10*time.Minute {
+		t.Errorf("PRReviewInterval = %v, want 10m", d.cfg.PRReviewInterval)
+	}
+}
+
 func TestBaseBranchForTaskOverride(t *testing.T) {
 	base := "feature/source"
 	d := &Daemon{baseBranch: "main"}

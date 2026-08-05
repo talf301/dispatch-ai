@@ -2,6 +2,9 @@ package daemon
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"os/exec"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
@@ -13,6 +16,48 @@ const (
 	RoleWorker   SpawnRole = "worker"
 	RoleReviewer SpawnRole = "reviewer"
 )
+
+const (
+	AgentClaude = "claude"
+	AgentCodex  = "codex"
+)
+
+func ValidateAgent(agent string) (*string, error) {
+	if agent == "" {
+		return nil, nil
+	}
+	if agent != AgentClaude && agent != AgentCodex {
+		return nil, fmt.Errorf("unknown agent %q (want claude or codex)", agent)
+	}
+	return &agent, nil
+}
+
+// ResolveAgent precedence: per-task flag > role env > configured value >
+// installed CLI auto-detection > claude default.
+func ResolveAgent(taskAgent, envKey, configured string) (string, error) {
+	for _, candidate := range []string{taskAgent, os.Getenv(envKey), configured} {
+		if candidate == "" {
+			continue
+		}
+		if _, err := ValidateAgent(candidate); err != nil {
+			return "", err
+		}
+		return candidate, nil
+	}
+	for _, candidate := range []string{AgentClaude, AgentCodex} {
+		if _, err := exec.LookPath(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return AgentClaude, nil
+}
+
+func stringValue(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
 
 // WorkerSpawner starts worker processes for tasks.
 type WorkerSpawner interface {
