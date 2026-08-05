@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dispatch-ai/dispatch/internal/config"
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
 
@@ -18,6 +19,14 @@ import (
 // error) makes this safe to call more than once for the same task, which
 // matters for both the retry queries below and daemon-restart recovery.
 func (d *Daemon) createPR(repoPath, headBranch string, task db.Task, allowZeroDiffSuccess bool) error {
+	mode := config.DefaultDeliveryMode
+	if repo, ok := d.repos[repoPath]; ok && repo.DeliveryMode != "" {
+		mode = repo.DeliveryMode
+	}
+	if mode == config.DeliveryModeLocalOnly {
+		return d.mergeLocal(repoPath, headBranch, task)
+	}
+
 	baseBranch, err := d.baseBranchFor(&task)
 	if err != nil {
 		return fmt.Errorf("resolve PR base: %w", err)
@@ -86,6 +95,21 @@ func (d *Daemon) createPR(repoPath, headBranch string, task db.Task, allowZeroDi
 	}
 
 	d.logger.Printf("created PR for %s (%s)", task.ID, task.Title)
+	return nil
+}
+
+func (d *Daemon) mergeLocal(repoPath, headBranch string, task db.Task) error {
+	baseBranch, err := d.baseBranchFor(&task)
+	if err != nil {
+		return fmt.Errorf("resolve local merge base: %w", err)
+	}
+	if err := MergeBranch(repoPath, headBranch, baseBranch); err != nil {
+		return fmt.Errorf("local merge %s into %s: %w", headBranch, baseBranch, err)
+	}
+	if err := d.db.MarkPRHandled(task.ID); err != nil {
+		return fmt.Errorf("record local merge: %w", err)
+	}
+	d.logger.Printf("locally merged %s into %s", task.ID, baseBranch)
 	return nil
 }
 
