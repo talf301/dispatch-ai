@@ -100,7 +100,7 @@ Rows show the label; **the focused row reveals the verbatim thought**. The label
 
 Mutations shell out to `dt` itself - the TUI never writes SQLite.
 
-Press `g` to capture a task. When multiple repositories are tracked, the TUI
+Press `g` to capture a task. When multiple available repositories are tracked, the TUI
 asks which repository to use and preselects the repository containing its
 current working directory.
 
@@ -176,6 +176,10 @@ For sites 2, 3, and 5 the output contract is strict by design: the single permit
 | `DISPATCH_WORKER_ESCALATION_MODEL` / `DISPATCH_WORKER_ESCALATE_AFTER` | `gpt-5.6-terra` / 2 for Codex | Worker model and rejected-review threshold for escalation |
 | `DISPATCH_BASE_BRANCH` / `--base-branch` | auto-detect | Merge target |
 | `~/.dispatch/config.toml` | — | Per-repo settings (`max_workers`) |
+
+Configured repository paths must be absolute. `dt tui` and `dispatchd` ignore
+entries that are not currently available Git repositories, so other configured
+repositories remain usable.
 
 ## Architecture
 
