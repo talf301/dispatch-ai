@@ -165,7 +165,7 @@ func startAgent(h mux.Mux, pane, taskID, sessionPath, agent string) error {
 	defer ticker.Stop()
 	deadline := time.NewTimer(30 * time.Second)
 	defer deadline.Stop()
-	args := []string{"--append-system-prompt-file", sessionPath}
+	args := startAgentArgs(taskID, sessionPath, agent)
 	var lastErr error
 	for {
 		if err := h.StartAgent("dispatch-"+taskID, agent, pane, startAgentAttemptTimeout, args); err == nil {
@@ -179,6 +179,13 @@ func startAgent(h mux.Mux, pane, taskID, sessionPath, agent string) error {
 			return fmt.Errorf("pane %s was not ready: %w", pane, lastErr)
 		}
 	}
+}
+
+func startAgentArgs(taskID, sessionPath, agent string) []string {
+	if agent == daemon.AgentCodex {
+		return []string{"--dangerously-bypass-approvals-and-sandbox", agentctx.SessionPrompt(taskID)}
+	}
+	return []string{"--append-system-prompt-file", sessionPath}
 }
 
 // checkDedup is the two-stage capture-time dedup (M3). Stage 1 is free and
