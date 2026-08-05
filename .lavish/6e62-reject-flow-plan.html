@@ -1,0 +1,460 @@
+<title>Repeated-rejection flow - 6e62 case study</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  :where(.grid, .flex) > * { min-width: 0; }
+  :where(p, h1, h2, h3, h4, li, dd, blockquote, td, th, .badge) { overflow-wrap: anywhere; }
+  html { scroll-behavior: smooth; }
+  .diff-host { max-height: 560px; overflow: auto; border-radius: var(--radius-box, 1rem); }
+  .diff-host :is(pre, code) { font-size: 12.5px; }
+</style>
+
+<html data-theme="luxury">
+<main class="mx-auto max-w-6xl px-5 py-8 lg:px-8 lg:py-12 space-y-10">
+
+  <section class="space-y-3">
+    <div class="flex flex-wrap items-center gap-2">
+      <div class="badge badge-soft badge-warning">design review · daemon reject flow</div>
+      <div class="badge badge-success gap-1">fix implemented + tested</div>
+    </div>
+    <h1 class="text-3xl lg:text-4xl font-bold">When automated review keeps rejecting, what should actually happen?</h1>
+    <p class="text-base-content/70 max-w-3xl">
+      Case study: task <span class="font-mono">6e62</span> ("In-canvas terminals: backend pty bridge"), currently
+      <span class="badge badge-error badge-sm align-middle">blocked</span> with reason <em>"reviewer rejected the work."</em>
+      It went through 5 reviewer spawns. Reading the actual notes and session logs, only 2 of those were real content
+      rejections - the other 3 outcomes were misclassified by a bug in <span class="font-mono">daemon.go</span>. Fixed and
+      tested below; a related fragility in how the reject count survived restarts got cleaned up along the way.
+    </p>
+  </section>
+
+  <section class="stats stats-vertical sm:stats-horizontal shadow bg-base-100 w-full">
+    <div class="stat">
+      <div class="stat-title">Reviewer spawns</div>
+      <div class="stat-value">5</div>
+      <div class="stat-desc">rounds 1–5</div>
+    </div>
+    <div class="stat">
+      <div class="stat-title">Real content rejections</div>
+      <div class="stat-value text-error">2</div>
+      <div class="stat-desc">round 1, round 2 - genuine bugs, fixed by the worker</div>
+    </div>
+    <div class="stat">
+      <div class="stat-title">Approvals misfired as rejects</div>
+      <div class="stat-value text-warning">2</div>
+      <div class="stat-desc">round 3, round 5 - reviewer said <span class="font-mono">VERDICT: approve</span></div>
+    </div>
+    <div class="stat">
+      <div class="stat-title">Infra failure</div>
+      <div class="stat-value">1</div>
+      <div class="stat-desc">round 4 - "Execution error," separate issue</div>
+    </div>
+  </section>
+
+  <section class="space-y-4">
+    <h2 class="text-xl font-semibold">What actually happened</h2>
+    <ul class="timeline timeline-vertical lg:timeline-horizontal w-full">
+      <li>
+        <div class="timeline-start text-xs text-base-content/60">round 1</div>
+        <div class="timeline-middle"><span class="badge badge-error badge-sm">reject</span></div>
+        <div class="timeline-end timeline-box">Shared tmux "current window" bug - real, worker fixed it.</div>
+        <hr class="bg-error"/>
+      </li>
+      <li>
+        <hr class="bg-error"/>
+        <div class="timeline-start text-xs text-base-content/60">round 2</div>
+        <div class="timeline-middle"><span class="badge badge-error badge-sm">reject</span></div>
+        <div class="timeline-end timeline-box">Per-connection view-counter collision - real, worker fixed it.</div>
+        <hr class="bg-warning"/>
+      </li>
+      <li>
+        <hr class="bg-warning"/>
+        <div class="timeline-start text-xs text-base-content/60">round 3</div>
+        <div class="timeline-middle"><span class="badge badge-warning badge-sm">approve, but…</span></div>
+        <div class="timeline-end timeline-box">
+          Reviewer verified everything, printed <span class="font-mono text-xs">VERDICT: approve</span>, and also left an
+          informational <span class="font-mono text-xs">dt note</span> (a heads-up for task 1fd4). The daemon saw
+          "reviewer left a note" and treated it as a rejection. <span class="font-semibold">reviewRound hits 3, task blocked.</span>
+        </div>
+        <hr class="bg-neutral"/>
+      </li>
+      <li>
+        <hr class="bg-neutral"/>
+        <div class="timeline-start text-xs text-base-content/60">round 4</div>
+        <div class="timeline-middle"><span class="badge badge-neutral badge-sm">infra</span></div>
+        <div class="timeline-end timeline-box">
+          Human reopened. Reviewer session logged just <span class="font-mono text-xs">"Execution error"</span> - no verdict,
+          no note. Blocked again via the separate crash/malformed-output path. Not evidence of the same bug - flagging it,
+          not diagnosing it further here.
+        </div>
+        <hr class="bg-warning"/>
+      </li>
+      <li>
+        <hr class="bg-warning"/>
+        <div class="timeline-start text-xs text-base-content/60">round 5</div>
+        <div class="timeline-middle"><span class="badge badge-warning badge-sm">approve, but…</span></div>
+        <div class="timeline-end timeline-box">
+          Human reopened again. Reviewer re-verified (no source changes needed), approved, left a note again - same
+          misclassification. <span class="font-semibold">Currently blocked, again, on already-approved work.</span>
+        </div>
+      </li>
+    </ul>
+  </section>
+
+  <section class="space-y-4">
+    <h2 class="text-xl font-semibold">Root cause</h2>
+    <p class="text-base-content/70 max-w-3xl">
+      <span class="font-mono text-sm">handleReviewerResult</span> in <span class="font-mono text-sm">internal/daemon/daemon.go</span>
+      checks <em>"did the reviewer leave a new note"</em> before it checks the actual verdict. That check used to be safe: the
+      function it replaced was only ever called after a non-zero exit, where a note could only mean an intentional reject.
+      Now it's called on every reviewer exit, approve included - and <span class="font-mono text-xs">prompts/reviewer.md</span>
+      never told the reviewer it <em>couldn't</em> leave a note on approval, so it reasonably does (round 3's note carried a
+      real, useful warning for 1fd4). Any note now short-circuits straight into the rejection path, no matter what the verdict says.
+    </p>
+    <div class="alert alert-error">
+      <span><span class="font-mono text-xs">internal/daemon/daemon.go:791</span> - <span class="font-mono text-xs">if newReviewerNote {</span> fires before <span class="font-mono text-xs">parseVerdict(handle.Output())</span> is ever consulted.</span>
+    </div>
+    <div id="rootcause-diff" class="diff-host border border-base-content/10 bg-base-100"></div>
+  </section>
+
+  <section class="space-y-4">
+    <h2 class="text-xl font-semibold">The fix</h2>
+    <p class="text-base-content/70 max-w-3xl">
+      Decide approve/reject from the verdict first - a note never overrides an explicit
+      <span class="font-mono text-xs">VERDICT: approve</span>. Reject is decided by the verdict content alone too (a
+      compliant reject exits non-zero on purpose, so exit code can't gate that branch). Notes are still used - just as the
+      <em>reason text</em> for a confirmed rejection, not as the signal that one happened. No recursion, no new state, same
+      bounded reopen/rejectCap loop and same protocol-retry-then-block path for malformed/crash output.
+    </p>
+    <div id="fix-diff" class="diff-host border border-base-content/10 bg-base-100"></div>
+    <div class="alert alert-success">
+      <span>Shipped, with two new tests in <span class="font-mono text-xs">tests/review_gate_test.go</span>:
+      <span class="font-mono text-xs">TestDaemonIntegration_ApprovalWithNoteIsNotARejection</span> (reviewer prints
+      <span class="font-mono text-xs">VERDICT: approve</span>, exits 0, <em>and</em> leaves a note → task goes
+      <span class="font-mono text-xs">done</span>, not blocked - the exact case that shipped this bug) and
+      <span class="font-mono text-xs">TestDaemonIntegration_RejectCountPersistsAcrossRestart</span> (a task seeded with
+      2 prior rejections blocks on its very next rejection under a brand-new daemon instance, instead of getting a fresh
+      3-strike budget). Two existing test fixtures (<span class="font-mono text-xs">rejectingReviewSpawner</span>,
+      <span class="font-mono text-xs">dtDoneRejectSpawner</span>) were coupled to the old bug - they simulated "rejection"
+      with a note but no <span class="font-mono text-xs">VERDICT: reject</span> line, which the fix no longer honors. Updated
+      both to a compliant <span class="font-mono text-xs">rejectHandle</span>. Full suite green, <span class="font-mono text-xs">go vet</span> clean.</span>
+    </div>
+  </section>
+
+  <section class="space-y-4">
+    <h2 class="text-xl font-semibold">The persistence question - resolved</h2>
+    <p class="text-base-content/70 max-w-3xl">
+      Correction after digging further: the reject-round counter did <em>not</em> flatly reset to zero on
+      <span class="font-mono text-xs">dt reopen</span>. It's an in-memory map, but <span class="font-mono text-xs">spawnReady</span>
+      re-derives it from disk on any cache miss via <span class="font-mono text-xs">recoverReviewRound</span> - a
+      <span class="font-mono text-xs">filepath.Glob(taskID+"-review-*.log")</span> count of session log files. That's why
+      6e62 re-blocked after just one more misclassified note instead of needing three: the glob had already accumulated
+      5 files by the time of the last reopen. It sort of worked, by accident.
+    </p>
+    <p class="text-base-content/70 max-w-3xl">
+      That's fragile on three counts: it depends on session log files never being pruned, the glob pattern
+      <span class="font-mono text-xs">*-review-*</span> also matches <span class="font-mono text-xs">*-review-protocol-*</span>
+      files (so a malformed-verdict retry silently counts as a "rejection round" too), and it only works when
+      <span class="font-mono text-xs">SessionDir</span> happens to be configured. The DB already has a
+      <span class="font-mono text-xs">reject_count</span> column and an <span class="font-mono text-xs">IncrementRejectCount</span>
+      method, proven in production by the v2 unattended path - so the fix was a straight swap: delete the glob-recovery hack,
+      read/write the same column v1 already had sitting unused in its own <span class="font-mono text-xs">Task</span> struct.
+      Net deletion, not addition.
+    </p>
+    <div class="overflow-x-auto rounded-box border border-base-content/10 bg-base-100">
+      <table class="table">
+        <thead><tr><th></th><th>Before</th><th>After (shipped)</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="font-medium">Reject count storage</td>
+            <td><span class="font-mono text-xs">d.reviewRound</span> map, rebuilt from a log-file glob</td>
+            <td><span class="font-mono text-xs">reject_count</span> DB column via <span class="font-mono text-xs">GetRejectCount</span> / <span class="font-mono text-xs">IncrementRejectCount</span></td>
+          </tr>
+          <tr>
+            <td class="font-medium">Counts non-rejection spawns as strikes</td>
+            <td><span class="badge badge-warning badge-sm">yes</span> - glob matches protocol-retry logs too</td>
+            <td><span class="badge badge-success badge-sm">no</span> - only incremented on a confirmed content rejection</td>
+          </tr>
+          <tr>
+            <td class="font-medium">Survives <span class="font-mono text-xs">dt reopen</span> / daemon restart</td>
+            <td>yes, but only as a side effect of unrelated log files existing</td>
+            <td><span class="badge badge-success badge-sm">yes</span>, explicitly</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="alert alert-success">
+      <span>Shipped: <span class="font-mono text-xs">internal/db/tasks_v2.go</span> gained <span class="font-mono text-xs">GetRejectCount</span>;
+      <span class="font-mono text-xs">daemon.go</span> lost the <span class="font-mono text-xs">reviewRound</span> map and
+      <span class="font-mono text-xs">recoverReviewRound</span> entirely and now reads/writes the DB column at every call site
+      (spawn-time escalation check, review log-suffix numbering, and the reject-cap decision). Two new tests cover it -
+      see below.</span>
+    </div>
+  </section>
+
+  <section class="space-y-3">
+    <h2 class="text-xl font-semibold">What to do with 6e62 right now</h2>
+    <div class="alert alert-success">
+      <span>
+        Its implementation has now been reviewer-approved three separate times (rounds 3 and 5, plus the round-4 worker
+        re-verification) with zero source changes since commit <span class="font-mono text-xs">19cdfe3</span>.
+      </span>
+    </div>
+    <div class="alert alert-warning">
+      <span>
+        One catch: the running <span class="font-mono text-xs">dispatchd</span> (pid from <span class="font-mono text-xs">/Users/tal/go/bin/dispatchd</span>)
+        is a compiled binary predating this fix - it still has the bug in memory. The fix won't take effect for 6e62 (or
+        anything else) until that binary is rebuilt (<span class="font-mono text-xs">go build -o ~/go/bin/dispatchd ./cmd/dispatchd</span>)
+        and the daemon is restarted. That's a live-process restart, so leaving it to you rather than doing it myself.
+        After that, <span class="font-mono text-xs">dt reopen 6e62</span> should go straight to done.
+      </span>
+    </div>
+  </section>
+
+</main>
+</html>
+
+<script type="module">
+  import { FileDiff } from "https://esm.sh/@pierre/diffs@1.2.10?bundle";
+
+  const theme = { light: "github-light", dark: "github-dark" };
+  const options = { theme, themeType: "dark", overflow: "wrap" };
+
+  const rootcauseOld = {
+    name: "internal/daemon/daemon.go",
+    contents: `func (d *Daemon) handleReviewerResult(taskID string, handle WorkerHandle, exitErr error) {
+	notes, err := d.db.GetNotes(taskID)
+	if err != nil {
+		d.logger.Printf("review-result: get notes %s: %v", taskID, err)
+	}
+
+	startCount := d.noteCountAtReviewStart[taskID]
+	if startCount > len(notes) {
+		startCount = len(notes)
+	}
+	newReviewerNote := false
+	for _, note := range notes[startCount:] {
+		if note.Author != nil && *note.Author == "reviewer" {
+			newReviewerNote = true
+			break
+		}
+	}
+	if newReviewerNote {
+		// BUG: fires on ANY new reviewer note, including one left
+		// alongside an explicit VERDICT: approve. parseVerdict below
+		// never gets a chance to run.
+		reason := "reviewer rejected the work"
+		for _, note := range notes[startCount:] {
+			if note.Author != nil && *note.Author == "reviewer" {
+				reason += "\\n\\n" + note.Content
+			}
+		}
+		if len(reason) > 4000 {
+			reason = reason[:4000]
+		}
+		d.reviewRound[taskID]++
+		if d.reviewRound[taskID] < rejectCap {
+			d.retrying[taskID] = true
+			if _, err := d.db.ReopenTask(taskID); err != nil {
+				d.logger.Printf("review-reject: reopen task %s: %v", taskID, err)
+				delete(d.retrying, taskID)
+				return
+			}
+			d.logger.Printf("task %s review rejected (repair round %d), reopening", taskID, d.reviewRound[taskID])
+			return
+		}
+		rejections := d.reviewRound[taskID]
+		if _, err := d.db.BlockTask(taskID, reason); err != nil {
+			d.logger.Printf("review-reject: block task %s: %v", taskID, err)
+			return
+		}
+		d.closeWorkerTab(taskID)
+		delete(d.reviewRound, taskID)
+		delete(d.protocolRetries, taskID)
+		delete(d.noteCountAtReviewStart, taskID)
+		delete(d.workerRepo, taskID)
+		delete(d.retrying, taskID)
+		d.logger.Printf("task %s review rejected %d times; blocked", taskID, rejections)
+		return
+	}
+
+	// Dead code today for any reviewer that leaves a note - including
+	// every prompt-compliant approval that also files a heads-up note.
+	ok, rejectReason, verdictErr := parseVerdict(handle.Output())
+	if exitErr == nil && verdictErr == nil && ok {
+		d.handleReviewApproval(taskID)
+		return
+	}
+	if exitErr == nil && verdictErr == nil && !ok {
+		author := "reviewer"
+		if _, err := d.db.AddNote(taskID, "Reviewer rejection: "+rejectReason, &author); err != nil {
+			d.logger.Printf("review-result: record rejection %s: %v", taskID, err)
+		}
+		d.handleReviewerResult(taskID, handle, exitErr)
+		return
+	}
+	if exitErr == nil && verdictErr != nil && d.protocolRetries[taskID] < 2 {
+		d.protocolRetries[taskID]++
+		if err := d.retryReviewer(taskID); err != nil {
+			d.logger.Printf("review-result: retry malformed reviewer %s: %v", taskID, err)
+		} else {
+			d.logger.Printf("task %s reviewer protocol retry %d/2", taskID, d.protocolRetries[taskID])
+			return
+		}
+	}
+
+	reason := "Reviewer did not provide an explicit approval verdict"
+	if verdictErr == nil && !ok {
+		reason = "Reviewer rejected without a feedback note: " + rejectReason
+	} else if exitErr != nil {
+		reason = fmt.Sprintf("Reviewer exited: %v", exitErr)
+	}
+	if output := handle.Output(); output != "" {
+		reason += "\\n\\nLast output:\\n" + output
+	}
+	if len(reason) > 4000 {
+		reason = reason[:4000]
+	}
+	repoPath := d.workerRepo[taskID]
+	wtDir := filepath.Join(d.worktreeBase, taskID)
+	branchName := fmt.Sprintf("dispatch/%s", taskID)
+	if _, err := d.db.BlockTask(taskID, reason); err != nil {
+		d.logger.Printf("review-result: block task %s: %v", taskID, err)
+	}
+	if err := RemoveWorktree(repoPath, wtDir, branchName, false); err != nil {
+		d.logger.Printf("review-result: cleanup worktree %s: %v", taskID, err)
+	}
+	d.closeWorkerTab(taskID)
+	delete(d.reviewRound, taskID)
+	delete(d.protocolRetries, taskID)
+	delete(d.noteCountAtReviewStart, taskID)
+	delete(d.workerRepo, taskID)
+	delete(d.retrying, taskID)
+	d.logger.Printf("task %s blocked: reviewer result was not an approval", taskID)
+}`,
+  };
+
+  new FileDiff({ ...options, diffStyle: "unified" }).render({
+    containerWrapper: document.querySelector("#rootcause-diff"),
+    oldFile: rootcauseOld,
+    newFile: rootcauseOld,
+  });
+
+  const fixOld = rootcauseOld;
+  const fixNew = {
+    name: "internal/daemon/daemon.go",
+    contents: `func (d *Daemon) handleReviewerResult(taskID string, handle WorkerHandle, exitErr error) {
+	ok, rejectReason, verdictErr := parseVerdict(handle.Output())
+
+	// Approval is decided by the verdict alone. A reviewer leaving an
+	// informational note (e.g. a heads-up for downstream work) must not be
+	// mistaken for a rejection.
+	if exitErr == nil && verdictErr == nil && ok {
+		d.handleReviewApproval(taskID)
+		return
+	}
+
+	// Explicit content rejection. A compliant reject exits non-zero on
+	// purpose (see prompts/reviewer.md), so exitErr can't gate this branch.
+	if verdictErr == nil && !ok {
+		notes, err := d.db.GetNotes(taskID)
+		if err != nil {
+			d.logger.Printf("review-result: get notes %s: %v", taskID, err)
+		}
+		startCount := d.noteCountAtReviewStart[taskID]
+		if startCount > len(notes) {
+			startCount = len(notes)
+		}
+		reason := "reviewer rejected the work"
+		hadNote := false
+		for _, note := range notes[startCount:] {
+			if note.Author != nil && *note.Author == "reviewer" {
+				reason += "\\n\\n" + note.Content
+				hadNote = true
+			}
+		}
+		if !hadNote {
+			reason += "\\n\\n" + rejectReason
+		}
+		if len(reason) > 4000 {
+			reason = reason[:4000]
+		}
+
+		// reject_count is a DB column, not an in-memory map - it survives
+		// a daemon restart and a human dt reopen (see below).
+		rejections, err := d.db.IncrementRejectCount(taskID)
+		if err != nil {
+			d.logger.Printf("review-reject: increment reject count %s: %v", taskID, err)
+			return
+		}
+		if rejections < rejectCap {
+			d.retrying[taskID] = true
+			if _, err := d.db.ReopenTask(taskID); err != nil {
+				d.logger.Printf("review-reject: reopen task %s: %v", taskID, err)
+				delete(d.retrying, taskID)
+				return
+			}
+			d.logger.Printf("task %s review rejected (repair round %d), reopening", taskID, rejections)
+			return
+		}
+		if _, err := d.db.BlockTask(taskID, reason); err != nil {
+			d.logger.Printf("review-reject: block task %s: %v", taskID, err)
+			return
+		}
+		d.closeWorkerTab(taskID)
+		delete(d.protocolRetries, taskID)
+		delete(d.noteCountAtReviewStart, taskID)
+		delete(d.workerRepo, taskID)
+		delete(d.retrying, taskID)
+		d.logger.Printf("task %s review rejected %d times; blocked", taskID, rejections)
+		return
+	}
+
+	// Malformed verdict or crash - an infrastructure failure, not a
+	// content rejection. Bounded protocol retries, then block outright.
+	if exitErr == nil && verdictErr != nil && d.protocolRetries[taskID] < 2 {
+		d.protocolRetries[taskID]++
+		if err := d.retryReviewer(taskID); err != nil {
+			d.logger.Printf("review-result: retry malformed reviewer %s: %v", taskID, err)
+		} else {
+			d.logger.Printf("task %s reviewer protocol retry %d/2", taskID, d.protocolRetries[taskID])
+			return
+		}
+	}
+
+	reason := "Reviewer did not provide an explicit approval verdict"
+	if exitErr != nil {
+		reason = fmt.Sprintf("Reviewer exited: %v", exitErr)
+	}
+	if output := handle.Output(); output != "" {
+		reason += "\\n\\nLast output:\\n" + output
+	}
+	if len(reason) > 4000 {
+		reason = reason[:4000]
+	}
+	repoPath := d.workerRepo[taskID]
+	wtDir := filepath.Join(d.worktreeBase, taskID)
+	branchName := fmt.Sprintf("dispatch/%s", taskID)
+	if _, err := d.db.BlockTask(taskID, reason); err != nil {
+		d.logger.Printf("review-result: block task %s: %v", taskID, err)
+	}
+	if err := RemoveWorktree(repoPath, wtDir, branchName, false); err != nil {
+		d.logger.Printf("review-result: cleanup worktree %s: %v", taskID, err)
+	}
+	d.closeWorkerTab(taskID)
+	delete(d.reviewRound, taskID)
+	delete(d.protocolRetries, taskID)
+	delete(d.noteCountAtReviewStart, taskID)
+	delete(d.workerRepo, taskID)
+	delete(d.retrying, taskID)
+	d.logger.Printf("task %s blocked: reviewer result was not an approval", taskID)
+}`,
+  };
+
+  new FileDiff({ ...options, diffStyle: "split" }).render({
+    containerWrapper: document.querySelector("#fix-diff"),
+    oldFile: fixOld,
+    newFile: fixNew,
+  });
+</script>

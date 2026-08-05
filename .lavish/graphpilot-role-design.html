@@ -1,0 +1,103 @@
+<title>What is graph-pilot for?</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  :where(.grid, .flex) > * { min-width: 0; }
+  :where(p, h1, h2, h3, h4, li, dd, blockquote, figcaption, td, th, .badge, .label) { overflow-wrap: anywhere; }
+  :where(img, svg, video, canvas, iframe) { max-width: 100%; height: auto; }
+  .src { font-size: 0.7rem; color: color-mix(in oklch, currentColor 55%, transparent); }
+  .opt-card { border: 2px solid color-mix(in oklch, currentColor 10%, transparent); }
+</style>
+<div data-theme="luxury">
+<main class="mx-auto max-w-6xl p-5 lg:p-10 space-y-10">
+
+  <header class="space-y-3">
+    <div class="badge badge-soft badge-primary">Design conversation</div>
+    <h1 class="text-3xl lg:text-4xl font-bold leading-tight">What should graph-pilot actually be?</h1>
+    <p class="text-base-content/70 max-w-3xl">Three systems now touch "planning and execution of work": Linear, dispatch, and graph-pilot. Before doing any more borrowing/design work on dispatch, worth resolving what graph-pilot's actual remaining job is &mdash; because the evidence suggests it doesn't have one yet.</p>
+  </header>
+
+  <div role="alert" class="alert alert-error alert-vertical sm:alert-horizontal shadow-sm">
+    <div>
+      <h3 class="font-bold">The load-bearing fact: graph-pilot has never been used on a real project</h3>
+      <div class="text-sm mt-1">Checked directly against your actual Obsidian vault (<code class="text-xs">~/Library/Mobile Documents/.../vault/</code>): zero files contain <code class="text-xs">gp: true</code>, there's no <code class="text-xs">graphpilot.yaml</code> at the vault root (required for <code class="text-xs">gp</code> to even locate it), and the only node-shaped content anywhere in the repo is synthetic test fixtures. Meanwhile your own daily note from two days ago (<code class="text-xs">2026-07-29.md</code>) reads: <i>"mapped out the big next steps to make graph-pilot actually worth using"</i> &mdash; and that same day's app-usage log shows 24 minutes in Linear, with daily notes full of real Linear issue IDs (RES-125, RES-126, RES-141) as the actual day-to-day task references. Linear is where planning happens today. Graph-pilot is source code, specs, and tests.</div>
+    </div>
+  </div>
+
+  <section class="space-y-3">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">What graph-pilot was designed to be</h2>
+    <div class="grid md:grid-cols-2 gap-4">
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title text-base">Original intent (March 2026 PRD + integration spec)</h3>
+          <p class="text-sm">An Obsidian-vault-based visual planning surface with "first-class dispatch to Claude Code for implementation." Cycle: <code class="text-xs">gp design</code> (Claude drafts planning nodes) &rarr; review in Obsidian's graph view &rarr; <code class="text-xs">gp launch</code> (single session on one node) or <code class="text-xs">gp dispatch</code> (fan out to parallel dispatch tasks) &rarr; <code class="text-xs">gp complete</code> cascades unblocks. Explicit non-goal: <i>"Replacing GitHub Issues, Jira, or any external project management tool."</i> The GP/dispatch design principle, verbatim: <i>"GP is source of truth for planning; Dispatch is source of truth for execution. Neither system fully subsumes the other."</i></p>
+          <p class="src mt-1">graphpilot-prd.md, docs/superpowers/specs/2026-03-24-gp-dispatch-integration-design.md</p>
+        </div>
+      </div>
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <h3 class="card-title text-base">What's actually crept in since</h3>
+          <p class="text-sm">A <code class="text-xs">Bug</code> node type, a dashboard "bug drawer" and report form (git log <code class="text-xs">de62c2d</code>), a live <code class="text-xs">gp serve</code> dashboard, Obsidian <code class="text-xs">canvas</code> export, and (July 29) an in-canvas terminal overlay. The bug-tracking pieces directly contradict the PRD's own non-goal &mdash; the code has been drifting toward "replace an issue tracker" while the docs still say it explicitly won't. This is the same territory Linear already occupies, and occupies today, with real usage.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="space-y-4">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Three ways to resolve this</h2>
+    <p class="text-sm text-base-content/70">Not mutually compatible &mdash; pick one direction rather than letting the current drift continue by default.</p>
+
+    <div class="opt-card rounded-box bg-base-100 p-4 space-y-2 border-success/50">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <h3 class="font-semibold text-lg">A. Graph-pilot becomes a pure interface &mdash; over Linear <i>and</i> dispatch</h3>
+        <span class="badge badge-soft badge-success badge-sm">leans toward your framing</span>
+      </div>
+      <p class="text-sm">Drop the vault as an independent source of truth. Graph-pilot becomes a visualization/launch layer: pull issues from Linear (via its API) and tasks from dispatch's SQLite, render the dependency graph and canvas from that combined read, and keep <code class="text-xs">gp launch</code>/<code class="text-xs">gp dispatch</code> as the "start work on this Linear issue" action. No independent node content, no bug-tracking node type &mdash; that's Linear's job now, explicitly.</p>
+      <p class="text-sm"><b>Answers your question directly:</b> yes, it's just an interface for dispatch &mdash; and for Linear too. Not a third planning substrate.</p>
+      <p class="text-sm"><b>Cost:</b> real integration work (a Linear API client, a mapping from Linear issue &harr; graph node &harr; dispatch task), and gives up the graph-native dependency modeling Linear's flat issue model doesn't really have.</p>
+    </div>
+
+    <div class="opt-card rounded-box bg-base-100 p-4 space-y-2 border-warning/50">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <h3 class="font-semibold text-lg">B. Graph-pilot stays an independent planning substrate &mdash; but narrows to what Linear can't do</h3>
+        <span class="badge badge-soft badge-warning badge-sm">keeps original intent, needs real scoping</span>
+      </div>
+      <p class="text-sm">Keep the vault as its own source of truth, but explicitly retreat from anything Linear-shaped: kill the <code class="text-xs">Bug</code> node type and dashboard bug-drawer, stop trying to be a tracker. Scope graph-pilot specifically to messy, pre-formal technical shape-of-work &mdash; the multi-node dependency graphs and architecture sketching that happen <i>before</i> something becomes a clean enough Linear issue to file. A scratchpad/whiteboard layer that occasionally exports a formalized chunk into Linear once it's real.</p>
+      <p class="text-sm"><b>Cost:</b> requires actually defining "what's too messy for Linear yet" as a real, honest boundary &mdash; the same kind of boundary that already blurred once (bug tracking) without anyone deciding it should.</p>
+    </div>
+
+    <div class="opt-card rounded-box bg-base-100 p-4 space-y-2 border-error/50">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <h3 class="font-semibold text-lg">C. Retire graph-pilot's planning ambitions; keep only the dispatch hook</h3>
+        <span class="badge badge-soft badge-error badge-sm">cut losses</span>
+      </div>
+      <p class="text-sm">Given zero real usage after ~4 months and Linear already doing the job, stop investing in graph-pilot as a planning surface at all. Linear handles planning, dispatch handles execution (including its own emerging M6 "PM cadence" / orphan-detection). If the <code class="text-xs">gp sync-child</code>/<code class="text-xs">gp dispatch</code> hook idea is still valuable, it becomes a much smaller "Linear &harr; dispatch" integration instead of a whole separate vault-based app to maintain.</p>
+      <p class="text-sm"><b>Cost:</b> writes off the March design and the graph/dependency-visualization idea entirely &mdash; only right if graph-native dependency modeling turns out not to matter to you in practice.</p>
+    </div>
+  </section>
+
+  <div role="alert" class="alert alert-info alert-vertical sm:alert-horizontal shadow-sm">
+    <div>
+      <h3 class="font-bold">My read, offered as a starting point, not a conclusion</h3>
+      <div class="text-sm mt-1">The evidence points at (A) or (C) over (B): "most of that should happen in Linear" is your own framing, Linear is the tool with actual daily usage, and (B) requires holding a boundary that has already drifted once without anyone deciding it should. Between A and C: A preserves the one thing Linear structurally isn't good at (multi-node dependency/readiness graphs), if that's a real need; C is the more honest move if the graph-native visualization was more interesting in theory than in the 4 months of practice so far. Worth being honest with yourself about which one that is before committing engineering time either way.</div>
+    </div>
+  </div>
+
+  <section class="space-y-3">
+    <h2 class="text-2xl font-bold border-b border-base-content/10 pb-2">Open questions to resolve before implementation</h2>
+    <ul class="list-disc pl-5 text-sm space-y-1 text-base-content/80">
+      <li>Has the graph-native dependency/readiness visualization (nodes, links, <code class="text-xs">findReady</code>) actually been missed in the last 4 months, or was Linear's flat issue+project model sufficient the whole time?</li>
+      <li>If (A): does Linear's API expose enough (custom fields, relations) to represent dependency graphs it doesn't natively model well, or does graph-pilot end up re-inventing that layer anyway just reading from Linear instead of its own vault?</li>
+      <li>If (B): who enforces the "no bug tracking, no Linear-shaped features" boundary going forward, given it already slipped once with no explicit decision behind it?</li>
+      <li>Regardless of A/B/C: does dispatch's own M6 "PM cadence" (orphan detection, <code class="text-xs">dt review</code> digest) still want a GraphPilot dependency to cross-reference against, or should it target Linear directly instead, given graph-pilot's real-world adoption question mark?</li>
+    </ul>
+  </section>
+
+  <footer class="text-xs text-base-content/50 pt-4 border-t border-base-content/10">
+    Findings verified directly against ~/Documents/graph-pilot (source, specs, git log) and the user's actual Obsidian vault contents &mdash; not assumed from the PRD alone.
+  </footer>
+
+</main>
+</div>

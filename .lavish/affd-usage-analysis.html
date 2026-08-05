@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>affd Codex usage analysis</title>
+<style>
+:root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#17202a;background:#f5f7f9;line-height:1.45}body{max-width:980px;margin:0 auto;padding:42px 24px}h1{font-size:34px;line-height:1.1;margin:0 0 10px}h2{font-size:20px;margin:34px 0 10px}.lede{color:#52606d;font-size:17px;max-width:760px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:26px 0}.card{background:white;border:1px solid #dfe5eb;border-radius:12px;padding:16px;min-width:0}.value{font-size:25px;font-weight:700}.label{font-size:12px;color:#687684;text-transform:uppercase;letter-spacing:.06em}.bar{height:10px;background:#e7edf2;border-radius:8px;overflow:hidden;margin:8px 0}.fill{height:100%;background:#d66b4d}.fill.blue{background:#4677a8}table{width:100%;border-collapse:collapse;background:white;border:1px solid #dfe5eb;border-radius:12px;overflow:hidden}th,td{text-align:left;padding:11px 13px;border-bottom:1px solid #edf0f3}th{font-size:12px;color:#687684;text-transform:uppercase;letter-spacing:.05em}td:last-child,th:last-child{text-align:right}.callout{background:#fff5e9;border-left:4px solid #d66b4d;padding:15px 18px;border-radius:6px}.muted{color:#687684;font-size:14px}.foot{margin-top:32px;color:#687684;font-size:13px}
+@media(max-width:700px){body{padding:24px 15px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}table{font-size:13px}th,td{padding:9px 7px}}
+</style>
+</head>
+<body>
+<div class="label">Local session log review · 2026-07-28 19:18 UTC to 2026-07-29 19:18 UTC</div>
+<h1>Why affd consumed 33.6M tokens</h1>
+<p class="lede">The cost came from five autonomous attempts on the same task. Each attempt repeatedly ran tools while debugging a typed workflow, and every turn carried forward a large cached conversation context.</p>
+<div class="callout"><strong>Bottom line:</strong> affd spent 33.57M total tokens, but only 105K were generated output. About 32.74M were cached input. The expensive behavior was repeated context replay across retries, not verbose answers.</div>
+<div class="grid">
+<div class="card"><div class="label">Total</div><div class="value">33.57M</div><div class="muted">5 sessions</div></div>
+<div class="card"><div class="label">Cached input</div><div class="value">32.74M</div><div class="muted">97.8% of total</div></div>
+<div class="card"><div class="label">Tool calls</div><div class="value">345</div><div class="muted">all exec calls</div></div>
+<div class="card"><div class="label">Output</div><div class="value">105K</div><div class="muted">0.3% of total</div></div>
+</div>
+<h2>Session breakdown</h2>
+<table><thead><tr><th>Attempt</th><th>Outcome</th><th>Tool calls</th><th>Tokens</th></tr></thead><tbody>
+<tr><td>1</td><td>Committed initial example; verification partly blocked</td><td>40</td><td>3.50M</td></tr>
+<tr><td>2</td><td>Blocked; partial replacement still produced zero plans</td><td>94</td><td>9.83M</td></tr>
+<tr><td>3</td><td>Committed implementation; regression remained</td><td>83</td><td>8.01M</td></tr>
+<tr><td>4</td><td>Blocked after isolating tuple-typed handoff failure</td><td>117</td><td>11.77M</td></tr>
+<tr><td>5</td><td>Blocked because required dependency files were missing</td><td>11</td><td>0.46M</td></tr>
+</tbody></table>
+<h2>What inflated the context</h2>
+<div class="card"><p><strong>1. Repeated retries.</strong> Four sessions attempted or revisited the same affd task. Three ended blocked and two committed partial work that still failed the new example.</p><p><strong>2. High-frequency tool loop.</strong> The largest session made 117 tool calls in about 22 minutes. The worker repeatedly inspected, edited, tested, isolated planner stages, and reverted experiments.</p><p><strong>3. Growing transcript.</strong> Across the five sessions, tool outputs totaled roughly 1.67M characters. Those results were then carried in later turns as cached context, producing large input totals even when each individual answer was short.</p><p><strong>4. Environment/dependency churn.</strong> The logs show verification blocked by missing files, concurrent edits, Bazel environment assumptions, and a tuple-typed <code>new_item_ids</code> handoff. These caused investigation and retry work without producing a passing end-to-end path.</p></div>
+<h2>Most useful fix</h2>
+<p>Before another worker retry, make the task state coherent: ensure the required <code>modify_order_items</code> files and dependency commit are present, serialize edits to the shared workflow files, and add a small failing end-to-end reproduction for the typed <code>new_item_ids</code> handoff. Then run one focused worker. This should eliminate the expensive blind retry loop.</p>
+<p class="foot">Method: local Codex session JSONL files, using token-counter deltas inside the 24-hour window. Cached input is reported by Codex logs; exact billing treatment may differ from raw token totals.</p>
+</body></html>
