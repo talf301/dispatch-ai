@@ -362,6 +362,178 @@ func TestWorktreeBranchHasCommits(t *testing.T) {
 	}
 }
 
+func TestFetchAndFastForwardPlanBranch(t *testing.T) {
+	repo := initTestRepo(t)
+	base, err := DetectDefaultBranch(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plan := "dispatch/plan-test"
+	child := "dispatch/child-test"
+	for _, branch := range []string{plan, child} {
+		cmd := exec.Command("git", "branch", branch, base)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("create %s: %v\n%s", branch, err, out)
+		}
+	}
+	cmd := exec.Command("git", "commit", "--allow-empty", "-m", "advance base")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("advance base: %v\n%s", err, out)
+	}
+
+	moved, err := FastForwardPlanBranch(repo, plan, base, []string{child})
+	if err != nil || !moved {
+		t.Fatalf("fast-forward = (%v, %v), want (true, nil)", moved, err)
+	}
+	baseTip, _ := revParse(repo, base)
+	for _, branch := range []string{plan, child} {
+		tip, _ := revParse(repo, branch)
+		if tip != baseTip {
+			t.Errorf("%s tip = %s, want %s", branch, tip, baseTip)
+		}
+	}
+
+	uniquePlan := "dispatch/plan-unique"
+	uniqueWT := filepath.Join(t.TempDir(), "unique")
+	if err := CreateWorktree(repo, uniqueWT, uniquePlan, base); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("git", "commit", "--allow-empty", "-m", "unique plan work")
+	cmd.Dir = uniqueWT
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("unique commit: %v\n%s", err, out)
+	}
+	if err := RemoveWorktree(repo, uniqueWT, uniquePlan, false); err != nil {
+		t.Fatal(err)
+	}
+	uniqueTip, _ := revParse(repo, uniquePlan)
+	cmd = exec.Command("git", "commit", "--allow-empty", "-m", "advance base again")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("advance base again: %v\n%s", err, out)
+	}
+	moved, err = FastForwardPlanBranch(repo, uniquePlan, base, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved {
+		t.Error("unique plan was fast-forwarded")
+	}
+	got, _ := revParse(repo, uniquePlan)
+	if got != uniqueTip {
+		t.Errorf("unique plan tip changed from %s to %s", uniqueTip, got)
+	}
+}
+
+func TestFetchThenFastForwardPlanBranch(t *testing.T) {
+	repo := initTestRepo(t)
+	base, err := DetectDefaultBranch(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	if out, err := exec.Command("git", "clone", "--bare", repo, remote).CombinedOutput(); err != nil {
+		t.Fatalf("clone bare: %v\n%s", err, out)
+	}
+	cmd := exec.Command("git", "remote", "add", "origin", remote)
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("add origin: %v\n%s", err, out)
+	}
+	for _, branch := range []string{"dispatch/plan-test", "dispatch/child-test"} {
+		cmd = exec.Command("git", "branch", branch, base)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("create %s: %v\n%s", branch, err, out)
+		}
+	}
+	peer := filepath.Join(t.TempDir(), "peer")
+	if out, err := exec.Command("git", "clone", remote, peer).CombinedOutput(); err != nil {
+		t.Fatalf("clone peer: %v\n%s", err, out)
+	}
+	for _, args := range [][]string{{"config", "user.email", "test@test.com"}, {"config", "user.name", "Test"}, {"commit", "--allow-empty", "-m", "upstream advance"}, {"push", "origin", "HEAD:" + base}} {
+		cmd = exec.Command("git", args...)
+		cmd.Dir = peer
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := FetchOriginBranch(repo, base); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := FastForwardPlanBranch(repo, "dispatch/plan-test", "origin/"+base, []string{"dispatch/child-test"})
+	if err != nil || !moved {
+		t.Fatalf("fast-forward = (%v, %v), want (true, nil)", moved, err)
+	}
+	tip, _ := revParse(repo, "origin/"+base)
+	for _, branch := range []string{"dispatch/plan-test", "dispatch/child-test"} {
+		got, _ := revParse(repo, branch)
+		if got != tip {
+			t.Errorf("%s tip = %s, want %s", branch, got, tip)
+		}
+	}
+
+	cmd = exec.Command("git", "commit", "--allow-empty", "-m", "plan work")
+	unique := filepath.Join(t.TempDir(), "unique")
+	if err := CreateWorktree(repo, unique, "dispatch/plan-unique", "dispatch/plan-test"); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Dir = unique
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("unique plan commit: %v\n%s", err, out)
+	}
+	if err := RemoveWorktree(repo, unique, "dispatch/plan-unique", false); err != nil {
+		t.Fatal(err)
+	}
+	uniqueTip, _ := revParse(repo, "dispatch/plan-unique")
+	cmd = exec.Command("git", "commit", "--allow-empty", "-m", "another upstream advance")
+	cmd.Dir = peer
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("advance peer: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "push", "origin", "HEAD:"+base)
+	cmd.Dir = peer
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("push peer: %v\n%s", err, out)
+	}
+	if err := FetchOriginBranch(repo, base); err != nil {
+		t.Fatal(err)
+	}
+	moved, err = FastForwardPlanBranch(repo, "dispatch/plan-unique", "origin/"+base, nil)
+	if err != nil || moved {
+		t.Fatalf("unique fast-forward = (%v, %v), want (false, nil)", moved, err)
+	}
+	got, _ := revParse(repo, "dispatch/plan-unique")
+	if got != uniqueTip {
+		t.Errorf("unique plan tip = %s, want %s", got, uniqueTip)
+	}
+}
+
+func TestFetchOriginBranchSkipsLocalOnlyBranch(t *testing.T) {
+	repo := initTestRepo(t)
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	cmd := exec.Command("git", "clone", "--bare", repo, remote)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clone bare: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "remote", "add", "origin", remote)
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("add origin: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "branch", "local-only")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create local branch: %v\n%s", err, out)
+	}
+	if err := FetchOriginBranch(repo, "local-only"); err != nil {
+		t.Fatalf("fetch local-only branch: %v", err)
+	}
+}
+
 func TestRemoveWorktree_KeepBranch(t *testing.T) {
 	repo := initTestRepo(t)
 	wtDir := filepath.Join(t.TempDir(), "wt-keep")

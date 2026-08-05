@@ -348,8 +348,10 @@ func (d *Daemon) registeredRepoForPath(path string) string {
 	return ""
 }
 
-// baseBranchFor returns the branch a task's worktree branch is based on:
+// baseBranchFor returns the ref a task's worktree branch is based on:
 // its plan branch for a child task, otherwise the configured or default branch.
+// Auto-detected defaults use the fetched origin ref; an explicit base branch is
+// respected as a local branch, even if origin has an older branch of that name.
 func (d *Daemon) baseBranchFor(task *db.Task) (string, error) {
 	if task.ParentID != nil {
 		return fmt.Sprintf("dispatch/plan-%s", *task.ParentID), nil
@@ -357,14 +359,21 @@ func (d *Daemon) baseBranchFor(task *db.Task) (string, error) {
 	if task.BaseBranch != nil {
 		return *task.BaseBranch, nil
 	}
-	if d.baseBranch != "" {
-		return d.baseBranch, nil
-	}
 	repoPath, err := d.taskRepoPath(task)
 	if err != nil {
 		return "", err
 	}
-	return DetectDefaultBranch(repoPath)
+	baseBranch, explicit := d.baseBranch, d.baseBranch != ""
+	if !explicit {
+		baseBranch, err = DetectDefaultBranch(repoPath)
+		if err != nil {
+			return "", err
+		}
+	}
+	if !explicit && BranchExists(repoPath, "origin/"+baseBranch) {
+		return "origin/" + baseBranch, nil
+	}
+	return baseBranch, nil
 }
 
 // spawnReady polls for ready tasks and spawns workers, enforcing per-repo max_workers.
@@ -377,6 +386,7 @@ func (d *Daemon) spawnReady() {
 
 	// Count active workers per repo.
 	activePerRepo := make(map[string]int)
+	fetchedRepo := make(map[string]string)
 	for taskID := range d.workers {
 		activePerRepo[d.workerRepo[taskID]]++
 	}
@@ -398,22 +408,69 @@ func (d *Daemon) spawnReady() {
 			continue
 		}
 
-		baseBranch, err := d.baseBranchFor(&task)
-		if err != nil {
-			d.logger.Printf("spawn: task %s preflight failed: %v", task.ID, err)
-			if _, blockErr := d.db.BlockTask(task.ID, fmt.Sprintf("preflight failed: %v", err)); blockErr != nil {
-				d.logger.Printf("spawn: block task %s: %v", task.ID, blockErr)
+		// Refresh the repo's default/configured base once per poll cycle so
+		// staleness never masks already-landed upstream work (the fast-forward
+		// below relies on this being current). Per-task overrides and the
+		// child-vs-standalone distinction are resolved afterward via
+		// baseBranchFor, which now sees the freshly-fetched ref.
+		baseBranch, explicitBase := d.baseBranch, d.baseBranch != ""
+		if !explicitBase {
+			baseBranch, err = DetectDefaultBranch(repoPath)
+			if err != nil {
+				d.logger.Printf("spawn: detect base for %s: %v, skipping", task.ID, err)
+				continue
 			}
-			continue
 		}
-		if task.ParentID == nil {
-			if _, err := revParse(repoPath, baseBranch); err != nil {
+		if fetchedRepo[repoPath] == "" {
+			if err := FetchOriginBranch(repoPath, baseBranch); err != nil {
+				d.logger.Printf("spawn: refresh base for %s: %v, skipping", task.ID, err)
+				continue
+			}
+			fetchedRepo[repoPath] = baseBranch
+		}
+		baseRef := baseBranch
+		if !explicitBase && BranchExists(repoPath, "origin/"+baseBranch) {
+			baseRef = "origin/" + baseBranch
+		}
+
+		if task.ParentID != nil {
+			planBranch := fmt.Sprintf("dispatch/plan-%s", *task.ParentID)
+			if BranchExists(repoPath, planBranch) {
+				children, childErr := d.db.GetChildren(*task.ParentID)
+				if childErr != nil {
+					d.logger.Printf("spawn: children for plan %s: %v, skipping", *task.ParentID, childErr)
+					continue
+				}
+				childBranches := make([]string, 0, len(children))
+				for _, child := range children {
+					childBranches = append(childBranches, fmt.Sprintf("dispatch/%s", child.ID))
+				}
+				if _, err := FastForwardPlanBranch(repoPath, planBranch, baseRef, childBranches); err != nil {
+					d.logger.Printf("spawn: refresh plan %s: %v, skipping", *task.ParentID, err)
+					continue
+				}
+			}
+		} else {
+			// Standalone task: baseBranchFor also honors a per-task BaseBranch
+			// override, which the repo-wide fetch/detect above doesn't know
+			// about. Resolve and preflight-check the actual ref this task will
+			// use before claiming it.
+			resolvedBase, err := d.baseBranchFor(&task)
+			if err != nil {
 				d.logger.Printf("spawn: task %s preflight failed: %v", task.ID, err)
-				if _, blockErr := d.db.BlockTask(task.ID, fmt.Sprintf("preflight failed: base branch %s is unavailable: %v", baseBranch, err)); blockErr != nil {
+				if _, blockErr := d.db.BlockTask(task.ID, fmt.Sprintf("preflight failed: %v", err)); blockErr != nil {
 					d.logger.Printf("spawn: block task %s: %v", task.ID, blockErr)
 				}
 				continue
 			}
+			if _, err := revParse(repoPath, resolvedBase); err != nil {
+				d.logger.Printf("spawn: task %s preflight failed: %v", task.ID, err)
+				if _, blockErr := d.db.BlockTask(task.ID, fmt.Sprintf("preflight failed: base branch %s is unavailable: %v", resolvedBase, err)); blockErr != nil {
+					d.logger.Printf("spawn: block task %s: %v", task.ID, blockErr)
+				}
+				continue
+			}
+			baseRef = resolvedBase
 		}
 
 		// Claim first to prevent double-spawn.
@@ -425,6 +482,7 @@ func (d *Daemon) spawnReady() {
 
 		wtDir := filepath.Join(d.worktreeBase, task.ID)
 		branchName := fmt.Sprintf("dispatch/%s", task.ID)
+		worktreeBase := baseRef
 		branchExisted := BranchExists(repoPath, branchName)
 		worktreeExisted := false
 		if _, statErr := os.Stat(wtDir); statErr == nil {
@@ -458,10 +516,10 @@ func (d *Daemon) spawnReady() {
 						continue
 					}
 				}
-				baseBranch = parentBranch
+				worktreeBase = parentBranch
 			}
 
-			if err := CreateWorktree(repoPath, wtDir, branchName, baseBranch); err != nil {
+			if err := CreateWorktree(repoPath, wtDir, branchName, worktreeBase); err != nil {
 				d.logger.Printf("spawn: worktree %s: %v", task.ID, err)
 				if _, blockErr := d.db.BlockTask(task.ID, fmt.Sprintf("could not create worktree: %v", err)); blockErr != nil {
 					d.logger.Printf("spawn: block task %s: %v", task.ID, blockErr)
@@ -469,7 +527,7 @@ func (d *Daemon) spawnReady() {
 				continue
 			}
 		}
-		if err := validateWorktree(wtDir, branchName, baseBranch, !branchExisted); err != nil {
+		if err := validateWorktree(wtDir, branchName, worktreeBase, !branchExisted); err != nil {
 			d.logger.Printf("spawn: task %s preflight failed: %v", task.ID, err)
 			if !worktreeExisted {
 				if removeErr := RemoveWorktree(repoPath, wtDir, branchName, true); removeErr != nil {
@@ -819,7 +877,7 @@ func (d *Daemon) handleReviewApproval(taskID string) {
 		if err := MergeBranch(repoPath, branchName, parentBranch); err != nil {
 			d.logger.Printf("review-done: merge %s into %s failed: %v", branchName, parentBranch, err)
 			reason := fmt.Sprintf("Merge conflict merging into plan branch:\n%v", err)
-			if _, err := d.db.BlockTask(taskID, reason); err != nil {
+			if _, err := d.db.BlockTaskWithKind(taskID, reason, db.BlockKindMergeConflict); err != nil {
 				d.logger.Printf("review-done: block task %s: %v", taskID, err)
 			}
 			return
@@ -857,7 +915,7 @@ func (d *Daemon) handleReviewApproval(taskID string) {
 			}
 			return
 		}
-		if err := d.createPR(repoPath, branchName, *task); err != nil {
+		if err := d.createPR(repoPath, branchName, *task, false); err != nil {
 			reason := fmt.Sprintf("pr: %v", err)
 			if len(reason) > 4000 {
 				reason = reason[:4000]

@@ -7,6 +7,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func warnIfBlockerIsBlocked(database *db.DB, blockerID string) string {
+	task, err := database.GetTask(blockerID)
+	if err != nil || task.Status != "blocked" {
+		return ""
+	}
+	reason := "unspecified"
+	if task.BlockReason != nil && *task.BlockReason != "" {
+		reason = *task.BlockReason
+	}
+	return fmt.Sprintf("warning: task %s is currently blocked (reason: %s). The dependent task will not be schedulable until %s reaches done. If the dependent work is meant to unblock %s, do not create this dependency.", blockerID, reason, blockerID, blockerID)
+}
+
 // warnIfOrphanFromLivePlan returns a one-line warning if repo points at a
 // live task's worktree and no parent was given. A live task can never be
 // --parent - it doesn't go through the daemon's worker/review cycle, so it
@@ -45,6 +57,11 @@ func NewAddCmd() *cobra.Command {
 			desc, _ := cmd.Flags().GetString("desc")
 			parent, _ := cmd.Flags().GetString("parent")
 			after, _ := cmd.Flags().GetString("after")
+			if after != "" {
+				if warning := warnIfBlockerIsBlocked(d, after); warning != "" {
+					cmd.PrintErrln(warning)
+				}
+			}
 			baseBranch, _ := cmd.Flags().GetString("base-branch")
 			if parent != "" && baseBranch != "" {
 				exitError(cmd, fmt.Errorf("--base-branch cannot be used with --parent; children start from the parent plan branch"))

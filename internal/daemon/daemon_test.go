@@ -82,6 +82,163 @@ func TestTaskRepoPath(t *testing.T) {
 	}
 }
 
+func TestBaseBranchForUsesOriginRefWhenItIsAhead(t *testing.T) {
+	repo := initTestRepo(t)
+	base, err := DetectDefaultBranch(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	cmd := exec.Command("git", "clone", "--bare", repo, remote)
+	cmd.Dir = t.TempDir()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clone bare: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "remote", "add", "origin", remote)
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("add origin: %v\n%s", err, out)
+	}
+
+	peer := filepath.Join(t.TempDir(), "peer")
+	cmd = exec.Command("git", "clone", remote, peer)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clone peer: %v\n%s", err, out)
+	}
+	for _, args := range [][]string{{"git", "config", "user.email", "test@test.com"}, {"git", "config", "user.name", "Test"}, {"git", "commit", "--allow-empty", "-m", "origin advance"}, {"git", "push", "origin", "HEAD:" + base}} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = peer
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+	cmd = exec.Command("git", "fetch", "origin", base)
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("fetch: %v\n%s", err, out)
+	}
+
+	d := &Daemon{repos: testRepos(repo)}
+	ref, err := d.baseBranchFor(&db.Task{ID: "standalone", Repo: &repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref != "origin/"+base {
+		t.Fatalf("base ref = %q, want origin/%s", ref, base)
+	}
+
+	wt := filepath.Join(t.TempDir(), "worktree")
+	if err := CreateWorktree(repo, wt, "dispatch/standalone", ref); err != nil {
+		t.Fatal(err)
+	}
+	has, err := worktreeBranchHasCommits(wt, ref, "dispatch/standalone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Fatal("fresh worktree incorrectly appears to contain worker commits")
+	}
+}
+
+func TestDaemonSpawnUsesFetchedBaseForStandaloneAndChild(t *testing.T) {
+	database := openTestDB(t)
+	repo := initTestRepo(t)
+	base, err := DetectDefaultBranch(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	for _, args := range [][]string{{"clone", "--bare", repo, remote}, {"remote", "add", "origin", remote}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	peer := filepath.Join(t.TempDir(), "peer")
+	if out, err := exec.Command("git", "clone", remote, peer).CombinedOutput(); err != nil {
+		t.Fatalf("clone peer: %v\n%s", err, out)
+	}
+	for _, args := range [][]string{{"config", "user.email", "test@test.com"}, {"config", "user.name", "Test"}, {"commit", "--allow-empty", "-m", "origin advance"}, {"push", "origin", "HEAD:" + base}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = peer
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	standalone, _ := database.AddTask("standalone", "", "", "", nil)
+	parent, _ := database.AddTask("parent", "", "", "", nil)
+	child, _ := database.AddTask("child", "", parent.ID, "", nil)
+	spawner := &MockSpawner{}
+	daemon := New(database, Config{
+		Repos:        testRepos(repo),
+		WorktreeBase: filepath.Join(t.TempDir(), "worktrees"),
+	}, spawner)
+
+	daemon.spawnReady()
+
+	for _, task := range []*db.Task{standalone, child} {
+		updated, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.Status != "active" {
+			t.Errorf("task %s status = %s, want active", task.ID, updated.Status)
+		}
+	}
+	if len(spawner.Spawned) != 2 {
+		t.Fatalf("spawned %d tasks, want standalone and child", len(spawner.Spawned))
+	}
+}
+
+func TestBaseBranchForRespectsExplicitLocalBase(t *testing.T) {
+	repo := initTestRepo(t)
+	base, err := DetectDefaultBranch(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "branch", "wip", base)
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create wip: %v\n%s", err, out)
+	}
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	cmd = exec.Command("git", "clone", "--bare", repo, remote)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clone bare: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "remote", "add", "origin", remote)
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("add origin: %v\n%s", err, out)
+	}
+	if err := FetchOriginBranch(repo, "wip"); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("git", "checkout", "wip")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("checkout wip: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "commit", "--allow-empty", "-m", "local wip advance")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("advance wip: %v\n%s", err, out)
+	}
+
+	d := &Daemon{baseBranch: "wip", repos: testRepos(repo)}
+	ref, err := d.baseBranchFor(&db.Task{ID: "standalone", Repo: &repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref != "wip" {
+		t.Fatalf("base ref = %q, want explicit local branch wip", ref)
+	}
+}
+
 func TestTaskRepoPathMapsDispatchWorktree(t *testing.T) {
 	repo := initTestRepo(t)
 	worktree := filepath.Join(t.TempDir(), "worktree")

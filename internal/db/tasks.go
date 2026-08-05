@@ -3,8 +3,14 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
+)
+
+const (
+	BlockKindMergeConflict  = "merge-conflict"
+	BlockKindPRCreateFailed = "pr-create-failed"
 )
 
 // Task represents a row in the tasks table.
@@ -121,6 +127,13 @@ func (d *DB) SetBaseBranch(id, branch string) (*Task, error) {
 	}
 	if task.ParentID != nil {
 		return nil, fmt.Errorf("task %s is a child; children start from the parent plan branch", id)
+	}
+	if task.Repo != nil {
+		cmd := exec.Command("git", "rev-parse", "--verify", branch)
+		cmd.Dir = *task.Repo
+		if err := cmd.Run(); err != nil {
+			return nil, fmt.Errorf("base branch %q does not exist in repository %q", branch, *task.Repo)
+		}
 	}
 	if _, err := d.q.Exec("UPDATE tasks SET base_branch = ? WHERE id = ?", branch, id); err != nil {
 		return nil, fmt.Errorf("set base branch: %w", err)
@@ -274,6 +287,15 @@ func (d *DB) doneTask(id string) (transitioned bool, acs []AutoComplete, err err
 
 // BlockTask marks a task as blocked with a reason and clears the assignee.
 func (d *DB) BlockTask(id, reason string) (*Task, error) {
+	return d.blockTask(id, reason, "")
+}
+
+// BlockTaskWithKind marks a task as blocked and records a stable reason kind.
+func (d *DB) BlockTaskWithKind(id, reason, kind string) (*Task, error) {
+	return d.blockTask(id, reason, kind)
+}
+
+func (d *DB) blockTask(id, reason, kind string) (*Task, error) {
 	task, err := d.GetTask(id)
 	if err != nil {
 		return nil, err
@@ -284,12 +306,36 @@ func (d *DB) BlockTask(id, reason string) (*Task, error) {
 	if err != nil {
 		return nil, fmt.Errorf("block task: %w", err)
 	}
+	if kind == "" {
+		_, err = d.q.Exec("DELETE FROM meta WHERE key = ?", blockKindKey(id))
+	} else {
+		_, err = d.q.Exec(`INSERT INTO meta (key, value) VALUES (?, ?)
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value`, blockKindKey(id), kind)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("set block kind: %w", err)
+	}
 
 	if err := d.addSystemNote(id, oldStatus, "blocked"); err != nil {
 		return nil, err
 	}
 	return d.GetTask(id)
 }
+
+// BlockKind returns the machine-readable kind recorded for a task's block.
+func (d *DB) BlockKind(id string) (string, error) {
+	var kind string
+	err := d.q.QueryRow("SELECT value FROM meta WHERE key = ?", blockKindKey(id)).Scan(&kind)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get block kind: %w", err)
+	}
+	return kind, nil
+}
+
+func blockKindKey(id string) string { return "block.kind." + id }
 
 // ReopenTask sets a task back to open, clearing block_reason and assignee.
 func (d *DB) ReopenTask(id string) (*Task, error) {
@@ -302,6 +348,9 @@ func (d *DB) ReopenTask(id string) (*Task, error) {
 	_, err = d.q.Exec("UPDATE tasks SET status = 'open', block_reason = NULL, assignee = NULL WHERE id = ?", id)
 	if err != nil {
 		return nil, fmt.Errorf("reopen task: %w", err)
+	}
+	if _, err := d.q.Exec("DELETE FROM meta WHERE key = ?", blockKindKey(id)); err != nil {
+		return nil, fmt.Errorf("clear block kind: %w", err)
 	}
 
 	if err := d.addSystemNote(id, oldStatus, "open"); err != nil {
