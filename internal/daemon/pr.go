@@ -12,10 +12,12 @@ import (
 // createPR pushes headBranch and creates a GitHub PR for a completed task -
 // a plan branch (dispatch/plan-<id>) for a finished multi-child plan, or a
 // task's own branch (dispatch/<id>) for a standalone task acting as a plan
-// of one. Treating "a PR already exists for this head" as success (not an
+// of one. allowZeroDiffSuccess is only true for plan branches: a standalone
+// branch with no diff must still surface the gh error before its worktree is
+// deleted. Treating "a PR already exists for this head" as success (not an
 // error) makes this safe to call more than once for the same task, which
 // matters for both the retry queries below and daemon-restart recovery.
-func (d *Daemon) createPR(repoPath, headBranch string, task db.Task) error {
+func (d *Daemon) createPR(repoPath, headBranch string, task db.Task, allowZeroDiffSuccess bool) error {
 	baseBranch, err := d.baseBranchFor(&task)
 	if err != nil {
 		return fmt.Errorf("resolve PR base: %w", err)
@@ -26,7 +28,7 @@ func (d *Daemon) createPR(repoPath, headBranch string, task db.Task) error {
 	// normal path.
 	remoteBase := "origin/" + strings.TrimPrefix(baseBranch, "origin/")
 	if count, err := branchCommitCount(repoPath, remoteBase, headBranch); err == nil {
-		if count == 0 {
+		if count == 0 && allowZeroDiffSuccess {
 			note := fmt.Sprintf("PR skipped: %s has no commits relative to %s; changes were already merged elsewhere.", headBranch, remoteBase)
 			author := "daemon"
 			if _, err := d.db.AddNote(task.ID, note, &author); err != nil {
@@ -140,7 +142,7 @@ func (d *Daemon) triggerPR(ac *db.AutoComplete) {
 	}
 
 	planBranch := fmt.Sprintf("dispatch/plan-%s", ac.ParentID)
-	if err := d.createPR(repoPath, planBranch, *parent); err != nil {
+	if err := d.createPR(repoPath, planBranch, *parent, true); err != nil {
 		reason := fmt.Sprintf("pr: %v", err)
 		if len(reason) > 4000 {
 			reason = reason[:4000]
@@ -173,7 +175,7 @@ func (d *Daemon) checkPendingPRs() {
 		}
 
 		planBranch := fmt.Sprintf("dispatch/plan-%s", parent.ID)
-		if err := d.createPR(repoPath, planBranch, parent); err != nil {
+		if err := d.createPR(repoPath, planBranch, parent, true); err != nil {
 			reason := fmt.Sprintf("pr: %v", err)
 			if len(reason) > 4000 {
 				reason = reason[:4000]
