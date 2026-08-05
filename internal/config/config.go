@@ -11,8 +11,9 @@ import (
 
 // RepoConfig holds the configuration for a single repository.
 type RepoConfig struct {
-	Path       string `toml:"path"`
-	MaxWorkers int    `toml:"max_workers"`
+	Path         string `toml:"path"`
+	MaxWorkers   int    `toml:"max_workers"`
+	DeliveryMode string `toml:"delivery_mode"`
 }
 
 // Config is the top-level dispatch configuration.
@@ -23,9 +24,20 @@ type Config struct {
 // DefaultMaxWorkers is the default number of concurrent workers per repo.
 const DefaultMaxWorkers = 4
 
+const (
+	DeliveryModeNoMistakes = "no-mistakes"
+	DeliveryModeDirectPR   = "direct-PR"
+	DeliveryModeLocalOnly  = "local-only"
+	DefaultDeliveryMode    = DeliveryModeDirectPR
+)
+
+func validDeliveryMode(mode string) bool {
+	return mode == DeliveryModeNoMistakes || mode == DeliveryModeDirectPR || mode == DeliveryModeLocalOnly
+}
+
 // LoadConfig parses and validates the config file at the given path.
 // It validates that paths are absolute, exist as git repos, rejects duplicates,
-// and applies default MaxWorkers where unset.
+// and applies defaults where unset.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -66,6 +78,11 @@ func LoadConfig(path string) (*Config, error) {
 		if r.MaxWorkers == 0 {
 			r.MaxWorkers = DefaultMaxWorkers
 		}
+		if r.DeliveryMode == "" {
+			r.DeliveryMode = DefaultDeliveryMode
+		} else if !validDeliveryMode(r.DeliveryMode) {
+			return nil, fmt.Errorf("invalid delivery_mode %q: must be %q, %q, or %q", r.DeliveryMode, DeliveryModeNoMistakes, DeliveryModeDirectPR, DeliveryModeLocalOnly)
+		}
 	}
 
 	return &cfg, nil
@@ -82,6 +99,12 @@ func DefaultConfigPath() string {
 func SaveRepoEntry(path string, repo RepoConfig) error {
 	if repo.MaxWorkers == 0 {
 		repo.MaxWorkers = DefaultMaxWorkers
+	}
+	if repo.DeliveryMode == "" {
+		repo.DeliveryMode = DefaultDeliveryMode
+	}
+	if !validDeliveryMode(repo.DeliveryMode) {
+		return fmt.Errorf("invalid delivery_mode %q: must be %q, %q, or %q", repo.DeliveryMode, DeliveryModeNoMistakes, DeliveryModeDirectPR, DeliveryModeLocalOnly)
 	}
 
 	// Ensure parent directory exists.
@@ -103,7 +126,7 @@ func SaveRepoEntry(path string, repo RepoConfig) error {
 		prefix = "\n"
 	}
 
-	entry := fmt.Sprintf("%s[[repo]]\npath = %q\nmax_workers = %d\n", prefix, repo.Path, repo.MaxWorkers)
+	entry := fmt.Sprintf("%s[[repo]]\npath = %q\nmax_workers = %d\ndelivery_mode = %q\n", prefix, repo.Path, repo.MaxWorkers, repo.DeliveryMode)
 	if _, err := f.WriteString(entry); err != nil {
 		return fmt.Errorf("writing config entry: %w", err)
 	}

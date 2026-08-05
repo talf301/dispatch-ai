@@ -6,11 +6,20 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dispatch-ai/dispatch/internal/config"
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
 
 // createPR pushes the plan branch and creates a GitHub PR for a completed parent task.
 func (d *Daemon) createPR(repoPath string, parentTask db.Task) error {
+	mode := config.DefaultDeliveryMode
+	if repo, ok := d.repos[repoPath]; ok && repo.DeliveryMode != "" {
+		mode = repo.DeliveryMode
+	}
+	if mode == config.DeliveryModeLocalOnly {
+		return d.mergeLocal(repoPath, parentTask)
+	}
+
 	planBranch := fmt.Sprintf("dispatch/plan-%s", parentTask.ID)
 
 	// Detect the default branch for the PR base.
@@ -80,6 +89,26 @@ func (d *Daemon) createPR(repoPath string, parentTask db.Task) error {
 	}
 
 	d.logger.Printf("created PR for plan %s (%s)", parentTask.ID, parentTask.Title)
+	return nil
+}
+
+func (d *Daemon) mergeLocal(repoPath string, parentTask db.Task) error {
+	baseBranch := d.baseBranch
+	if baseBranch == "" {
+		var err error
+		baseBranch, err = DetectDefaultBranch(repoPath)
+		if err != nil {
+			return fmt.Errorf("detect default branch: %w", err)
+		}
+	}
+	planBranch := fmt.Sprintf("dispatch/plan-%s", parentTask.ID)
+	if err := MergeBranch(repoPath, planBranch, baseBranch); err != nil {
+		return fmt.Errorf("local merge %s into %s: %w", planBranch, baseBranch, err)
+	}
+	if err := d.db.MarkPRHandled(parentTask.ID); err != nil {
+		return fmt.Errorf("record local merge: %w", err)
+	}
+	d.logger.Printf("locally merged plan %s into %s", parentTask.ID, baseBranch)
 	return nil
 }
 

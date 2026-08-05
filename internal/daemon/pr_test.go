@@ -70,6 +70,92 @@ func TestCreatePR_GitCountErrorFallsThroughToGH(t *testing.T) {
 	}
 }
 
+func TestCreatePR_DeliveryModes(t *testing.T) {
+	for _, mode := range []string{config.DeliveryModeNoMistakes, config.DeliveryModeDirectPR} {
+		t.Run(mode, func(t *testing.T) {
+			repoDir := initPRTestRepo(t)
+			marker := filepath.Join(t.TempDir(), "gh-called")
+			ghDir := t.TempDir()
+			writeFakeGH(t, ghDir, marker, 0)
+			oldPath := os.Getenv("PATH")
+			os.Setenv("PATH", ghDir+string(os.PathListSeparator)+oldPath)
+			t.Cleanup(func() { os.Setenv("PATH", oldPath) })
+
+			d := openTestDB(t)
+			repo := repoDir
+			parent, err := d.AddTask(mode, "", "", "", &repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			createPRTestBranch(t, repoDir, parent.ID)
+			if err := os.WriteFile(filepath.Join(repoDir, "pr.txt"), []byte(mode), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("git", "add", "pr.txt")
+			cmd.Dir = repoDir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git add: %v\n%s", err, out)
+			}
+			cmd = exec.Command("git", "commit", "-m", "plan")
+			cmd.Dir = repoDir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git commit: %v\n%s", err, out)
+			}
+			daemon := New(d, Config{BaseBranch: "main", Repos: map[string]config.RepoConfig{repoDir: {Path: repoDir, DeliveryMode: mode}}}, &MockSpawner{})
+			if err := daemon.createPR(repoDir, *parent); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatalf("gh was not invoked: %v", err)
+			}
+		})
+	}
+}
+
+func TestCreatePR_LocalOnlyMergesWithoutGH(t *testing.T) {
+	repoDir := initPRTestRepo(t)
+	marker := filepath.Join(t.TempDir(), "gh-called")
+	ghDir := t.TempDir()
+	writeFakeGH(t, ghDir, marker, 0)
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", ghDir+string(os.PathListSeparator)+oldPath)
+	t.Cleanup(func() { os.Setenv("PATH", oldPath) })
+
+	d := openTestDB(t)
+	repo := repoDir
+	parent, err := d.AddTask("local", "", "", "", &repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createPRTestBranch(t, repoDir, parent.ID)
+	if err := os.WriteFile(filepath.Join(repoDir, "local.txt"), []byte("local"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", "local.txt")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "commit", "-m", "local")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+
+	daemon := New(d, Config{BaseBranch: "main", Repos: map[string]config.RepoConfig{repoDir: {Path: repoDir, DeliveryMode: config.DeliveryModeLocalOnly}}}, &MockSpawner{})
+	if err := daemon.createPR(repoDir, *parent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("gh was invoked: %v", err)
+	}
+	cmd = exec.Command("git", "show", "main:local.txt")
+	cmd.Dir = repoDir
+	if out, err := cmd.Output(); err != nil || string(out) != "local" {
+		t.Fatalf("local merge missing from main: %v, %q", err, out)
+	}
+}
+
 func initPRTestRepo(t *testing.T) string {
 	t.Helper()
 	repoDir := initTestRepo(t)

@@ -43,13 +43,49 @@ path = "` + repoB + `"
 		t.Fatalf("expected 2 repos, got %d", len(cfg.Repos))
 	}
 
-	if cfg.Repos[0].Path != repoA || cfg.Repos[0].MaxWorkers != 2 {
-		t.Errorf("repo[0] = %+v, want path=%s maxWorkers=2", cfg.Repos[0], repoA)
+	if cfg.Repos[0].Path != repoA || cfg.Repos[0].MaxWorkers != 2 || cfg.Repos[0].DeliveryMode != DefaultDeliveryMode {
+		t.Errorf("repo[0] = %+v, want path=%s maxWorkers=2 delivery_mode=%s", cfg.Repos[0], repoA, DefaultDeliveryMode)
 	}
 
 	// Default MaxWorkers applied
-	if cfg.Repos[1].Path != repoB || cfg.Repos[1].MaxWorkers != DefaultMaxWorkers {
-		t.Errorf("repo[1] = %+v, want path=%s maxWorkers=%d", cfg.Repos[1], repoB, DefaultMaxWorkers)
+	if cfg.Repos[1].Path != repoB || cfg.Repos[1].MaxWorkers != DefaultMaxWorkers || cfg.Repos[1].DeliveryMode != DefaultDeliveryMode {
+		t.Errorf("repo[1] = %+v, want path=%s maxWorkers=%d delivery_mode=%s", cfg.Repos[1], repoB, DefaultMaxWorkers, DefaultDeliveryMode)
+	}
+}
+
+func TestLoadConfig_DeliveryModes(t *testing.T) {
+	tmp := t.TempDir()
+	var entries strings.Builder
+	for _, mode := range []string{DeliveryModeNoMistakes, DeliveryModeDirectPR, DeliveryModeLocalOnly} {
+		repo := filepath.Join(tmp, mode)
+		makeGitRepo(t, repo)
+		entries.WriteString(`[[repo]]` + "\npath = \"" + repo + "\"\ndelivery_mode = \"" + mode + "\"\n")
+	}
+	path := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(path, []byte(entries.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, mode := range []string{DeliveryModeNoMistakes, DeliveryModeDirectPR, DeliveryModeLocalOnly} {
+		if cfg.Repos[i].DeliveryMode != mode {
+			t.Errorf("repo[%d] delivery_mode = %q, want %q", i, cfg.Repos[i].DeliveryMode, mode)
+		}
+	}
+}
+
+func TestLoadConfig_InvalidDeliveryMode(t *testing.T) {
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	makeGitRepo(t, repo)
+	path := filepath.Join(tmp, "config.toml")
+	os.WriteFile(path, []byte(`[[repo]]
+path = "`+repo+`"
+delivery_mode = "fast-forward"`), 0o644)
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "invalid delivery_mode") {
+		t.Fatalf("LoadConfig error = %v, want invalid delivery_mode", err)
 	}
 }
 
@@ -170,6 +206,9 @@ func TestSaveRepoEntry_NewFile(t *testing.T) {
 	}
 	if !strings.Contains(got, `max_workers = 3`) {
 		t.Errorf("missing max_workers in:\n%s", got)
+	}
+	if !strings.Contains(got, `delivery_mode = "direct-PR"`) {
+		t.Errorf("missing default delivery_mode in:\n%s", got)
 	}
 }
 
