@@ -141,6 +141,59 @@ func TestBaseBranchForUsesOriginRefWhenItIsAhead(t *testing.T) {
 	}
 }
 
+func TestDaemonSpawnUsesFetchedBaseForStandaloneAndChild(t *testing.T) {
+	database := openTestDB(t)
+	repo := initTestRepo(t)
+	base, err := DetectDefaultBranch(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	for _, args := range [][]string{{"clone", "--bare", repo, remote}, {"remote", "add", "origin", remote}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	peer := filepath.Join(t.TempDir(), "peer")
+	if out, err := exec.Command("git", "clone", remote, peer).CombinedOutput(); err != nil {
+		t.Fatalf("clone peer: %v\n%s", err, out)
+	}
+	for _, args := range [][]string{{"config", "user.email", "test@test.com"}, {"config", "user.name", "Test"}, {"commit", "--allow-empty", "-m", "origin advance"}, {"push", "origin", "HEAD:" + base}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = peer
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	standalone, _ := database.AddTask("standalone", "", "", "", nil)
+	parent, _ := database.AddTask("parent", "", "", "", nil)
+	child, _ := database.AddTask("child", "", parent.ID, "", nil)
+	spawner := &MockSpawner{}
+	daemon := New(database, Config{
+		Repos:        testRepos(repo),
+		WorktreeBase: filepath.Join(t.TempDir(), "worktrees"),
+	}, spawner)
+
+	daemon.spawnReady()
+
+	for _, task := range []*db.Task{standalone, child} {
+		updated, err := database.GetTask(task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.Status != "active" {
+			t.Errorf("task %s status = %s, want active", task.ID, updated.Status)
+		}
+	}
+	if len(spawner.Spawned) != 2 {
+		t.Fatalf("spawned %d tasks, want standalone and child", len(spawner.Spawned))
+	}
+}
+
 func TestBaseBranchForRespectsExplicitLocalBase(t *testing.T) {
 	repo := initTestRepo(t)
 	base, err := DetectDefaultBranch(repo)

@@ -482,6 +482,7 @@ func (d *Daemon) spawnReady() {
 
 		wtDir := filepath.Join(d.worktreeBase, task.ID)
 		branchName := fmt.Sprintf("dispatch/%s", task.ID)
+		worktreeBase := baseRef
 		branchExisted := BranchExists(repoPath, branchName)
 		worktreeExisted := false
 		if _, statErr := os.Stat(wtDir); statErr == nil {
@@ -492,7 +493,6 @@ func (d *Daemon) spawnReady() {
 		if !worktreeExisted {
 			// Worktree doesn't exist — create it.
 			// Determine which branch to base the worktree on.
-			baseBranch := baseRef
 			if task.ParentID != nil {
 				parentBranch := fmt.Sprintf("dispatch/plan-%s", *task.ParentID)
 				if !BranchExists(repoPath, parentBranch) {
@@ -516,10 +516,10 @@ func (d *Daemon) spawnReady() {
 						continue
 					}
 				}
-				baseBranch = parentBranch
+				worktreeBase = parentBranch
 			}
 
-			if err := CreateWorktree(repoPath, wtDir, branchName, baseBranch); err != nil {
+			if err := CreateWorktree(repoPath, wtDir, branchName, worktreeBase); err != nil {
 				d.logger.Printf("spawn: worktree %s: %v", task.ID, err)
 				if _, blockErr := d.db.BlockTask(task.ID, fmt.Sprintf("could not create worktree: %v", err)); blockErr != nil {
 					d.logger.Printf("spawn: block task %s: %v", task.ID, blockErr)
@@ -527,7 +527,7 @@ func (d *Daemon) spawnReady() {
 				continue
 			}
 		}
-		if err := validateWorktree(wtDir, branchName, baseBranch, !branchExisted); err != nil {
+		if err := validateWorktree(wtDir, branchName, worktreeBase, !branchExisted); err != nil {
 			d.logger.Printf("spawn: task %s preflight failed: %v", task.ID, err)
 			if !worktreeExisted {
 				if removeErr := RemoveWorktree(repoPath, wtDir, branchName, true); removeErr != nil {
