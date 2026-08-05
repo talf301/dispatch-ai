@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
@@ -12,13 +13,6 @@ import (
 func (d *Daemon) createPR(repoPath string, parentTask db.Task) error {
 	planBranch := fmt.Sprintf("dispatch/plan-%s", parentTask.ID)
 
-	// Push the plan branch to origin.
-	pushCmd := exec.Command("git", "push", "origin", planBranch)
-	pushCmd.Dir = repoPath
-	if out, err := pushCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git push: %w\n%s", err, out)
-	}
-
 	// Detect the default branch for the PR base.
 	baseBranch := d.baseBranch
 	if baseBranch == "" {
@@ -27,6 +21,32 @@ func (d *Daemon) createPR(repoPath string, parentTask db.Task) error {
 		if err != nil {
 			return fmt.Errorf("detect default branch: %w", err)
 		}
+	}
+
+	// A zero diff means the plan was already merged through another PR. Only
+	// trust a successful git result; errors must continue to the normal path.
+	if count, err := branchCommitCount(repoPath, baseBranch, planBranch); err == nil {
+		if count == 0 {
+			note := fmt.Sprintf("PR skipped: %s has no commits relative to %s; changes were already merged elsewhere.", planBranch, baseBranch)
+			author := "daemon"
+			if _, err := d.db.AddNote(parentTask.ID, note, &author); err != nil {
+				return fmt.Errorf("record zero-diff PR note: %w", err)
+			}
+			if err := d.db.MarkPRHandled(parentTask.ID); err != nil {
+				return fmt.Errorf("record zero-diff PR: %w", err)
+			}
+			d.logger.Printf("PR for %s (%s) skipped: no commits between %s and %s; already merged elsewhere", parentTask.ID, planBranch, baseBranch, planBranch)
+			return nil
+		}
+	} else {
+		d.logger.Printf("could not count commits between %s and %s: %v; attempting normal PR creation", baseBranch, planBranch, err)
+	}
+
+	// Push the plan branch to origin.
+	pushCmd := exec.Command("git", "push", "origin", planBranch)
+	pushCmd.Dir = repoPath
+	if out, err := pushCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git push: %w\n%s", err, out)
 	}
 
 	// Fetch notes on the parent task for the PR body.
@@ -46,11 +66,35 @@ func (d *Daemon) createPR(repoPath string, parentTask db.Task) error {
 	)
 	ghCmd.Dir = repoPath
 	if out, err := ghCmd.CombinedOutput(); err != nil {
+		if strings.Contains(strings.ToLower(string(out)), "already exists") {
+			if err := d.db.MarkPRHandled(parentTask.ID); err != nil {
+				return fmt.Errorf("record existing PR: %w", err)
+			}
+			d.logger.Printf("PR for %s (%s) already exists, treating as success", parentTask.ID, planBranch)
+			return nil
+		}
 		return fmt.Errorf("gh pr create: %w\n%s", err, out)
+	}
+	if err := d.db.MarkPRHandled(parentTask.ID); err != nil {
+		return fmt.Errorf("record created PR: %w", err)
 	}
 
 	d.logger.Printf("created PR for plan %s (%s)", parentTask.ID, parentTask.Title)
 	return nil
+}
+
+func branchCommitCount(repoPath, baseBranch, headBranch string) (int, error) {
+	cmd := exec.Command("git", "rev-list", "--count", baseBranch+".."+headBranch)
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("count commits between %s and %s: %w", baseBranch, headBranch, err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("parse commit count: %w", err)
+	}
+	return n, nil
 }
 
 // formatPRBody assembles the PR body from parent task notes.

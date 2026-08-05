@@ -1,11 +1,115 @@
 package daemon
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/dispatch-ai/dispatch/internal/config"
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
+
+func TestCreatePR_ZeroDiffSkipsGH(t *testing.T) {
+	repoDir := initPRTestRepo(t)
+	marker := filepath.Join(t.TempDir(), "gh-called")
+	ghDir := t.TempDir()
+	writeFakeGH(t, ghDir, marker, 0)
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", ghDir+string(os.PathListSeparator)+oldPath)
+	t.Cleanup(func() { os.Setenv("PATH", oldPath) })
+
+	d := openTestDB(t)
+	repo := repoDir
+	parent, err := d.AddTask("already merged", "", "", "", &repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createPRTestBranch(t, repoDir, parent.ID)
+	daemon := New(d, Config{BaseBranch: "main"}, &MockSpawner{})
+
+	if err := daemon.createPR(repoDir, *parent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("gh was invoked for zero-diff branch: %v", err)
+	}
+	notes, err := d.GetNotes(parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != 1 || !contains(notes[0].Content, "no commits relative to main") {
+		t.Fatalf("unexpected zero-diff note: %+v", notes)
+	}
+}
+
+func TestCreatePR_GitCountErrorFallsThroughToGH(t *testing.T) {
+	repoDir := initPRTestRepo(t)
+	marker := filepath.Join(t.TempDir(), "gh-called")
+	ghDir := t.TempDir()
+	writeFakeGH(t, ghDir, marker, 1)
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", ghDir+string(os.PathListSeparator)+oldPath)
+	t.Cleanup(func() { os.Setenv("PATH", oldPath) })
+
+	d := openTestDB(t)
+	repo := repoDir
+	parent, err := d.AddTask("count error", "", "", "", &repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createPRTestBranch(t, repoDir, parent.ID)
+	daemon := New(d, Config{BaseBranch: "missing-base"}, &MockSpawner{})
+
+	if err := daemon.createPR(repoDir, *parent); err == nil || !contains(err.Error(), "gh pr create") {
+		t.Fatalf("createPR error = %v, want gh failure", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("gh was not invoked after git count error: %v", err)
+	}
+}
+
+func initPRTestRepo(t *testing.T) string {
+	t.Helper()
+	repoDir := initTestRepo(t)
+	for _, args := range [][]string{{"git", "branch", "-M", "main"}} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v failed: %v\n%s", args, err, out)
+		}
+	}
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	cmd := exec.Command("git", "init", "--bare", remote)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("init bare repo: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "remote", "add", "origin", remote)
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("add origin: %v\n%s", err, out)
+	}
+	return repoDir
+}
+
+func createPRTestBranch(t *testing.T, repoDir, taskID string) {
+	t.Helper()
+	cmd := exec.Command("git", "checkout", "-b", "dispatch/plan-"+taskID)
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create plan branch: %v\n%s", err, out)
+	}
+}
+
+func writeFakeGH(t *testing.T, dir, marker string, exitCode int) {
+	t.Helper()
+	path := filepath.Join(dir, "gh")
+	script := fmt.Sprintf("#!/bin/sh\nprintf invoked > %q\nexit %d\n", marker, exitCode)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestFormatPRBody_WithNotes(t *testing.T) {
 	worker := "worker"
