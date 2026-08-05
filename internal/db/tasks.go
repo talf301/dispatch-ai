@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -121,6 +122,13 @@ func (d *DB) SetBaseBranch(id, branch string) (*Task, error) {
 	}
 	if task.ParentID != nil {
 		return nil, fmt.Errorf("task %s is a child; children start from the parent plan branch", id)
+	}
+	if task.Repo != nil {
+		cmd := exec.Command("git", "rev-parse", "--verify", branch)
+		cmd.Dir = *task.Repo
+		if err := cmd.Run(); err != nil {
+			return nil, fmt.Errorf("base branch %q does not exist in repository %q", branch, *task.Repo)
+		}
 	}
 	if _, err := d.q.Exec("UPDATE tasks SET base_branch = ? WHERE id = ?", branch, id); err != nil {
 		return nil, fmt.Errorf("set base branch: %w", err)
