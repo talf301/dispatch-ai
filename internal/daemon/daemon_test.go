@@ -275,7 +275,7 @@ func TestAdoptedHandle_CleanExitIsNotAFailure(t *testing.T) {
 		{"worker committed nothing", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newAdoptedHandle(exitedPID(t), func() bool { return tc.committed })
+			h := newAdoptedHandle(exitedPID(t), func() bool { return tc.committed }, nil, "")
 			select {
 			case <-h.Done():
 			case <-time.After(10 * time.Second):
@@ -285,6 +285,53 @@ func TestAdoptedHandle_CleanExitIsNotAFailure(t *testing.T) {
 				t.Errorf("Err() = %v, wantErr %v", h.Err(), tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestDaemon_RecoverActive_ClosesAdoptedAttempt(t *testing.T) {
+	d := openTestDB(t)
+	worktreeBase := filepath.Join(t.TempDir(), "worktrees")
+	task, err := d.AddTask("recovered usage", "", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ClaimTask(task.ID, "old-session"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.StartAttempt("recovered-attempt", task.ID, string(RoleWorker), "codex", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	wtDir := filepath.Join(worktreeBase, task.ID)
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sleep", "0.1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePIDFile(filepath.Join(wtDir, "worker.pid"), cmd.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+
+	daemon := &Daemon{db: d, repos: make(map[string]config.RepoConfig), worktreeBase: worktreeBase,
+		workers: make(map[string]WorkerHandle), workerRepo: make(map[string]string), logger: log.New(io.Discard, "", 0)}
+	daemon.recoverActive()
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-daemon.workers[task.ID].Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("recovered handle never reported exit")
+	}
+
+	usage, err := d.Usage(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage.Attempts) != 1 || usage.Attempts[0].EndedAt == nil || usage.Attempts[0].ExitStatus == nil || *usage.Attempts[0].ExitStatus != -1 {
+		t.Fatalf("recovered attempt = %+v, want closed with unknown status", usage.Attempts)
 	}
 }
 

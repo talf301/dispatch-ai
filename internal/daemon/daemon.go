@@ -212,7 +212,11 @@ func (d *Daemon) recoverActive() {
 				has, err := worktreeBranchHasCommits(wtDir, baseBranch, branchName)
 				return err != nil || has
 			}
-			d.workers[task.ID] = newAdoptedHandle(pid, committed)
+			attemptKey, err := d.db.ActiveAttemptKey(task.ID, string(RoleWorker))
+			if err != nil {
+				d.logger.Printf("recovery: task %s usage attempt: %v", task.ID, err)
+			}
+			d.workers[task.ID] = newAdoptedHandle(pid, committed, d.db, attemptKey)
 			d.workerRepo[task.ID] = repoPath
 		} else {
 			d.logger.Printf("recovery: task %s worker (pid %d) is dead, blocking", task.ID, pid)
@@ -264,21 +268,28 @@ func readPIDFile(path string) (int, string, error) {
 
 // adoptedHandle monitors a process the daemon didn't spawn (re-adopted on restart).
 type adoptedHandle struct {
-	pid     int
-	output  string
-	done    chan struct{}
-	exitErr error
+	pid        int
+	output     string
+	done       chan struct{}
+	exitErr    error
+	usageDB    *db.DB
+	attemptKey string
 }
 
 // newAdoptedHandle watches a process the daemon did not spawn, so no exit
 // status is available. Clean exit is inferred from the completion marker the
 // worker prompt asks for — commits on the task's own branch — since workers are
 // explicitly told not to call `dt done`. committed must not touch daemon state.
-func newAdoptedHandle(pid int, committed func() bool) *adoptedHandle {
-	h := &adoptedHandle{pid: pid, done: make(chan struct{})}
+func newAdoptedHandle(pid int, committed func() bool, usageDB *db.DB, attemptKey string) *adoptedHandle {
+	h := &adoptedHandle{pid: pid, done: make(chan struct{}), usageDB: usageDB, attemptKey: attemptKey}
 	go func() {
 		for isProcessAlive(pid) {
 			time.Sleep(1 * time.Second)
+		}
+		if h.usageDB != nil && h.attemptKey != "" {
+			// A re-adopted process has no captured provider stream or wait result.
+			status := -1
+			_ = h.usageDB.FinishAttempt(h.attemptKey, db.Attempt{ExitStatus: &status})
 		}
 		if !committed() {
 			h.exitErr = fmt.Errorf("adopted process %d exited without committing to its branch", pid)
