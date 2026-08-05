@@ -1,0 +1,250 @@
+<title>Firstmate alternatives</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  :where(.grid, .flex) > * { min-width: 0; }
+  :where(p, h1, h2, h3, h4, li, dd, blockquote, figcaption, td, th, .badge, .label) { overflow-wrap: anywhere; }
+  :where(img, svg, video, canvas, iframe) { max-width: 100%; height: auto; }
+  .src-link { text-decoration: underline; text-decoration-color: color-mix(in oklch, currentColor 30%, transparent); }
+</style>
+<div data-theme="luxury">
+<main class="mx-auto max-w-6xl p-5 lg:p-10 space-y-10">
+
+  <!-- Decision framing -->
+  <header class="space-y-3">
+    <div class="badge badge-soft badge-primary">Research report · deep-research workflow</div>
+    <h1 class="text-3xl lg:text-4xl font-bold leading-tight">Is there a firstmate-like tool that's less raw, cheaper on tokens, and more deterministic?</h1>
+    <p class="text-base-content/70 max-w-3xl">You liked firstmate's "one captain, a crew of agents" model but not its rawness, token burn, or LLM-for-everything plumbing. Researched what else exists in this category with real non-creator usage.</p>
+  </header>
+
+  <!-- Bottom line -->
+  <div role="alert" class="alert alert-warning alert-vertical sm:alert-horizontal shadow-sm">
+    <div>
+      <h3 class="font-bold">No clean swap exists yet</h3>
+      <div class="text-sm mt-1">Nothing found combines firstmate's <b>multi-agent crew orchestration</b> with <b>confirmed</b> better determinism or token efficiency. Two tools (Claude&nbsp;Squad, Vibe&nbsp;Kanban) share firstmate's architecture but weren't shown to be more deterministic. One tool (Pi) solves the token problem but drops the crew model entirely. This looks like a gap in the ecosystem, not a firstmate-specific defect.</div>
+    </div>
+  </div>
+
+  <!-- Firstmate baseline -->
+  <section class="space-y-3">
+    <h2 class="text-xl font-semibold">Firstmate, for reference</h2>
+    <div class="card card-border bg-base-100">
+      <div class="card-body">
+        <p class="text-sm">A single "first mate" agent spawns a crew of autonomous coding agents into isolated sessions (tmux/herdr/zellij/cmux/Orca), each with its own git worktree, and supervises them to PRs/merges/reports. It already has <i>some</i> deterministic plumbing &mdash; worktree creation, on-disk state, session persistence, and a bash <code class="text-xs">fm-watch.sh</code> watcher that sleeps on the fleet and only wakes the LLM when something's actionable (the "zero-token supervision" claim). But routing, code changes, report generation, and supervision judgment all still run through the LLM &mdash; consistent with feeling raw and token-hungry despite that marketing.</p>
+        <div class="flex flex-wrap gap-2 mt-2 text-xs text-base-content/60">
+          <span>~2.5k★ · 853 forks · 1 contributor (per trendshift.io)</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Comparison table -->
+  <section class="space-y-3">
+    <h2 class="text-xl font-semibold">At a glance</h2>
+    <div class="overflow-x-auto rounded-box border border-base-content/10 bg-base-100">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Tool</th>
+            <th>Category</th>
+            <th>Multi-agent crew?</th>
+            <th>More deterministic than firstmate?</th>
+            <th>Token cost vs firstmate</th>
+            <th>Non-creator usage evidence</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="font-semibold">Claude Squad</td>
+            <td>Orchestration layer</td>
+            <td><span class="badge badge-soft badge-success badge-sm">Yes</span></td>
+            <td><span class="badge badge-soft badge-error badge-sm">Checked, refuted</span></td>
+            <td>Unclear &mdash; not tested</td>
+            <td>Active OSS project; no star count captured</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Vibe Kanban</td>
+            <td>Orchestration layer + kanban UI</td>
+            <td><span class="badge badge-soft badge-success badge-sm">Yes</span></td>
+            <td><span class="badge badge-soft badge-ghost badge-sm">Not evaluated</span></td>
+            <td>Unclear &mdash; not tested</td>
+            <td>Widest agent-backend support (10+); maintenance post-shutdown ambiguous</td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Cline</td>
+            <td>Single-agent extension</td>
+            <td><span class="badge badge-soft badge-error badge-sm">No</span></td>
+            <td><span class="badge badge-soft badge-error badge-sm">Checked, refuted</span></td>
+            <td>Unclear &mdash; not tested</td>
+            <td><span class="badge badge-soft badge-primary badge-sm">Strongest: ~4.8-5M installs</span></td>
+          </tr>
+          <tr>
+            <td class="font-semibold">Pi</td>
+            <td>Single-agent, minimal core</td>
+            <td><span class="badge badge-soft badge-error badge-sm">No</span></td>
+            <td>Not the same mechanism</td>
+            <td><span class="badge badge-soft badge-success badge-sm">~1K vs 7-10K token system prompt</span></td>
+            <td>Active OSS, named non-creator users (e.g. Armin Ronacher)</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Option cards -->
+  <section class="space-y-4">
+    <h2 class="text-xl font-semibold">The options</h2>
+    <div class="grid md:grid-cols-2 gap-4">
+
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <div class="flex items-center justify-between">
+            <h3 class="card-title text-lg">Claude Squad</h3>
+            <span class="badge badge-soft badge-secondary">Closest architectural peer</span>
+          </div>
+          <p class="text-sm text-base-content/70">Terminal app managing multiple Claude Code, Codex, Gemini, and Aider instances at once &mdash; each in its own tmux session and git worktree.</p>
+          <div class="divider my-1"></div>
+          <div class="grid grid-cols-2 gap-3 text-sm">
+            <div>
+              <div class="font-semibold text-success mb-1">Advantages</div>
+              <ul class="list-disc pl-4 space-y-1">
+                <li>Same tmux + worktree isolation model you liked in firstmate</li>
+                <li>Works across multiple underlying agent CLIs, not locked to one</li>
+              </ul>
+            </div>
+            <div>
+              <div class="font-semibold text-error mb-1">Disadvantages</div>
+              <ul class="list-disc pl-4 space-y-1">
+                <li>Claim that it cleanly delegates session/branch/git ops to non-LLM code &mdash; <b>refuted 0-3</b></li>
+                <li>No evidence it's more token-efficient than firstmate</li>
+                <li>No install/star counts survived verification</li>
+              </ul>
+            </div>
+          </div>
+          <a class="src-link text-xs mt-2" href="https://github.com/smtg-ai/claude-squad" target="_blank">github.com/smtg-ai/claude-squad</a>
+        </div>
+      </div>
+
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <div class="flex items-center justify-between">
+            <h3 class="card-title text-lg">Vibe Kanban</h3>
+            <span class="badge badge-soft badge-secondary">Widest backend support</span>
+          </div>
+          <p class="text-sm text-base-content/70">Kanban-board orchestration layer (BloopAI) running 10+ existing coding agents &mdash; Claude Code, Codex, Gemini CLI, Copilot, Amp, Cursor, OpenCode, Droid, CCR, Qwen &mdash; each in isolated worktrees/branches.</p>
+          <div class="divider my-1"></div>
+          <div class="grid grid-cols-2 gap-3 text-sm">
+            <div>
+              <div class="font-semibold text-success mb-1">Advantages</div>
+              <ul class="list-disc pl-4 space-y-1">
+                <li>Broadest agent-backend list of anything found</li>
+                <li>Visual kanban board vs. firstmate's chat-driven captain interface &mdash; more structured task review</li>
+              </ul>
+            </div>
+            <div>
+              <div class="font-semibold text-error mb-1">Disadvantages</div>
+              <ul class="list-disc pl-4 space-y-1">
+                <li>No confirmed edge on determinism or token cost over firstmate</li>
+                <li>Maintenance status post-BloopAI-shutdown is genuinely ambiguous (the "it's dead" claim was refuted, but that's not confirmation it's alive &mdash; check recent commits before adopting)</li>
+              </ul>
+            </div>
+          </div>
+          <a class="src-link text-xs mt-2" href="https://github.com/BloopAI/vibe-kanban" target="_blank">github.com/BloopAI/vibe-kanban</a>
+        </div>
+      </div>
+
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <div class="flex items-center justify-between">
+            <h3 class="card-title text-lg">Cline</h3>
+            <span class="badge badge-soft badge-primary">Most-adopted, but different category</span>
+          </div>
+          <p class="text-sm text-base-content/70">VS Code extension, single-agent, plan/act workflow loop with terminal + browser control. Not a crew orchestrator at all.</p>
+          <div class="divider my-1"></div>
+          <div class="grid grid-cols-2 gap-3 text-sm">
+            <div>
+              <div class="font-semibold text-success mb-1">Advantages</div>
+              <ul class="list-disc pl-4 space-y-1">
+                <li>Strongest adoption evidence in this research: ~4.8-5M installs, independently verified on the VS Code Marketplace</li>
+                <li>Mature, well-trodden, easy to try</li>
+              </ul>
+            </div>
+            <div>
+              <div class="font-semibold text-error mb-1">Disadvantages</div>
+              <ul class="list-disc pl-4 space-y-1">
+                <li>No multi-agent crew &mdash; loses the thing you liked about firstmate</li>
+                <li>Claim that plan/act gives "more deterministic phase separation" &mdash; <b>refuted 0-3</b></li>
+              </ul>
+            </div>
+          </div>
+          <a class="src-link text-xs mt-2" href="https://marketplace.visualstudio.com/items?itemName=saoudrizwan.claude-dev" target="_blank">VS Code Marketplace listing</a>
+        </div>
+      </div>
+
+      <div class="card card-border bg-base-100">
+        <div class="card-body">
+          <div class="flex items-center justify-between">
+            <h3 class="card-title text-lg">Pi</h3>
+            <span class="badge badge-soft badge-success">Best answer to the token complaint</span>
+          </div>
+          <p class="text-sm text-base-content/70">By Armin Ronacher &amp; Mario Zechner. Minimal core: four tools (Read, Write, Edit, Bash), no MCP. Lazy-loading skill system keeps only skill <i>descriptions</i> in context; full instructions/schemas load only when a skill actually fires.</p>
+          <div class="divider my-1"></div>
+          <div class="grid grid-cols-2 gap-3 text-sm">
+            <div>
+              <div class="font-semibold text-success mb-1">Advantages</div>
+              <ul class="list-disc pl-4 space-y-1">
+                <li>Sub-1K-token system prompt vs. ~7-10K for Claude Code / Cline / OpenCode &mdash; directly attacks your token-bloat complaint</li>
+                <li>Deliberately minimal, opinionated design (vs. firstmate's "raw" feel)</li>
+              </ul>
+            </div>
+            <div>
+              <div class="font-semibold text-error mb-1">Disadvantages</div>
+              <ul class="list-disc pl-4 space-y-1">
+                <li>Single-agent, no fleet/crew/parallel-worker concept at all</li>
+                <li>Trades away the exact multi-agent feature you liked about firstmate</li>
+              </ul>
+            </div>
+          </div>
+          <a class="src-link text-xs mt-2" href="https://lucumr.pocoo.org/2026/1/31/pi/" target="_blank">lucumr.pocoo.org/2026/1/31/pi</a>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- Checked and refuted -->
+  <section class="space-y-3">
+    <div tabindex="0" class="collapse collapse-arrow bg-base-100 border border-base-content/10">
+      <div class="collapse-title font-semibold text-sm">Claims specifically checked and refuted (transparency)</div>
+      <div class="collapse-content">
+        <ul class="text-xs space-y-2 text-base-content/70 pt-2">
+          <li><span class="badge badge-error badge-xs mr-1"></span> Claude Squad cleanly delegates deterministic ops to non-LLM code, unlike firstmate &mdash; <b>0-3</b></li>
+          <li><span class="badge badge-error badge-xs mr-1"></span> Vibe Kanban is sunsetting after BloopAI's reported shutdown &mdash; <b>1-2</b> (not confirmed dead, but not confirmed alive either)</li>
+          <li><span class="badge badge-error badge-xs mr-1"></span> Cline's plan/act loop is more deterministic than freeform agents &mdash; <b>0-3</b></li>
+          <li><span class="badge badge-error badge-xs mr-1"></span> Aider has the largest deployed user base / heaviest token throughput of any OSS coding CLI &mdash; <b>0-3</b></li>
+          <li><span class="badge badge-error badge-xs mr-1"></span> Aider's auto-generated commit messages are evidence of superior deterministic handling &mdash; <b>0-3</b></li>
+          <li><span class="badge badge-error badge-xs mr-1"></span> OpenCode has substantial non-creator adoption at scale (165k+ stars) &mdash; <b>1-2</b></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- Open questions -->
+  <section class="space-y-3">
+    <h2 class="text-xl font-semibold">Worth checking before you act on this</h2>
+    <ul class="list-disc pl-5 text-sm space-y-1 text-base-content/80">
+      <li>Whether Claude Squad or Vibe Kanban have anything like firstmate's zero-token bash watcher, or whether they poll/re-invoke the LLM for status &mdash; i.e. do they share firstmate's core token-burn problem?</li>
+      <li>Actual GitHub star/fork/contributor counts for Claude Squad and Vibe Kanban, to gauge real adoption against firstmate's ~2.5k stars.</li>
+      <li>Whether Pi's lazy-skill-loading pattern could be retrofitted into firstmate itself &mdash; keeping the crew model, cutting the token overhead &mdash; rather than switching tools outright.</li>
+      <li>Whether Vibe Kanban is still actively maintained post-BloopAI-shutdown, and by whom.</li>
+    </ul>
+  </section>
+
+  <footer class="text-xs text-base-content/50 pt-4 border-t border-base-content/10">
+    Deep-research workflow: 6 search angles, 21 sources fetched, 93 claims extracted, 25 adversarially verified (15 confirmed / 10 refuted), 104 subagent calls. Adoption evidence is uneven &mdash; Cline's install count is independently verifiable; Claude Squad, Vibe Kanban, and Pi rest on visible activity rather than hard numbers.
+  </footer>
+
+</main>
+</div>

@@ -62,16 +62,28 @@ func NewInitCmd() *cobra.Command {
 				maxWorkers = n
 			}
 
+			deliveryMode := config.DefaultDeliveryMode
+			fmt.Fprintf(os.Stderr, "Delivery mode [%s] (%s, %s, %s): ", config.DefaultDeliveryMode, config.DeliveryModeNoMistakes, config.DeliveryModeDirectPR, config.DeliveryModeLocalOnly)
+			line, _ = reader.ReadString('\n')
+			line = strings.TrimSpace(line)
+			if line != "" {
+				deliveryMode = line
+			}
+			if deliveryMode != config.DeliveryModeNoMistakes && deliveryMode != config.DeliveryModeDirectPR && deliveryMode != config.DeliveryModeLocalOnly {
+				return fmt.Errorf("invalid delivery_mode value: %q", deliveryMode)
+			}
+
 			// Write config entry.
 			repo := config.RepoConfig{
-				Path:       repoPath,
-				MaxWorkers: maxWorkers,
+				Path:         repoPath,
+				MaxWorkers:   maxWorkers,
+				DeliveryMode: deliveryMode,
 			}
 			if err := config.SaveRepoEntry(cfgPath, repo); err != nil {
 				return fmt.Errorf("saving config: %w", err)
 			}
 
-			fmt.Fprintf(os.Stderr, "Registered %s (max_workers=%d) in %s\n", repoPath, maxWorkers, cfgPath)
+			fmt.Fprintf(os.Stderr, "Registered %s (max_workers=%d, delivery_mode=%s) in %s\n", repoPath, maxWorkers, deliveryMode, cfgPath)
 			return nil
 		},
 	}

@@ -1,0 +1,354 @@
+<title>Graph-pilot as a Linear + dispatch UI layer</title>
+<style>
+  /* Deliberately fixed dark theme -- mirrors graph-pilot's real gp-serve dashboard,
+     which is itself always dark (docs/images/dashboard.png), not adapted to viewer light/dark. */
+  :root {
+    --bg: #1a1a2e;
+    --surface: #16213e;
+    --surface-alt: #0f3460;
+    --text: #e0e0e0;
+    --text-muted: #888;
+    --border: #2a2a4a;
+    --accent: #6c63ff;
+    --accent-hover: #5a52d5;
+    --linear-backlog: #95a5a6;
+    --linear-todo: #3b82f6;
+    --linear-progress: #9b59b6;
+    --linear-review: #f97316;
+    --linear-done: #22c55e;
+    --linear-blocked: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  .intro { max-width: 1000px; margin: 0 auto; padding: 20px 20px 0; }
+  .intro h1 { font-size: 1.3rem; margin: 0 0 6px; }
+  .intro p { color: var(--text-muted); font-size: 0.85rem; margin: 0 0 14px; line-height: 1.5; }
+  .steps { max-width: 1000px; margin: 0 auto 14px; display: flex; gap: 6px; flex-wrap: wrap; padding: 0 20px; }
+  .step-btn { background: var(--surface); border: 1px solid var(--border); color: var(--text-muted);
+    padding: 6px 12px; border-radius: 8px; font-size: 0.8rem; cursor: pointer; }
+  .step-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .step-btn:hover:not(.active) { border-color: var(--accent); color: var(--text); }
+
+  /* Rework per feedback: no fixed-width left sidebar eating canvas space -- a slim top
+     toolbar instead, so the graph gets nearly the full width. Matters most on a laptop. */
+  .app { display: flex; flex-direction: column; width: 100%; max-width: 1600px; height: min(78vh, 760px);
+    min-height: 480px; margin: 0 auto 8px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .topbar { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; background: var(--surface);
+    border-bottom: 1px solid var(--border); padding: 8px 14px; flex-shrink: 0; }
+  .topbar .logo { color: var(--accent); font-weight: 700; font-size: 0.95rem; white-space: nowrap; }
+  .topbar .subhead { font-size: 0.65rem; color: var(--text-muted); white-space: nowrap; margin-left: -12px; }
+  .filter-group { display: flex; align-items: center; gap: 6px; }
+  .filter-label { font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); white-space: nowrap; }
+  .pill-row { display: flex; flex-wrap: wrap; gap: 4px; }
+  .pill { border: 1px solid var(--border); background: transparent; color: var(--text-muted);
+    border-radius: 10px; padding: 2px 8px; font-size: 0.68rem; cursor: default; white-space: nowrap; }
+  .pill.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .sync-note { margin-left: auto; font-size: 0.64rem; color: var(--text-muted); text-align: right; max-width: 220px; line-height: 1.35; }
+  .sync-note b { color: var(--linear-todo); }
+
+  .main { display: flex; flex: 1; min-height: 0; }
+  .canvas { flex: 1; position: relative; min-width: 0; background:
+    radial-gradient(circle at 1px 1px, rgba(255,255,255,0.04) 1px, transparent 0) 0 0/22px 22px; }
+  .hint-bar { position: absolute; bottom: 0; left: 0; right: 0; text-align: center; font-size: 0.68rem;
+    color: var(--text-muted); padding: 6px; border-top: 1px solid var(--border); background: rgba(22,33,62,0.6); }
+
+  svg.edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .node { position: absolute; border-radius: 8px; display: flex; align-items: center;
+    justify-content: center; font-size: 0.72rem; text-align: center; padding: 4px 8px; cursor: pointer;
+    transition: box-shadow .15s, transform .15s; line-height: 1.25; }
+  .node:hover { transform: translateY(-1px); }
+  .node.selected { box-shadow: 0 0 0 2px var(--accent), 0 0 14px rgba(108,99,255,0.5); }
+  .node .id { display: block; font-size: 0.6rem; opacity: 0.7; margin-bottom: 1px; }
+  .node.project { border-radius: 14px; font-weight: 600; }
+  .node.ghost { border: 1.5px dashed #666; background: transparent; color: var(--text-muted);
+    font-style: italic; cursor: default; }
+  .node.ghost:hover { transform: none; }
+
+  .dt-badge { position: absolute; min-width: 15px; height: 15px; border-radius: 8px; top: -6px; right: -6px;
+    border: 2px solid var(--bg); font-size: 0.55rem; font-weight: 700; display: flex; align-items: center;
+    justify-content: center; padding: 0 3px; color: #1a1a2e; }
+  .dt-badge.pulsing { animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(249,115,22,0.6);} 70% { box-shadow: 0 0 0 6px rgba(249,115,22,0);} 100% { box-shadow: 0 0 0 0 rgba(249,115,22,0);} }
+
+  .callout { position: absolute; border: 1px dashed var(--accent); border-radius: 8px; background: rgba(108,99,255,0.08);
+    padding: 6px 8px; font-size: 0.66rem; color: #b8b3ff; max-width: 190px; line-height: 1.4; display: none; }
+  .callout.show { display: block; }
+  .callout.muted { border-color: #666; background: rgba(255,255,255,0.03); color: var(--text-muted); }
+
+  .panel { width: 320px; background: var(--surface); border-left: 1px solid var(--border); padding: 16px;
+    flex-shrink: 0; overflow-y: auto; display: flex; flex-direction: column; transition: width .15s, padding .15s; }
+  .panel.empty { width: 0; padding: 0; border-left: none; overflow: hidden; }
+  .panel .placeholder { color: var(--text-muted); font-size: 0.8rem; margin-top: 40px; text-align: center; }
+  .panel-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+  .panel-title { font-size: 1rem; font-weight: 600; }
+  .panel-id { font-size: 0.7rem; color: var(--text-muted); }
+  .badge-row { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+  .badge { font-size: 0.68rem; padding: 2px 8px; border-radius: 5px; font-weight: 600; }
+  .meta-row { display: flex; justify-content: space-between; font-size: 0.75rem; padding: 6px 0; border-bottom: 1px solid var(--border); color: var(--text-muted); }
+  .meta-row span:last-child { color: var(--text); }
+  .desc { font-size: 0.78rem; line-height: 1.55; color: var(--text); margin: 12px 0; }
+  .dispatch-box { margin-top: auto; padding-top: 14px; border-top: 1px solid var(--border); }
+  .dispatch-box h4 { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin: 0 0 4px; }
+  .dispatch-note { font-size: 0.66rem; color: var(--text-muted); line-height: 1.4; margin-bottom: 10px; }
+  .dispatch-empty { font-size: 0.78rem; color: var(--text-muted); margin-bottom: 10px; }
+  .task-card { border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 6px; }
+  .task-card .trow { font-size: 0.72rem; padding: 2px 0; display: flex; justify-content: space-between; }
+  .task-card .trow span:last-child { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #b8b3ff; }
+  .task-card.done { opacity: 0.7; }
+  .action-btn { width: 100%; padding: 9px; border-radius: 7px; border: none; font-size: 0.82rem; font-weight: 600;
+    cursor: pointer; margin-top: 6px; }
+  .action-btn.start { background: var(--linear-done); color: #06240f; }
+  .action-btn.wait { background: var(--surface-alt); color: var(--text-muted); }
+  .action-btn.session { background: var(--linear-review); color: #2a1200; }
+  .action-btn.pr { background: var(--accent); color: #fff; }
+  .toast { margin-top: 10px; font-size: 0.72rem; background: var(--surface-alt); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 8px; color: #b8b3ff; display: none; }
+  .toast.show { display: block; }
+  .writeback { margin-top: 8px; font-size: 0.72rem; color: var(--linear-done); display: none; }
+  .writeback.show { display: block; }
+</style>
+
+<div class="intro">
+  <h1>Graph-pilot as pure UI layer over Linear + dispatch</h1>
+  <p>Mockup of the target dashboard once graph-pilot has no independent planning source of truth: nodes are Linear issues (pulled live), edges are Linear's own relations, and the "Dispatch" panel is the execution overlay. Built directly against graph-pilot's real <code>gp serve</code> visual language (colors/layout from <code>graphpilot/src/public/index.html</code>) so this reads as the same product, not a generic redesign. Click through the steps below &mdash; this is a static mockup, not live data. <b>Revised</b> per feedback: reworked layout (no fixed sidebar), dispatch tasks are now 1:many per issue, terminal viewing confirmed still-planned, node dimming made deliberate.</p>
+</div>
+
+<div class="steps" id="steps"></div>
+
+<div class="app">
+  <div class="topbar">
+    <span class="logo">GraphPilot</span>
+    <span class="subhead">synced from Linear</span>
+
+    <div class="filter-group">
+      <span class="filter-label">Status</span>
+      <div class="pill-row">
+        <span class="pill active">All</span>
+        <span class="pill">Backlog</span>
+        <span class="pill">Todo</span>
+        <span class="pill">In Progress</span>
+        <span class="pill">In Review</span>
+        <span class="pill">Done</span>
+      </div>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Dispatch</span>
+      <div class="pill-row">
+        <span class="pill active">All</span>
+        <span class="pill">Active task</span>
+        <span class="pill">No task yet</span>
+      </div>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Project</span>
+      <div class="pill-row">
+        <span class="pill active">All</span>
+        <span class="pill">Cubing Trainer</span>
+      </div>
+    </div>
+
+    <div class="sync-note">No "Design Session" button &mdash; issues are created/edited in <b>Linear</b>, this view is read (+ dispatch-state write) only.</div>
+  </div>
+
+  <div class="main">
+    <div class="canvas" id="canvas">
+      <svg class="edges" id="edges"></svg>
+      <!-- nodes injected by JS -->
+      <div class="callout" id="callout-edges" style="left:50px; top:250px;">Edges = Linear's own relations (parent/sub-issue, blocks/blocked-by) &mdash; not graph-pilot frontmatter anymore.</div>
+      <div class="callout" id="callout-terminal" style="left:850px; top:50px;">Still planned: view/type into the live session right here. Open question is just <i>how</i> (needs tmux/herdr mux unification) &mdash; not whether to build it.</div>
+      <div class="callout muted" id="callout-ghost" style="left:40px; top:470px;">Dispatch also tracks work with no Linear issue at all (e.g. ad hoc <code>dt go</code> captures). Not shown as graph nodes &mdash; nothing to attach them to.</div>
+      <div class="hint-bar">Click an issue to view it &middot; data synced from Linear, refreshed periodically</div>
+    </div>
+
+    <div class="panel empty" id="panel">
+      <div class="placeholder">Select an issue to view its Linear details and dispatch status.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const NODES = [
+  { id: 'proj', linearId: '', title: 'Cubing Trainer', x: 40, y: 20, w: 170, h: 46, status: 'project', type: 'project' },
+  { id: 'res121', linearId: 'RES-121', title: 'PLL Recognition Trainer', x: 440, y: 70, w: 150, h: 50, status: 'progress', type: 'issue',
+    tasks: [ { id: 'a0e1', status: 'done', branch: 'dispatch/a0e1', note: 'earlier round: scaffolding' } ] },
+  { id: 'res122', linearId: 'RES-122', title: 'Add scramble generator', x: 260, y: 200, w: 140, h: 44, status: 'done', type: 'issue',
+    tasks: [ { id: 'a0f3', status: 'done', branch: 'dispatch/a0f3', pr: '#139' } ] },
+  { id: 'res123', linearId: 'RES-123', title: 'Fix OLL case detection bug', x: 660, y: 200, w: 150, h: 46, status: 'todo', type: 'issue', tasks: [] },
+  { id: 'res124', linearId: 'RES-124', title: 'Cross-trainer drag-drop', x: 880, y: 90, w: 150, h: 46, status: 'review', type: 'issue',
+    tasks: [ { id: 'a0d2', status: 'done', branch: 'dispatch/a0d2', pr: '#142' } ] },
+  { id: 'res125', linearId: 'RES-125', title: 'Bluetooth cube state sync', x: 220, y: 350, w: 150, h: 46, status: 'backlog', type: 'issue', tasks: [] },
+  { id: 'res126', linearId: 'RES-126', title: 'Solve history UI redesign', x: 460, y: 370, w: 150, h: 46, status: 'todo', type: 'issue', tasks: [] },
+  { id: 'res127', linearId: 'RES-127', title: 'F2L pair efficiency stats', x: 700, y: 370, w: 150, h: 46, status: 'backlog', type: 'issue', tasks: [] },
+  { id: 'res128', linearId: 'RES-128', title: 'iOS deployment pipeline', x: 900, y: 290, w: 150, h: 46, status: 'blocked', type: 'issue', tasks: [] },
+];
+const EDGES = [
+  ['proj','res121',''], ['proj','res125',''], ['proj','res126',''], ['proj','res127',''],
+  ['res121','res122','parent'], ['res121','res124','blocks'], ['res123','res128','blocks'],
+];
+const STATUS_COLOR = { project: '#5a5a7a', backlog: 'var(--linear-backlog)', todo: 'var(--linear-todo)',
+  progress: 'var(--linear-progress)', review: 'var(--linear-review)', done: 'var(--linear-done)', blocked: 'var(--linear-blocked)' };
+const STATUS_LABEL = { backlog: 'Backlog', todo: 'Todo', progress: 'In Progress', review: 'In Review', done: 'Done', blocked: 'Cancelled' };
+/* Deliberate per-status prominence, not a uniform alpha: backlog/done recede on purpose
+   (lowest current relevance); todo/progress/review sit at a standard weight; blocked gets
+   a heavier fill + border because a cancelled/blocked item is worth noticing, not fading out. */
+const STATUS_WEIGHT = { project: { fill: 0x33, border: 1.5 }, backlog: { fill: 0x15, border: 1 }, done: { fill: 0x18, border: 1 },
+  todo: { fill: 0x22, border: 1.5 }, progress: { fill: 0x26, border: 2 }, review: { fill: 0x26, border: 2 }, blocked: { fill: 0x30, border: 2 } };
+
+const canvas = document.getElementById('canvas');
+const edgesSvg = document.getElementById('edges');
+const panel = document.getElementById('panel');
+let selected = null;
+let state = 0; // step index
+
+function resolveColor(v) { return v.startsWith('var(') ? getComputedStyle(document.documentElement).getPropertyValue(v.slice(4,-1)).trim() : v; }
+function hexAlpha(n) { return n.toString(16).padStart(2, '0'); }
+
+function render() {
+  canvas.querySelectorAll('.node').forEach(n => n.remove());
+  NODES.forEach(n => {
+    const el = document.createElement('div');
+    el.className = 'node' + (n.type === 'project' ? ' project' : '') + (selected === n.id ? ' selected' : '');
+    const color = resolveColor(STATUS_COLOR[n.status]);
+    const weight = STATUS_WEIGHT[n.status] || STATUS_WEIGHT.todo;
+    el.style.left = n.x + 'px'; el.style.top = n.y + 'px'; el.style.width = n.w + 'px'; el.style.height = n.h + 'px';
+    el.style.background = color + hexAlpha(weight.fill);
+    el.style.border = weight.border + 'px solid ' + color;
+    el.style.color = '#e0e0e0';
+    el.innerHTML = (n.linearId ? `<span class="id">${n.linearId}</span>` : '') + n.title;
+    const activeCount = (n.tasks || []).filter(t => t.status === 'active').length;
+    const totalCount = (n.tasks || []).length;
+    if (totalCount > 0) {
+      const badge = document.createElement('div');
+      badge.className = 'dt-badge' + (activeCount > 0 && state >= 3 ? ' pulsing' : '');
+      badge.style.background = activeCount > 0 ? '#f97316' : '#22c55e';
+      badge.title = totalCount + ' dispatch task(s)';
+      badge.textContent = totalCount > 1 ? totalCount : '';
+      el.appendChild(badge);
+    }
+    el.onclick = () => { selected = n.id; renderPanel(); render(); };
+    canvas.appendChild(el);
+  });
+
+  // Ghost node: dispatch work that exists with no Linear issue at all.
+  const ghost = document.createElement('div');
+  ghost.className = 'node ghost';
+  ghost.style.left = '220px'; ghost.style.top = '470px'; ghost.style.width = '160px'; ghost.style.height = '40px';
+  ghost.textContent = '+ 3 dispatch tasks (no Linear issue)';
+  canvas.appendChild(ghost);
+
+  let svgHtml = '';
+  EDGES.forEach(([a, b, kind]) => {
+    const na = NODES.find(n => n.id === a), nb = NODES.find(n => n.id === b);
+    const x1 = na.x + na.w/2, y1 = na.y + na.h/2, x2 = nb.x + nb.w/2, y2 = nb.y + nb.h/2;
+    const stroke = kind === 'blocks' ? '#f97316' : kind === 'parent' ? '#555577' : '#3a3a5a';
+    const dash = kind === 'blocks' ? 'stroke-dasharray="5,4"' : '';
+    svgHtml += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${stroke}" stroke-width="1.5" ${dash}/>`;
+  });
+  edgesSvg.innerHTML = svgHtml;
+}
+
+function taskCardHtml(t) {
+  const statusLabel = t.status === 'active' ? 'active' : t.status === 'done' ? 'done' : t.status;
+  return `<div class="task-card ${t.status === 'done' ? 'done' : ''}">
+    <div class="trow"><span>Task</span><span>${t.id}</span></div>
+    <div class="trow"><span>Status</span><span>${statusLabel}</span></div>
+    ${t.branch ? `<div class="trow"><span>Branch</span><span>${t.branch}</span></div>` : ''}
+    ${t.pr ? `<div class="trow"><span>PR</span><span>${t.pr}</span></div>` : ''}
+    ${t.note ? `<div class="trow"><span></span><span style="font-style:italic;color:var(--text-muted)">${t.note}</span></div>` : ''}
+  </div>`;
+}
+
+function renderPanel() {
+  const n = NODES.find(x => x.id === selected);
+  panel.classList.toggle('empty', !n || n.type === 'project');
+  if (!n || n.type === 'project') {
+    panel.innerHTML = '<div class="placeholder">Select an issue to view its Linear details and dispatch status.</div>';
+    return;
+  }
+  const color = resolveColor(STATUS_COLOR[n.status]);
+  const tasks = n.tasks || [];
+  const activeTasks = tasks.filter(t => t.status === 'active' || t.status === 'claiming');
+  let dispatchHtml = tasks.map(taskCardHtml).join('');
+  if (activeTasks.length === 0) {
+    dispatchHtml += `<button class="action-btn start" onclick="startWork()">Start work</button>
+      <div class="toast" id="toast">Writing assembled context &rarr; <code>dt go --thought-file ... --repo cubing-trainer</code></div>`;
+  } else if (activeTasks[0].status === 'claiming') {
+    dispatchHtml += `<div class="toast show">Captured. Worktree + herdr pane being created&hellip;</div>
+      <button class="action-btn wait" disabled>Starting&hellip;</button>`;
+  } else {
+    dispatchHtml += `<button class="action-btn session">Open session</button>`;
+  }
+  if (state === 4 && n.id === 'res121') {
+    dispatchHtml += `<div class="writeback show">&#10003; Linear issue moved to Done (write-back)</div>
+      <button class="action-btn pr">View PR</button>`;
+  }
+  const displayStatus = state >= 4 && n.id === 'res121' ? 'done' : n.status;
+  panel.innerHTML = `
+    <div class="panel-header">
+      <div><div class="panel-id">${n.linearId}</div><div class="panel-title">${n.title}</div></div>
+    </div>
+    <div class="badge-row">
+      <span class="badge" style="background:${color}22;color:${color}">${STATUS_LABEL[displayStatus]}</span>
+      <span class="badge" style="background:#6c63ff22;color:#b8b3ff">Feature</span>
+      <span class="badge" style="background:#88888822;color:#ccc">P2</span>
+    </div>
+    <div class="meta-row"><span>Assignee</span><span>tal</span></div>
+    <div class="meta-row"><span>Project</span><span>Cubing Trainer</span></div>
+    <div class="meta-row"><span>Labels</span><span>trainer, ux</span></div>
+    <div class="desc">Train the user to quickly identify PLL cases from visual pattern alone &mdash; no cube, no execution. Isolates the "see pattern &rarr; name case" skill, the first step in fast PLL execution.<br><br><i>(description synced from Linear, read-only here)</i></div>
+    <div class="dispatch-box">
+      <h4>Dispatch</h4>
+      <div class="dispatch-note">One issue can have many dispatch tasks over time &mdash; they're not 1:1. Each task below is its own Claude Code session.</div>
+      ${dispatchHtml}
+    </div>
+  `;
+}
+
+function startWork() {
+  document.getElementById('toast')?.classList.add('show');
+  const n = NODES.find(x => x.id === 'res121');
+  setTimeout(() => {
+    n.tasks.push({ id: 'a1ae2', status: 'claiming' });
+    state = 2; buildSteps(); renderPanel(); render();
+  }, 350);
+}
+
+const STEP_DEFS = [
+  { label: '1 · Browse', desc: 'Graph reflects live Linear state; nothing selected, panel collapsed for max canvas space.' },
+  { label: '2 · Select RES-121', desc: 'Detail panel shows Linear data, plus a past dispatch task (done). A new task can be started alongside it.' },
+  { label: '3 · Start work', desc: 'Assembled Linear context is written to a file; dt go fires a new task.' },
+  { label: '4 · In progress', desc: 'New dispatch task active; node badge shows task count, pulses while one is active.' },
+  { label: '5 · Done', desc: 'PR merged; Linear issue is written back to Done automatically.' },
+];
+function buildSteps() {
+  const wrap = document.getElementById('steps');
+  wrap.innerHTML = '';
+  STEP_DEFS.forEach((s, i) => {
+    const b = document.createElement('button');
+    b.className = 'step-btn' + (state === i ? ' active' : '');
+    b.textContent = s.label;
+    b.onclick = () => {
+      state = i;
+      const n121 = NODES.find(x => x.id === 'res121');
+      if (i === 0) { selected = null; n121.tasks = [{ id: 'a0e1', status: 'done', branch: 'dispatch/a0e1', note: 'earlier round: scaffolding' }]; }
+      if (i >= 1) selected = 'res121';
+      if (i === 1) n121.tasks = [{ id: 'a0e1', status: 'done', branch: 'dispatch/a0e1', note: 'earlier round: scaffolding' }];
+      if (i === 3) n121.tasks = [{ id: 'a0e1', status: 'done', branch: 'dispatch/a0e1', note: 'earlier round: scaffolding' }, { id: 'a1ae2', status: 'active', branch: 'dispatch/a1ae2' }];
+      if (i === 4) n121.tasks = [{ id: 'a0e1', status: 'done', branch: 'dispatch/a0e1', note: 'earlier round: scaffolding' }, { id: 'a1ae2', status: 'done', branch: 'dispatch/a1ae2', pr: '#150 merged' }];
+      document.getElementById('callout-terminal').classList.toggle('show', i === 3);
+      document.getElementById('callout-edges').classList.toggle('show', i === 0);
+      document.getElementById('callout-ghost').classList.toggle('show', i === 0);
+      buildSteps(); renderPanel(); render();
+    };
+    wrap.appendChild(b);
+  });
+  const d = document.createElement('div');
+  d.style.cssText = 'flex-basis:100%; font-size:0.78rem; color:var(--text-muted); margin-top:4px;';
+  d.textContent = STEP_DEFS[state].desc;
+  wrap.appendChild(d);
+}
+
+buildSteps();
+render();
+</script>

@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dispatch unattended work in herdr</title>
+  <style>
+    :root { color-scheme: dark; --bg:#11111b; --panel:#181825; --panel2:#1e1e2e; --ink:#cdd6f4; --muted:#a6adc8; --line:#313244; --blue:#89b4fa; --green:#a6e3a1; --yellow:#f9e2af; --red:#f38ba8; }
+    * { box-sizing:border-box; min-width:0; }
+    body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 ui-sans-serif,system-ui,sans-serif; }
+    main { max-width:1120px; margin:0 auto; padding:42px 24px 72px; }
+    .eyebrow { color:var(--blue); font:12px ui-monospace,SFMono-Regular,monospace; letter-spacing:.12em; text-transform:uppercase; }
+    h1 { max-width:780px; margin:10px 0 12px; font-size:clamp(30px,5vw,54px); line-height:1.02; letter-spacing:-.04em; }
+    h2 { margin:0 0 14px; font-size:22px; letter-spacing:-.02em; }
+    h3 { margin:0 0 6px; font-size:17px; }
+    p { margin:0 0 12px; color:var(--muted); }
+    .lede { max-width:760px; font-size:18px; }
+    section { margin-top:34px; }
+    .panel, .option, .decision { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+    .option.recommended { border-color:var(--blue); box-shadow:0 0 0 1px color-mix(in srgb,var(--blue) 30%,transparent); }
+    .tag { display:inline-block; margin-bottom:10px; color:var(--green); font:12px ui-monospace,SFMono-Regular,monospace; }
+    .option ul { margin:14px 0 0; padding-left:20px; color:var(--muted); }
+    .option li { margin:5px 0; }
+    .metric { display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }
+    .chip { padding:4px 8px; border:1px solid var(--line); border-radius:999px; color:var(--muted); font:12px ui-monospace,SFMono-Regular,monospace; }
+    .chip.good { color:var(--green); border-color:#3d6650; }
+    .chip.warn { color:var(--yellow); border-color:#665a3d; }
+    .flow { overflow:hidden; }
+    .mermaid { min-height:210px; }
+    table { width:100%; border-collapse:collapse; table-layout:fixed; }
+    th,td { padding:11px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; overflow-wrap:anywhere; }
+    th { color:var(--blue); font:12px ui-monospace,SFMono-Regular,monospace; text-transform:uppercase; }
+    td { color:var(--muted); }
+    td:first-child { color:var(--ink); width:24%; }
+    code { color:var(--yellow); font:13px ui-monospace,SFMono-Regular,monospace; overflow-wrap:anywhere; }
+    form { display:grid; gap:12px; }
+    label { display:block; padding:12px; border:1px solid var(--line); border-radius:10px; cursor:pointer; }
+    label:has(input:checked) { border-color:var(--blue); background:var(--panel2); }
+    input { accent-color:var(--blue); margin-right:8px; }
+    button { justify-self:start; border:0; border-radius:9px; padding:10px 14px; background:var(--blue); color:#11111b; font-weight:700; cursor:pointer; }
+    .small { font-size:13px; }
+    @media (max-width:760px) { main { padding:28px 16px 56px; } .grid { grid-template-columns:1fr; } table { font-size:13px; } }
+  </style>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad:true, theme:'dark', themeVariables:{ primaryColor:'#1e1e2e', primaryTextColor:'#cdd6f4', primaryBorderColor:'#89b4fa', lineColor:'#a6adc8' } });
+  </script>
+</head>
+<body>
+<main>
+  <div class="eyebrow">Dispatch · topology decision</div>
+  <h1>Where should daemon work live in herdr?</h1>
+  <p class="lede">The TUI now shows daemon tasks, but the v1 daemon still launches workers directly in worktrees. This choice determines whether those workers become navigable herdr work, and how much topology the daemon must own.</p>
+
+  <section class="panel">
+    <h2>Current state</h2>
+    <table>
+      <tr><th>Path</th><th>What happens today</th></tr>
+      <tr><td><code>dt go</code> → live</td><td>Creates a herdr tab and pane immediately. The human can focus it from the TUI.</td></tr>
+      <tr><td><code>live → unattended</code></td><td>Reuses that pane; if it vanished, <code>internal/daemon/unattended.go</code> recreates the task tab and runs <code>claude --continue</code>.</td></tr>
+      <tr><td><code>dt add</code> → daemon queue</td><td>Daemon creates a worktree and spawns a direct CLI worker. No herdr tab, pane, or persisted runtime coordinates.</td></tr>
+    </table>
+  </section>
+
+  <section class="panel flow">
+    <h2>Desired relationship</h2>
+    <div class="mermaid">
+      flowchart LR
+        A[dt tui] --> B[SQLite task state]
+        B --> C{daemon task}
+        C --> D[herdr workspace]
+        D --> E[task tab or shared tab]
+        E --> F[agent pane]
+        F --> G[focus from TUI]
+    </div>
+    <p class="small">The TUI should remain a read/focus surface. The daemon owns creation, recovery, and cleanup; SQLite stores the coordinates.</p>
+  </section>
+
+  <section>
+    <h2>Two concrete shapes</h2>
+    <div class="grid">
+      <article class="option recommended">
+        <span class="tag">RECOMMENDED · smallest change</span>
+        <h3>One herdr tab per daemon task</h3>
+        <p>Route the v1 worker through the existing <code>EnsureWorkspace → CreateTab → RunPane</code> path. Persist <code>herdr_ws/tab/pane</code> on claim/spawn. The existing TUI Enter action can focus it.</p>
+        <ul>
+          <li>Matches the current v2 mental model: workspace = repo, tab = task, pane = agent.</li>
+          <li>Independent logs, focus, restart, and cleanup.</li>
+          <li>Works with current mux interface; no pane-splitting API needed.</li>
+        </ul>
+        <div class="metric"><span class="chip good">low topology risk</span><span class="chip good">easy recovery</span><span class="chip warn">more tabs</span></div>
+      </article>
+      <article class="option">
+        <span class="tag">COMPACT BOARD</span>
+        <h3>One daemon tab with one pane per task</h3>
+        <p>Create one repo-level “daemon” tab, then attach each worker to a child pane. The TUI focuses the relevant pane rather than a task tab.</p>
+        <ul>
+          <li>Fewer tabs and a single visual home for unattended work.</li>
+          <li>Requires new mux operations for split/create pane and pane lookup.</li>
+          <li>Pane lifecycle and cleanup become shared-resource problems.</li>
+        </ul>
+        <div class="metric"><span class="chip good">compact</span><span class="chip warn">new mux API</span><span class="chip warn">harder recovery</span></div>
+      </article>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Implementation boundary</h2>
+    <table>
+      <tr><th>Component</th><th>Change</th></tr>
+      <tr><td>daemon worker spawn</td><td>Create or reuse a herdr task tab, run the selected worker CLI in its pane, and persist runtime coordinates after spawn.</td></tr>
+      <tr><td>worker lifecycle</td><td>Keep the existing process handle and review gate as the correctness path. Herdr status is only navigation/attention state.</td></tr>
+      <tr><td>restart recovery</td><td>If the task is still <code>active</code> and its pane is gone, recreate the tab/pane and resume or respawn according to the existing worker recovery rules.</td></tr>
+      <tr><td>cleanup</td><td>Close the task tab when the worker is done, blocked, or the task is otherwise torn down. Never close the repo workspace.</td></tr>
+      <tr><td>TUI</td><td>Only needs the existing focus path, plus a clearer badge for <code>open</code> versus <code>active</code>.</td></tr>
+    </table>
+  </section>
+
+  <section class="decision" data-lavish-question="topology-choice">
+    <h2>Choose the direction</h2>
+    <p>Select the topology you want implemented. This is local until you queue it.</p>
+    <form onsubmit="event.preventDefault(); const choice = new FormData(event.currentTarget).get('topology'); if (choice) window.lavish.queuePrompt('Implement the ' + choice + ' herdr topology for daemon-managed tasks. Preserve the existing daemon correctness lifecycle and persist runtime coordinates so dt tui can focus the work.', {tag:'decision', text:'Topology choice: ' + choice, element:event.currentTarget, data:{question:'topology-choice', answer:choice}});">
+      <label><input type="radio" name="topology" value="one tab per task" checked> One tab per task <span class="small">- recommended, reuses current mux shape</span></label>
+      <label><input type="radio" name="topology" value="one shared daemon tab with task panes"> One shared daemon tab with task panes <span class="small">- compact, requires mux expansion</span></label>
+      <button type="submit">Queue this choice for the agent</button>
+    </form>
+  </section>
+</main>
+</body>
+</html>

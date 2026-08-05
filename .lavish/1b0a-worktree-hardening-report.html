@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en" data-theme="luxury">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Task 1b0a recovery and Dispatch hardening</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :where(.grid, .flex) > * { min-width: 0; }
+    :where(p, li, td, th, code, .badge) { overflow-wrap: anywhere; }
+    code { font-size: .88em; }
+  </style>
+</head>
+<body class="min-h-screen bg-base-300 text-base-content">
+  <main class="mx-auto max-w-6xl space-y-6 p-5 lg:p-10">
+    <section class="hero rounded-box border border-base-content/10 bg-base-100 shadow-xl">
+      <div class="hero-content w-full items-start py-10">
+        <div class="w-full">
+          <div class="mb-4 flex flex-wrap gap-2">
+            <span class="badge badge-success badge-lg">Recovery complete</span>
+            <span class="badge badge-success badge-lg">Hardening installed</span>
+            <span class="badge badge-warning badge-lg">Task still blocked</span>
+          </div>
+          <h1 class="text-3xl font-bold tracking-tight lg:text-5xl">Task 1b0a now starts from the right code</h1>
+          <p class="mt-4 max-w-4xl text-lg opacity-80">The task worktree was recreated at the preserved RES-125 commit, the base branch is now durable ledger state, and the live daemon is running the hardened build. The planner defect itself remains for the next worker.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="stats stats-vertical w-full border border-base-content/10 bg-base-100 shadow lg:stats-horizontal">
+      <div class="stat">
+        <div class="stat-title">Task worktree HEAD</div>
+        <div class="stat-value font-mono text-xl">eec5c7867b</div>
+        <div class="stat-desc">dispatch/1b0a</div>
+      </div>
+      <div class="stat">
+        <div class="stat-title">Dispatch hardening commit</div>
+        <div class="stat-value font-mono text-xl">936ea0d</div>
+        <div class="stat-desc">u/tfriedman/dispatch-local-recovery</div>
+      </div>
+      <div class="stat">
+        <div class="stat-title">Verification</div>
+        <div class="stat-value text-xl">Full suite passed</div>
+        <div class="stat-desc">go test ./...</div>
+      </div>
+    </section>
+
+    <section class="grid gap-5 lg:grid-cols-2">
+      <article class="card card-border bg-base-100 shadow">
+        <div class="card-body">
+          <h2 class="card-title text-2xl">Why it happened</h2>
+          <ol class="list-decimal space-y-3 pl-5 opacity-90">
+            <li>The desired branch appeared only inside the task description.</li>
+            <li>Descriptions are intentionally opaque text. Dispatch had no per-task base-branch field.</li>
+            <li>The daemon therefore followed its documented fallback and based <code>dispatch/1b0a</code> on <code>origin/main</code>.</li>
+            <li>The worker correctly refused to import an unrelated feature branch into the wrong worktree.</li>
+          </ol>
+          <div role="alert" class="alert alert-soft alert-info mt-3">
+            <span>This was a missing data-model capability, not a bad merge or lost branch. The source branch and commits were intact.</span>
+          </div>
+        </div>
+      </article>
+
+      <article class="card card-border bg-base-100 shadow">
+        <div class="card-body">
+          <h2 class="card-title text-2xl">What remains</h2>
+          <p>The exact test now runs from the corrected task worktree and reproduces the intended defect:</p>
+          <div class="mockup-code mt-2 bg-neutral text-neutral-content">
+            <pre data-prefix="$"><code>pytest example_01_modify_single_order_items_from_order_id_test.py -q</code></pre>
+            <pre data-prefix="!"><code>3 failed: planner returned 0 plans</code></pre>
+            <pre data-prefix="!"><code>SWI-Prolog: library(json) does not exist</code></pre>
+          </div>
+          <p class="mt-3 opacity-80">Task <code>1b0a</code> remains blocked because ledger policy reserves reopening for human approval. The recovery note is already attached to the task.</p>
+        </div>
+      </article>
+    </section>
+
+    <section class="card card-border bg-base-100 shadow">
+      <div class="card-body">
+        <h2 class="card-title text-2xl">Hardening now in place</h2>
+        <p class="opacity-75">Every layer that needs the base branch now receives the same durable value.</p>
+        <div class="overflow-x-auto rounded-box border border-base-content/10">
+          <table class="table table-zebra">
+            <thead>
+              <tr><th>Surface</th><th>Before</th><th>Now</th><th>Proof</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>dt add</code></td>
+                <td>Could only describe a feature branch in prose</td>
+                <td><code>--base-branch &lt;branch&gt;</code> persists it</td>
+                <td><span class="badge badge-success">Regression test</span></td>
+              </tr>
+              <tr>
+                <td><code>dt batch add</code></td>
+                <td>No feature-base input</td>
+                <td>Supports the same explicit flag</td>
+                <td><span class="badge badge-success">Regression test</span></td>
+              </tr>
+              <tr>
+                <td>Reopened tasks</td>
+                <td>Relied on whichever branch happened to survive</td>
+                <td><code>dt edit --base-branch</code> repairs durable state</td>
+                <td><span class="badge badge-success">Applied to 1b0a</span></td>
+              </tr>
+              <tr>
+                <td>Daemon worktrees</td>
+                <td>Parent plan, daemon default, or repo default only</td>
+                <td>Per-task base overrides defaults; children inherit the parent plan</td>
+                <td><span class="badge badge-success">Plan-base test</span></td>
+              </tr>
+              <tr>
+                <td>Pull requests</td>
+                <td>Always targeted daemon or repo default</td>
+                <td>Targets the task's recorded base branch</td>
+                <td><span class="badge badge-success">Shared resolver</span></td>
+              </tr>
+              <tr>
+                <td><code>dt show</code></td>
+                <td>Hid repository and base in plain output</td>
+                <td>Shows both fields before a worker starts</td>
+                <td><span class="badge badge-success">Live output</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="card card-border bg-base-100 shadow">
+      <div class="card-body">
+        <h2 class="card-title text-2xl">Operational state</h2>
+        <ul class="steps steps-vertical w-full lg:steps-horizontal">
+          <li class="step step-success">Preserved source located</li>
+          <li class="step step-success">Worktree recreated</li>
+          <li class="step step-success">Ledger base persisted</li>
+          <li class="step step-success">Binaries installed</li>
+          <li class="step step-success">Daemon restarted</li>
+          <li class="step step-warning">Human reopens 1b0a</li>
+        </ul>
+        <div role="alert" class="alert alert-soft alert-warning mt-5">
+          <span>Next action, if you want the planner investigation to resume now: <code>dt reopen 1b0a</code>.</span>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

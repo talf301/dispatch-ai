@@ -14,6 +14,33 @@ func BranchExists(repoDir, branchName string) bool {
 	return cmd.Run() == nil
 }
 
+// FetchOriginBranch refreshes the remote-tracking ref used as a repository
+// base. Repositories without an origin are local-only and need no fetch.
+func FetchOriginBranch(repoDir, branchName string) error {
+	remote := exec.Command("git", "remote", "get-url", "origin")
+	remote.Dir = repoDir
+	if err := remote.Run(); err != nil {
+		return nil
+	}
+	// A configured local-only base is valid. Do not turn its absent remote
+	// counterpart into a permanent spawn/PR failure.
+	ref := "refs/heads/" + branchName
+	check := exec.Command("git", "ls-remote", "--exit-code", "--heads", "origin", ref)
+	check.Dir = repoDir
+	if out, err := check.CombinedOutput(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 2 {
+			return nil
+		}
+		return fmt.Errorf("check origin %s: %w\n%s", branchName, err, out)
+	}
+	cmd := exec.Command("git", "fetch", "origin", branchName)
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git fetch origin %s: %w\n%s", branchName, err, out)
+	}
+	return nil
+}
+
 // DetectDefaultBranch resolves the repository's default branch: origin/HEAD
 // first, then a well-known remote branch, then a well-known local branch.
 // It deliberately never falls back to the checked-out branch — that silently
@@ -134,6 +161,62 @@ func MergeBranch(repoDir, sourceBranch, targetBranch string) error {
 	return nil
 }
 
+// FastForwardPlanBranch advances a plan branch to newBase only when every
+// commit on the plan is already reachable from newBase. Child branches are
+// advanced under the same guard; branches with unique work are left alone.
+//
+// ponytail: moving a child ref leaves a running checkout with a stale index;
+// the worker must reset or checkout before continuing, as with MergeBranch.
+func FastForwardPlanBranch(repoDir, planBranch, newBase string, childBranches []string) (bool, error) {
+	oldPlan, err := revParse(repoDir, planBranch)
+	if err != nil {
+		return false, fmt.Errorf("resolve plan %s: %w", planBranch, err)
+	}
+	newTip, err := revParse(repoDir, newBase)
+	if err != nil {
+		return false, fmt.Errorf("resolve base %s: %w", newBase, err)
+	}
+
+	cmd := exec.Command("git", "merge-base", "--is-ancestor", oldPlan, newTip)
+	cmd.Dir = repoDir
+	if err := cmd.Run(); err != nil {
+		// Exit status 1 means the plan contains commits not in the base.
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("check plan ancestry: %w", err)
+	}
+
+	if oldPlan != newTip {
+		cmd = exec.Command("git", "update-ref", "refs/heads/"+planBranch, newTip, oldPlan)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return false, fmt.Errorf("fast-forward %s: %w\n%s", planBranch, err, out)
+		}
+	}
+
+	for _, childBranch := range childBranches {
+		oldChild, err := revParse(repoDir, childBranch)
+		if err != nil {
+			continue
+		}
+		cmd = exec.Command("git", "merge-base", "--is-ancestor", oldChild, newTip)
+		cmd.Dir = repoDir
+		if err := cmd.Run(); err != nil {
+			continue
+		}
+		if oldChild == newTip {
+			continue
+		}
+		cmd = exec.Command("git", "update-ref", "refs/heads/"+childBranch, newTip, oldChild)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return false, fmt.Errorf("fast-forward child %s: %w\n%s", childBranch, err, out)
+		}
+	}
+	return true, nil
+}
+
 // worktreeBranchHasCommits reports whether branchName carries any commits that
 // baseBranch doesn't, i.e. whether the worker actually committed to its branch
 // rather than escaping to the main checkout. Counting commits directly is the
@@ -151,6 +234,48 @@ func worktreeBranchHasCommits(wtDir, baseBranch, branchName string) (bool, error
 		return false, fmt.Errorf("parse commit count for %s: %w", branchName, err)
 	}
 	return n > 0, nil
+}
+
+func worktreeCurrentBranch(wtDir string) (string, error) {
+	cmd := exec.Command("git", "branch", "--show-current")
+	cmd.Dir = wtDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("read worktree branch: %w", err)
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" {
+		return "", fmt.Errorf("worktree is detached")
+	}
+	return branch, nil
+}
+
+// validateWorktree checks the cheap invariants that must hold before a worker
+// can spend time on a task. A fresh branch must start exactly at baseBranch;
+// reopened tasks are allowed to retain their existing commits.
+func validateWorktree(wtDir, branchName, baseBranch string, fresh bool) error {
+	branch, err := worktreeCurrentBranch(wtDir)
+	if err != nil {
+		return err
+	}
+	if branch != branchName {
+		return fmt.Errorf("worktree is on branch %s, expected %s", branch, branchName)
+	}
+	base, err := revParse(wtDir, baseBranch)
+	if err != nil {
+		return fmt.Errorf("resolve base branch %s: %w", baseBranch, err)
+	}
+	if !fresh {
+		return nil
+	}
+	head, err := revParse(wtDir, "HEAD")
+	if err != nil {
+		return fmt.Errorf("resolve worktree HEAD: %w", err)
+	}
+	if head != base {
+		return fmt.Errorf("fresh worktree starts at %s, expected base %s", head, base)
+	}
+	return nil
 }
 
 func RemoveWorktree(repoDir, wtDir, branchName string, deleteBranch bool) error {
