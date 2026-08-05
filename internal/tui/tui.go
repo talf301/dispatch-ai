@@ -206,7 +206,7 @@ func (m Model) refresh() tea.Cmd {
 				commit = commits[*t.Workdir]
 			}
 			r := row{task: t, agent: agent}
-			if t.Status == "unattended" {
+			if t.Status == "open" || t.Status == "active" || t.Status == "unattended" {
 				if notes, err := m.store.GetNotes(t.ID); err == nil {
 					for i := max(0, len(notes)-2); i < len(notes); i++ {
 						r.notes = append(r.notes, notes[i].Content)
@@ -926,6 +926,7 @@ func (m Model) writeRow(b *strings.Builder, r row, focused bool, width int) {
 func (m Model) taskBadge(r row) string {
 	t := r.task
 	badge := r.agent
+	round := fmt.Sprintf("round %d", t.RejectCount+1)
 	switch {
 	case r.badge != "":
 		return alertStyle.Render(r.badge)
@@ -941,15 +942,18 @@ func (m Model) taskBadge(r row) string {
 		return alertStyle.Render("blocked")
 	case t.Status == "blocked" && t.BlockReason != nil:
 		return alertStyle.Render("blocked")
+	case t.Status == "open":
+		return lipgloss.NewStyle().Foreground(yellow).Render("queued · " + round)
+	case t.Status == "active" && t.Reviewing:
+		return lipgloss.NewStyle().Foreground(mauve).Render("reviewing · " + round)
+	case t.Status == "active":
+		return lipgloss.NewStyle().Foreground(blue).Render("running · " + round)
 	case t.Status == "unattended" && t.Reviewing:
-		return lipgloss.NewStyle().Foreground(mauve).Render(fmt.Sprintf("under review · %d", t.RejectCount+1))
+		return lipgloss.NewStyle().Foreground(mauve).Render("reviewing · " + round)
 	case t.Status == "unattended" && r.agent == "working":
-		return lipgloss.NewStyle().Foreground(blue).Render("working")
+		return lipgloss.NewStyle().Foreground(blue).Render("running · " + round)
 	case t.Status == "unattended":
-		if t.RejectCount > 0 {
-			return lipgloss.NewStyle().Foreground(yellow).Render(fmt.Sprintf("waiting · %d retries", t.RejectCount))
-		}
-		return lipgloss.NewStyle().Foreground(yellow).Render("waiting")
+		return lipgloss.NewStyle().Foreground(yellow).Render("waiting · " + round)
 	case r.agent == "working":
 		return lipgloss.NewStyle().Foreground(blue).Render("working")
 	}

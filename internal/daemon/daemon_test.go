@@ -659,6 +659,13 @@ func TestDaemon_MonitorCleanExit(t *testing.T) {
 	if role := daemon.taskRoles[task.ID]; role != RoleReviewer {
 		t.Errorf("expected reviewer role, got %q", role)
 	}
+	reviewing, err := d.GetTaskV2(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reviewing.Reviewing {
+		t.Error("task is not marked reviewing while reviewer runs")
+	}
 
 	// Second monitorWorkers detects reviewer exit (clean) and completes the task.
 	daemon.monitorWorkers()
@@ -666,6 +673,13 @@ func TestDaemon_MonitorCleanExit(t *testing.T) {
 	// Worker should be removed from the map.
 	if _, exists := daemon.workers[task.ID]; exists {
 		t.Error("worker still in map after clean exit")
+	}
+	done, err := d.GetTaskV2(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Reviewing {
+		t.Error("task remained marked reviewing after reviewer exited")
 	}
 }
 

@@ -8,11 +8,26 @@ import (
 	"github.com/dispatch-ai/dispatch/internal/db"
 )
 
-func TestAutomationReviewBadge(t *testing.T) {
-	m := Model{}
-	badge := m.taskBadge(row{task: db.Task{Status: "unattended", Reviewing: true, RejectCount: 1}})
-	if !strings.Contains(badge, "under review · 2") {
-		t.Errorf("badge = %q", badge)
+func TestAutomationBadgesShowPhaseAndRound(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		task db.Task
+		want string
+	}{
+		{"queued", db.Task{Status: "open"}, "queued · round 1"},
+		{"running repair", db.Task{Status: "active", RejectCount: 1}, "running · round 2"},
+		{"reviewing", db.Task{Status: "active", Reviewing: true, RejectCount: 1}, "reviewing · round 2"},
+		{"walk-away running", db.Task{Status: "unattended", RejectCount: 2}, "running · round 3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := row{task: tc.task}
+			if tc.name == "walk-away running" {
+				r.agent = "working"
+			}
+			if badge := (Model{}).taskBadge(r); !strings.Contains(badge, tc.want) {
+				t.Errorf("badge = %q, want %q", badge, tc.want)
+			}
+		})
 	}
 }
 
@@ -57,7 +72,7 @@ func TestAutomationFocusedRowShowsRecentNotes(t *testing.T) {
 	}
 	defer database.Close()
 
-	task, err := database.AddTaskWithStatus("automation", "", "", "", nil, "unattended")
+	task, err := database.AddTaskWithStatus("automation", "", "", "", nil, "active")
 	if err != nil {
 		t.Fatal(err)
 	}

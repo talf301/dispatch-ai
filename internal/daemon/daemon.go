@@ -578,6 +578,9 @@ func (d *Daemon) spawnReady() {
 
 		// Spawn worker.
 		ctx := context.Background()
+		if err := d.db.SetReviewing(task.ID, false); err != nil {
+			d.logger.Printf("spawn: clear reviewing state %s: %v", task.ID, err)
+		}
 		model := d.cfg.WorkerModel
 		escalateAfter := d.cfg.WorkerEscalateAfter
 		if escalateAfter <= 0 {
@@ -787,6 +790,9 @@ func (d *Daemon) startReviewer(taskID string, task *db.Task, wtDir string) {
 
 	d.workers[taskID] = handle
 	d.taskRoles[taskID] = RoleReviewer
+	if err := d.db.SetReviewing(taskID, true); err != nil {
+		d.logger.Printf("review: save reviewing state %s: %v", taskID, err)
+	}
 	d.logger.Printf("spawned reviewer for task %s (pid %d)", taskID, handle.PID())
 }
 
@@ -986,6 +992,9 @@ func (d *Daemon) gpSyncChild(taskID string) {
 // handleReviewerResult requires an explicit approval verdict. Reviewer notes
 // get bounded automatic repair attempts; infrastructure failures block.
 func (d *Daemon) handleReviewerResult(taskID string, handle WorkerHandle, exitErr error) {
+	if err := d.db.SetReviewing(taskID, false); err != nil {
+		d.logger.Printf("review-result: clear reviewing state %s: %v", taskID, err)
+	}
 	ok, rejectReason, verdictErr := parseVerdict(handle.Output())
 
 	// Approval is decided by the verdict alone. A reviewer leaving an
@@ -1107,6 +1116,9 @@ func (d *Daemon) retryReviewer(taskID string) error {
 	d.noteCountAtReviewStart[taskID] = len(notes)
 	d.workers[taskID] = handle
 	d.taskRoles[taskID] = RoleReviewer
+	if err := d.db.SetReviewing(taskID, true); err != nil {
+		d.logger.Printf("review: save reviewing state %s: %v", taskID, err)
+	}
 	return nil
 }
 
