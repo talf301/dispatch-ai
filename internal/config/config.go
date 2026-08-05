@@ -25,8 +25,9 @@ type Config struct {
 const DefaultMaxWorkers = 4
 
 // LoadConfig parses and validates the config file at the given path.
-// It validates that paths are absolute, exist as git repos, rejects duplicates,
-// and applies default MaxWorkers where unset.
+// It validates that paths are absolute, rejects duplicates, and applies default
+// MaxWorkers where unset. Repository availability is checked when it is used so
+// a stale or temporarily unavailable repo cannot invalidate the whole config.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -45,16 +46,6 @@ func LoadConfig(path string) (*Config, error) {
 		// Validate absolute path.
 		if !filepath.IsAbs(r.Path) {
 			return nil, fmt.Errorf("repo path must be absolute: %q", r.Path)
-		}
-
-		// Validate path exists and is a git repo.
-		gitDir := filepath.Join(r.Path, ".git")
-		info, err := os.Stat(gitDir)
-		if err != nil {
-			return nil, fmt.Errorf("repo path %q is not a valid git repository: %w", r.Path, err)
-		}
-		if !info.IsDir() {
-			return nil, fmt.Errorf("repo path %q is not a valid git repository: .git is not a directory", r.Path)
 		}
 
 		// Reject duplicates.

@@ -26,7 +26,9 @@ func NewTuiCmd() *cobra.Command {
 			var repos []string
 			if cfg, err := config.LoadConfig(config.DefaultConfigPath()); err == nil {
 				for _, repo := range cfg.Repos {
-					repos = append(repos, repo.Path)
+					if _, err := gitToplevel(repo.Path); err == nil {
+						repos = append(repos, repo.Path)
+					}
 				}
 			}
 			cwd, _ := os.Getwd()
