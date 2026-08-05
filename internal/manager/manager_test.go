@@ -105,6 +105,7 @@ func TestRunWakesForTransitionFromAnotherDB(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- New(managerDB, f).Run(ctx) }()
+	time.Sleep(2 * eventPollInterval)
 	if _, err := writerDB.BlockTask(task.ID, "needs a decision"); err != nil {
 		t.Fatal(err)
 	}
