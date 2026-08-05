@@ -8,10 +8,13 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
 	"github.com/dispatch-ai/dispatch/internal/mux"
 )
+
+const eventPollInterval = 250 * time.Millisecond
 
 const (
 	workspaceKey = "manager.workspace"
@@ -119,11 +122,18 @@ func (m *Manager) startTUI(managerPane string) (string, error) {
 	return tuiPane, nil
 }
 
-// Run listens only to ledger transition events. The caller owns the lifetime;
-// unchanged periods produce no model activity.
+// Run listens for local ledger events and polls durable transition notes from
+// other processes. The caller owns the lifetime; unchanged periods produce no
+// model activity.
 func (m *Manager) Run(ctx context.Context) error {
 	events, cancel := m.db.Subscribe()
 	defer cancel()
+	wakeCursor, err := m.db.LatestNoteID()
+	if err != nil {
+		return err
+	}
+	ticker := time.NewTicker(eventPollInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -137,6 +147,18 @@ func (m *Manager) Run(ctx context.Context) error {
 			}
 			if err := m.Notify(event.TaskID); err != nil {
 				log.Printf("manager: notify %s: %v", event.TaskID, err)
+			}
+		case <-ticker.C:
+			transitions, nextCursor, err := m.db.ActionableTransitionsAfter(wakeCursor)
+			if err != nil {
+				log.Printf("manager: read actionable transitions: %v", err)
+				continue
+			}
+			wakeCursor = nextCursor
+			for _, event := range transitions {
+				if err := m.Notify(event.TaskID); err != nil {
+					log.Printf("manager: notify %s: %v", event.TaskID, err)
+				}
 			}
 		}
 	}
