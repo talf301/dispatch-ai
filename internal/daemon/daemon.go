@@ -22,13 +22,14 @@ import (
 
 // Config holds daemon configuration.
 type Config struct {
-	DBPath       string
-	Repos        map[string]config.RepoConfig // repoPath -> RepoConfig
-	BaseBranch   string                       // empty = auto-detect
-	PollInterval time.Duration
-	WorktreeBase string // default ~/.dispatch/worktrees
-	SessionDir   string // path to ~/.dispatch/sessions/
-	GPEnabled    bool   // Enable GraphPilot integration (gp sync-child on task completion)
+	DBPath         string
+	Repos          map[string]config.RepoConfig // repoPath -> RepoConfig
+	BaseBranch     string                       // empty = auto-detect
+	PollInterval   time.Duration
+	ReviewInterval time.Duration
+	WorktreeBase   string // default ~/.dispatch/worktrees
+	SessionDir     string // path to ~/.dispatch/sessions/
+	GPEnabled      bool   // Enable GraphPilot integration (gp sync-child on task completion)
 
 	// M5: unattended v2 dispatch. Nil Mux disables it (v1 loop unaffected).
 	Mux                   mux.Mux
@@ -43,10 +44,11 @@ type Config struct {
 func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
-		DBPath:       filepath.Join(home, ".dispatch", "dispatch.db"),
-		Repos:        make(map[string]config.RepoConfig),
-		PollInterval: 5 * time.Second,
-		WorktreeBase: filepath.Join(home, ".dispatch", "worktrees"),
+		DBPath:         filepath.Join(home, ".dispatch", "dispatch.db"),
+		Repos:          make(map[string]config.RepoConfig),
+		PollInterval:   5 * time.Second,
+		ReviewInterval: time.Hour,
+		WorktreeBase:   filepath.Join(home, ".dispatch", "worktrees"),
 	}
 }
 
@@ -77,10 +79,14 @@ type Daemon struct {
 	manager            *managerpkg.Manager
 	managerCwd         string
 	runCtx             context.Context
+	lastReviewScan     time.Time
 }
 
 // New creates a Daemon from the given config and spawner.
 func New(database *db.DB, cfg Config, spawner WorkerSpawner) *Daemon {
+	if cfg.ReviewInterval <= 0 {
+		cfg.ReviewInterval = time.Hour
+	}
 	repos := cfg.Repos
 	if repos == nil {
 		repos = make(map[string]config.RepoConfig)
@@ -1145,6 +1151,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 		}()
 	}
+	d.scanReview(time.Now())
+	d.lastReviewScan = time.Now()
 
 	ticker := time.NewTicker(d.cfg.PollInterval)
 	defer ticker.Stop()
@@ -1163,6 +1171,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.monitorWorkers()
 			d.monitorValidations()
 			d.scanUnattended(ctx)
+			if d.cfg.ReviewInterval <= 0 || time.Since(d.lastReviewScan) >= d.cfg.ReviewInterval {
+				d.scanReview(time.Now())
+				d.lastReviewScan = time.Now()
+			}
 			d.checkPendingPRs()
 			d.cleanOrphanedWorktrees()
 			d.logSummary()

@@ -53,6 +53,7 @@ func init() {
 	rootCmd.AddCommand(commands.NewRelabelCmd())
 	rootCmd.AddCommand(commands.NewPromoteCmd())
 	rootCmd.AddCommand(commands.NewTuiCmd())
+	rootCmd.AddCommand(commands.NewReviewCmd())
 	rootCmd.AddCommand(commands.NewManagerCmd())
 	rootCmd.AddCommand(commands.NewUsageCmd())
 	for _, cmd := range rootCmd.Commands() {

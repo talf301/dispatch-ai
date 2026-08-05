@@ -103,6 +103,24 @@ func (d *DB) GetTaskV2(taskID string) (*Task, error) {
 	return t, nil
 }
 
+// ReviewTasks returns every task with the v2 fields needed by the daemon scan.
+func (d *DB) ReviewTasks() ([]Task, error) {
+	rows, err := d.q.Query(`SELECT ` + taskColumnsV2 + ` FROM tasks ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("review tasks: %w", err)
+	}
+	defer rows.Close()
+	var out []Task
+	for rows.Next() {
+		t, err := d.scanTaskV2(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan review task: %w", err)
+		}
+		out = append(out, *t)
+	}
+	return out, rows.Err()
+}
+
 // SetLabel updates the display label. The label is a cache: it never feeds
 // retrieval or matching — thought does.
 func (d *DB) SetLabel(taskID, label string) error {
