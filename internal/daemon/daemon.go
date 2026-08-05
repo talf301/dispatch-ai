@@ -20,13 +20,14 @@ import (
 
 // Config holds daemon configuration.
 type Config struct {
-	DBPath       string
-	Repos        map[string]config.RepoConfig // repoPath -> RepoConfig
-	BaseBranch   string                       // empty = auto-detect
-	PollInterval time.Duration
-	WorktreeBase string // default ~/.dispatch/worktrees
-	SessionDir   string // path to ~/.dispatch/sessions/
-	GPEnabled    bool   // Enable GraphPilot integration (gp sync-child on task completion)
+	DBPath         string
+	Repos          map[string]config.RepoConfig // repoPath -> RepoConfig
+	BaseBranch     string                       // empty = auto-detect
+	PollInterval   time.Duration
+	ReviewInterval time.Duration
+	WorktreeBase   string // default ~/.dispatch/worktrees
+	SessionDir     string // path to ~/.dispatch/sessions/
+	GPEnabled      bool   // Enable GraphPilot integration (gp sync-child on task completion)
 
 	// M5: unattended v2 dispatch. Nil Mux disables it (v1 loop unaffected).
 	Mux           mux.Mux
@@ -37,10 +38,11 @@ type Config struct {
 func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
-		DBPath:       filepath.Join(home, ".dispatch", "dispatch.db"),
-		Repos:        make(map[string]config.RepoConfig),
-		PollInterval: 5 * time.Second,
-		WorktreeBase: filepath.Join(home, ".dispatch", "worktrees"),
+		DBPath:         filepath.Join(home, ".dispatch", "dispatch.db"),
+		Repos:          make(map[string]config.RepoConfig),
+		PollInterval:   5 * time.Second,
+		ReviewInterval: time.Hour,
+		WorktreeBase:   filepath.Join(home, ".dispatch", "worktrees"),
 	}
 }
 
@@ -52,12 +54,12 @@ type Daemon struct {
 	worktreeBase           string
 	repos                  map[string]config.RepoConfig // repoPath -> RepoConfig
 	baseBranch             string
-	gpBin                  string              // path to gp binary, empty if GP integration disabled
+	gpBin                  string                  // path to gp binary, empty if GP integration disabled
 	workers                map[string]WorkerHandle // taskID -> handle
-	workerRepo             map[string]string        // taskID -> repoPath
-	taskRoles              map[string]SpawnRole     // taskID -> current role
-	reviewRound            map[string]int           // taskID -> review round count
-	noteCountAtReviewStart map[string]int           // taskID -> note count when reviewer was spawned
+	workerRepo             map[string]string       // taskID -> repoPath
+	taskRoles              map[string]SpawnRole    // taskID -> current role
+	reviewRound            map[string]int          // taskID -> review round count
+	noteCountAtReviewStart map[string]int          // taskID -> note count when reviewer was spawned
 	logger                 *log.Logger
 
 	// M5: unattended v2 watchers (goroutines, unlike the tick-driven v1 path).
@@ -66,6 +68,7 @@ type Daemon struct {
 	sessionDir         string
 	mu                 sync.Mutex
 	watchingUnattended map[string]bool
+	lastReviewScan     time.Time
 }
 
 // New creates a Daemon from the given config and spawner.
@@ -247,11 +250,11 @@ func newAdoptedHandle(pid int, committed func() bool) *adoptedHandle {
 	return h
 }
 
-func (h *adoptedHandle) PID() int             { return h.pid }
+func (h *adoptedHandle) PID() int              { return h.pid }
 func (h *adoptedHandle) Done() <-chan struct{} { return h.done }
-func (h *adoptedHandle) Err() error           { <-h.done; return h.exitErr }
-func (h *adoptedHandle) Wait() error          { return h.Err() }
-func (h *adoptedHandle) Output() string       { return h.output }
+func (h *adoptedHandle) Err() error            { <-h.done; return h.exitErr }
+func (h *adoptedHandle) Wait() error           { return h.Err() }
+func (h *adoptedHandle) Output() string        { return h.output }
 
 // taskRepoPath returns the repo path for a task. A task without a repo field
 // only resolves when exactly one repo is configured — with several, map
@@ -691,6 +694,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	d.recoverActive()
 	d.cleanOrphanedWorktrees()
+	d.scanReview(time.Now())
+	d.lastReviewScan = time.Now()
 
 	ticker := time.NewTicker(d.cfg.PollInterval)
 	defer ticker.Stop()
@@ -705,6 +710,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.spawnReady()
 			d.monitorWorkers()
 			d.scanUnattended(ctx)
+			if d.cfg.ReviewInterval <= 0 || time.Since(d.lastReviewScan) >= d.cfg.ReviewInterval {
+				d.scanReview(time.Now())
+				d.lastReviewScan = time.Now()
+			}
 			d.checkPendingPRs()
 			d.cleanOrphanedWorktrees()
 			d.logSummary()
