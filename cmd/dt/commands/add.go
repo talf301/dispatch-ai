@@ -2,22 +2,21 @@ package commands
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/dispatch-ai/dispatch/internal/db"
 	"github.com/spf13/cobra"
 )
 
-func warnIfBlockerIsBlocked(database *db.DB, blockerID string) {
+func warnIfBlockerIsBlocked(database *db.DB, blockerID string) string {
 	task, err := database.GetTask(blockerID)
 	if err != nil || task.Status != "blocked" {
-		return
+		return ""
 	}
 	reason := "unspecified"
 	if task.BlockReason != nil && *task.BlockReason != "" {
 		reason = *task.BlockReason
 	}
-	fmt.Fprintf(os.Stderr, "warning: task %s is currently blocked (reason: %s). This new task will not be schedulable until %s reaches done. If this task is meant to unblock %s, do not use --after; file it without the dependency.\n", blockerID, reason, blockerID, blockerID)
+	return fmt.Sprintf("warning: task %s is currently blocked (reason: %s). The dependent task will not be schedulable until %s reaches done. If the dependent work is meant to unblock %s, do not create this dependency.", blockerID, reason, blockerID, blockerID)
 }
 
 // NewAddCmd returns the cobra command for adding a task.
@@ -35,7 +34,9 @@ func NewAddCmd() *cobra.Command {
 			parent, _ := cmd.Flags().GetString("parent")
 			after, _ := cmd.Flags().GetString("after")
 			if after != "" {
-				warnIfBlockerIsBlocked(d, after)
+				if warning := warnIfBlockerIsBlocked(d, after); warning != "" {
+					cmd.PrintErrln(warning)
+				}
 			}
 
 			var repo *string
