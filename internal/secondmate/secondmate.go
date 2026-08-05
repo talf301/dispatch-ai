@@ -47,14 +47,19 @@ func (i *Investigator) Run() ([]Result, error) {
 		return nil, err
 	}
 	results := make([]Result, 0, len(tasks))
+	var firstErr error
 	for _, task := range tasks {
 		result, err := i.investigate(task)
 		if err != nil {
-			return results, err
+			if firstErr == nil {
+				firstErr = err
+			}
+			results = append(results, Result{TaskID: task.ID, Action: ActionInvestigate, Outcome: err.Error()})
+			continue
 		}
 		results = append(results, result)
 	}
-	return results, nil
+	return results, firstErr
 }
 
 func (i *Investigator) investigate(task db.Task) (Result, error) {
@@ -98,7 +103,11 @@ func (i *Investigator) investigate(task db.Task) (Result, error) {
 	classification := ClassificationOptions
 	action := ActionInvestigate
 	outcome := fmt.Sprintf("reviewed block reason, %d task notes, and current task state", len(notes))
-	if emptyPR.MatchString(reason) {
+	kind, err := i.DB.BlockKind(task.ID)
+	if err != nil {
+		return Result{}, err
+	}
+	if kind == db.BlockKindPRCreateFailed && emptyPR.MatchString(reason) {
 		classification = ClassificationAuto
 		action = ActionReopen
 		if _, err := i.DB.ReopenTask(task.ID); err != nil {
@@ -107,11 +116,11 @@ func (i *Investigator) investigate(task db.Task) (Result, error) {
 			outcome = "reopened after confirmed empty-diff PR creation failure"
 		}
 	} else {
-		classification = classificationFor(reason)
+		classification = classificationFor(kind, reason)
 		action = ActionPresentOptions
-		outcome = "no deterministic fix found; human must choose the next action"
+		outcome = optionsFor(kind, classification)
 		if i.Notify != nil {
-			message := fmt.Sprintf("Secondmate investigated blocked task %s (%s). Options: inspect/fix the blocker and reopen, create a follow-up task that resolves it, or leave it blocked. Reason: %s", task.ID, task.Title, bounded(reason, 500))
+			message := fmt.Sprintf("Secondmate investigated blocked task %s (%s). %s Reason: %s", task.ID, task.Title, outcome, bounded(reason, 500))
 			if err := i.Notify(task.ID, message); err != nil {
 				outcome += "; manager notification failed: " + err.Error()
 			}
@@ -120,15 +129,35 @@ func (i *Investigator) investigate(task db.Task) (Result, error) {
 	return i.record(task, reason, classification, action, outcome, key, count)
 }
 
-func classificationFor(reason string) string {
-	lower := strings.ToLower(reason)
-	if strings.Contains(lower, "merge conflict") || strings.Contains(lower, "merge conflict merging") {
+func classificationFor(kind, reason string) string {
+	switch kind {
+	case db.BlockKindMergeConflict:
 		return ClassificationNotAutoUnblockable
-	}
-	if strings.Contains(lower, "missing prerequisite") || strings.Contains(lower, "prerequisite") || strings.Contains(lower, "not installed") {
-		return ClassificationInvestigatableNotFixable
+	case db.BlockKindPRCreateFailed:
+		return ClassificationOptions
+	case "":
+		// Legacy/manual blocks predate BlockKind. Keep only the recorded
+		// prerequisite wording as a compatibility fixture; novel prose is not
+		// trusted as a lifecycle signal.
+		if strings.Contains(strings.ToLower(reason), "required prerequisite is unavailable in this environment") {
+			return ClassificationInvestigatableNotFixable
+		}
 	}
 	return ClassificationOptions
+}
+
+func optionsFor(kind, classification string) string {
+	switch kind {
+	case db.BlockKindMergeConflict:
+		return "Options: create a new task that merges the conflicting sibling tip and resolves both sides, or leave this task blocked; reopening it will likely hit the same conflict."
+	case db.BlockKindPRCreateFailed:
+		return "Options: check whether the branch's work already landed via another PR and whether the base is stale, then reopen if appropriate, or leave it blocked."
+	case "":
+		if classification == ClassificationInvestigatableNotFixable {
+			return "Options: make the required prerequisite available and verify it, then reopen once; create a follow-up task to add it, or leave this task blocked."
+		}
+	}
+	return "Options: inspect the blocker and choose whether to fix and reopen, create a follow-up task, or leave it blocked."
 }
 
 func (i *Investigator) record(task db.Task, reason, classification, action, outcome, key string, count int) (Result, error) {
