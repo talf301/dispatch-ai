@@ -294,6 +294,7 @@ func (d *Daemon) spawnReady() {
 
 	// Count active workers per repo.
 	activePerRepo := make(map[string]int)
+	fetchedRepo := make(map[string]string)
 	for _, repoPath := range d.workerRepo {
 		activePerRepo[repoPath]++
 	}
@@ -315,6 +316,45 @@ func (d *Daemon) spawnReady() {
 			continue
 		}
 
+		baseBranch := d.baseBranch
+		if baseBranch == "" {
+			baseBranch, err = DetectDefaultBranch(repoPath)
+			if err != nil {
+				d.logger.Printf("spawn: detect base for %s: %v, skipping", task.ID, err)
+				continue
+			}
+		}
+		if fetchedRepo[repoPath] == "" {
+			if err := FetchOriginBranch(repoPath, baseBranch); err != nil {
+				d.logger.Printf("spawn: refresh base for %s: %v, skipping", task.ID, err)
+				continue
+			}
+			fetchedRepo[repoPath] = baseBranch
+		}
+		baseRef := baseBranch
+		if BranchExists(repoPath, "origin/"+baseBranch) {
+			baseRef = "origin/" + baseBranch
+		}
+
+		if task.ParentID != nil {
+			planBranch := fmt.Sprintf("dispatch/plan-%s", *task.ParentID)
+			if BranchExists(repoPath, planBranch) {
+				children, childErr := d.db.GetChildren(*task.ParentID)
+				if childErr != nil {
+					d.logger.Printf("spawn: children for plan %s: %v, skipping", *task.ParentID, childErr)
+					continue
+				}
+				childBranches := make([]string, 0, len(children))
+				for _, child := range children {
+					childBranches = append(childBranches, fmt.Sprintf("dispatch/%s", child.ID))
+				}
+				if _, err := FastForwardPlanBranch(repoPath, planBranch, baseRef, childBranches); err != nil {
+					d.logger.Printf("spawn: refresh plan %s: %v, skipping", *task.ParentID, err)
+					continue
+				}
+			}
+		}
+
 		// Claim first to prevent double-spawn.
 		sessionID := fmt.Sprintf("dispatchd-%s", task.ID)
 		if _, err := d.db.ClaimTask(task.ID, sessionID); err != nil {
@@ -329,15 +369,11 @@ func (d *Daemon) spawnReady() {
 		if _, statErr := os.Stat(wtDir); statErr != nil {
 			// Worktree doesn't exist — create it.
 			// Determine which branch to base the worktree on.
-			baseBranch := d.baseBranch
+			baseBranch := baseRef
 			if task.ParentID != nil {
 				parentBranch := fmt.Sprintf("dispatch/plan-%s", *task.ParentID)
 				if !BranchExists(repoPath, parentBranch) {
-					base := d.baseBranch
-					if base == "" {
-						base, _ = DetectDefaultBranch(repoPath)
-					}
-					cmd := exec.Command("git", "branch", parentBranch, base)
+					cmd := exec.Command("git", "branch", parentBranch, baseRef)
 					cmd.Dir = repoPath
 					if out, err := cmd.CombinedOutput(); err != nil {
 						d.logger.Printf("spawn: create parent branch %s: %v\n%s", parentBranch, err, out)

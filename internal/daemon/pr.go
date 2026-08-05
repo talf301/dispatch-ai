@@ -11,15 +11,6 @@ import (
 // createPR pushes the plan branch and creates a GitHub PR for a completed parent task.
 func (d *Daemon) createPR(repoPath string, parentTask db.Task) error {
 	planBranch := fmt.Sprintf("dispatch/plan-%s", parentTask.ID)
-
-	// Push the plan branch to origin.
-	pushCmd := exec.Command("git", "push", "origin", planBranch)
-	pushCmd.Dir = repoPath
-	if out, err := pushCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git push: %w\n%s", err, out)
-	}
-
-	// Detect the default branch for the PR base.
 	baseBranch := d.baseBranch
 	if baseBranch == "" {
 		var err error
@@ -27,6 +18,16 @@ func (d *Daemon) createPR(repoPath string, parentTask db.Task) error {
 		if err != nil {
 			return fmt.Errorf("detect default branch: %w", err)
 		}
+	}
+	if err := FetchOriginBranch(repoPath, baseBranch); err != nil {
+		return fmt.Errorf("refresh default branch: %w", err)
+	}
+
+	// Push the plan branch to origin.
+	pushCmd := exec.Command("git", "push", "origin", planBranch)
+	pushCmd.Dir = repoPath
+	if out, err := pushCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git push: %w\n%s", err, out)
 	}
 
 	// Fetch notes on the parent task for the PR body.

@@ -334,6 +334,72 @@ func TestWorktreeBranchHasCommits(t *testing.T) {
 	}
 }
 
+func TestFetchAndFastForwardPlanBranch(t *testing.T) {
+	repo := initTestRepo(t)
+	base, err := DetectDefaultBranch(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plan := "dispatch/plan-test"
+	child := "dispatch/child-test"
+	for _, branch := range []string{plan, child} {
+		cmd := exec.Command("git", "branch", branch, base)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("create %s: %v\n%s", branch, err, out)
+		}
+	}
+	cmd := exec.Command("git", "commit", "--allow-empty", "-m", "advance base")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("advance base: %v\n%s", err, out)
+	}
+
+	moved, err := FastForwardPlanBranch(repo, plan, base, []string{child})
+	if err != nil || !moved {
+		t.Fatalf("fast-forward = (%v, %v), want (true, nil)", moved, err)
+	}
+	baseTip, _ := revParse(repo, base)
+	for _, branch := range []string{plan, child} {
+		tip, _ := revParse(repo, branch)
+		if tip != baseTip {
+			t.Errorf("%s tip = %s, want %s", branch, tip, baseTip)
+		}
+	}
+
+	uniquePlan := "dispatch/plan-unique"
+	uniqueWT := filepath.Join(t.TempDir(), "unique")
+	if err := CreateWorktree(repo, uniqueWT, uniquePlan, base); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("git", "commit", "--allow-empty", "-m", "unique plan work")
+	cmd.Dir = uniqueWT
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("unique commit: %v\n%s", err, out)
+	}
+	if err := RemoveWorktree(repo, uniqueWT, uniquePlan, false); err != nil {
+		t.Fatal(err)
+	}
+	uniqueTip, _ := revParse(repo, uniquePlan)
+	cmd = exec.Command("git", "commit", "--allow-empty", "-m", "advance base again")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("advance base again: %v\n%s", err, out)
+	}
+	moved, err = FastForwardPlanBranch(repo, uniquePlan, base, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved {
+		t.Error("unique plan was fast-forwarded")
+	}
+	got, _ := revParse(repo, uniquePlan)
+	if got != uniqueTip {
+		t.Errorf("unique plan tip changed from %s to %s", uniqueTip, got)
+	}
+}
+
 func TestRemoveWorktree_KeepBranch(t *testing.T) {
 	repo := initTestRepo(t)
 	wtDir := filepath.Join(t.TempDir(), "wt-keep")
