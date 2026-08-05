@@ -43,6 +43,13 @@ func TestCreatePR_ZeroDiffSkipsGH(t *testing.T) {
 	if len(notes) != 1 || !contains(notes[0].Content, "no commits relative to origin/main") {
 		t.Fatalf("unexpected zero-diff note: %+v", notes)
 	}
+	pending, err := d.PendingPRParents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("zero-diff task remained pending PR: %+v", pending)
+	}
 }
 
 func TestCreatePR_GitCountErrorFallsThroughToGH(t *testing.T) {
